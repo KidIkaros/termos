@@ -25,6 +25,10 @@ pub struct UserConfig {
     pub startup: StartupConfig,
     #[serde(default)]
     pub daemon: DaemonConfig,
+    /// Lifecycle hooks: event name → shell command or array of shell commands.
+    /// Loaded into `hooks::Manager` at startup (see `internal/hooks/hooks.go`).
+    #[serde(default)]
+    pub hooks: std::collections::HashMap<String, toml::Value>,
 }
 
 /// Appearance settings.
@@ -172,6 +176,7 @@ impl UserConfig {
             keybindings: KeybindingsConfig::default(),
             startup: StartupConfig::default(),
             daemon: DaemonConfig::default(),
+            hooks: std::collections::HashMap::new(),
         };
         cfg.keybindings.fill_missing();
         cfg
