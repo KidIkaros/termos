@@ -136,3 +136,111 @@ fn daemon_lists_and_kills_missing_session() {
     let list = client.list().unwrap();
     assert!(list.is_empty());
 }
+
+/// The daemon fires window-lifecycle hooks for the windows it spawns and
+/// closes (the authoritative fire sites for daemon-mode windows).
+#[test]
+fn daemon_fires_window_lifecycle_hooks() {
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    isolate_state_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("tuios.sock");
+
+    let daemon = Arc::new(Daemon::new());
+    // Register placeholder commands so `fire` runs (the runner replaces their
+    // execution) — mirroring the CLI's `daemon.load_hooks(&config.hooks)`.
+    let mut hook_cfg = std::collections::HashMap::new();
+    for ev in [
+        "after-new-window",
+        "after-close-window",
+        "after-focus-change",
+        "after-workspace-switch",
+        "after-attach",
+        "after-detach",
+        "after-layout-change",
+        "after-resize",
+        "after-agent-state",
+    ] {
+        hook_cfg.insert(ev.to_string(), toml::Value::String("dummy".into()));
+    }
+    daemon.load_hooks(&hook_cfg);
+    let seen: Arc<Mutex<Vec<(tuios::hooks::Event, String, String)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let seen2 = Arc::clone(&seen);
+    daemon.set_hook_runner(move |_, ctx| {
+        if let Some(ev) = ctx.event {
+            seen2.lock().unwrap().push((ev, ctx.session_id.clone(), ctx.window_id.clone()));
+        }
+    });
+    let path = socket.clone();
+    std::thread::spawn(move || {
+        let _ = daemon.run(&path);
+    });
+
+    let client = loop {
+        match DaemonClient::connect_to(&socket) {
+            Ok(c) => break c,
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+
+    let wait_until = |pred: &dyn Fn(&(tuios::hooks::Event, String, String)) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let hit = seen.lock().unwrap().iter().any(pred);
+            if hit || Instant::now() >= deadline {
+                return hit;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+
+    // Creating a session spawns its first window (w0) → after-new-window.
+    client.new_session("hooks", "/bin/sh").unwrap();
+    assert!(wait_until(&|(e, sess, wid)| {
+        *e == tuios::hooks::Event::AfterNewWindow && sess == "hooks" && wid == "w0"
+    }));
+
+    // Adding a window over the protocol → after-new-window for the new id.
+    client.attach("hooks").unwrap();
+    client
+        .send(&Message::NewWindow {
+            shell: "/bin/sh".to_string(),
+            workspace: 1,
+        })
+        .unwrap();
+    client.set_read_timeout(Duration::from_secs(3)).unwrap();
+    let mut added = false;
+    for _ in 0..40 {
+        if let Ok(Message::WindowAdded { .. }) = client.recv() {
+            added = true;
+            break;
+        }
+    }
+    assert!(added, "no WindowAdded reply");
+    assert!(wait_until(&|(e, sess, wid)| {
+        *e == tuios::hooks::Event::AfterNewWindow && sess == "hooks" && wid == "w1"
+    }));
+
+    // Closing a window → after-close-window for that id.
+    client
+        .send(&Message::CloseWindow {
+            window: "w1".to_string(),
+        })
+        .unwrap();
+    let mut closed = false;
+    for _ in 0..40 {
+        if let Ok(Message::WindowClosed { window }) = client.recv() {
+            if window == "w1" {
+                closed = true;
+                break;
+            }
+        }
+    }
+    assert!(closed, "no WindowClosed reply");
+    assert!(wait_until(&|(e, sess, wid)| {
+        *e == tuios::hooks::Event::AfterCloseWindow && sess == "hooks" && wid == "w1"
+    }));
+}

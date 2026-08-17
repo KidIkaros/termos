@@ -50,6 +50,7 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     match args[1].as_str() {
         "daemon" => {
             let daemon = Arc::new(Daemon::new());
+            daemon.load_hooks(&UserConfig::load().hooks);
             daemon.restore_saved();
             daemon.run_default()?;
             Ok(())
@@ -165,6 +166,7 @@ fn run_remote_tui(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut os = Os::new(config);
     os.remote_session = Some(current.clone());
     os.remote_sessions = sessions.clone();
+    os.fire_attached();
 
     // All daemon-bound messages flow through one channel so input, resize,
     // and control requests stay ordered.
@@ -212,7 +214,9 @@ fn run_remote_tui(name: &str) -> Result<(), Box<dyn std::error::Error>> {
         &mut current,
     );
 
-    // Cleanup: detach and restore the terminal.
+    // Cleanup: fire the after-detach hook (draining in-flight hooks), detach
+    // and restore the terminal.
+    os.fire_detached();
     let _ = client.send(&Message::Detach);
     disable_raw_mode()?;
     execute!(

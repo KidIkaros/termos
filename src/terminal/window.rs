@@ -102,10 +102,14 @@ impl Window {
     }
 
     /// Resize the PTY and the emulator (a no-op when the size is unchanged).
-    pub fn resize(&mut self, size: WinSize) {
+    /// Returns true when a new size was applied after the initial sizing —
+    /// i.e. a real resize, not the first layout application. Used by the
+    /// after-resize hook so it does not fire for every window at startup.
+    pub fn resize(&mut self, size: WinSize) -> bool {
         if self.last_size == Some(size) {
-            return;
+            return false;
         }
+        let changed = self.last_size.is_some();
         self.last_size = Some(size);
         if let Some(writer) = &self.writer {
             writer.resize(size);
@@ -113,6 +117,7 @@ impl Window {
         if let Ok(mut emu) = self.emulator.lock() {
             emu.resize(size.cols as i32, size.rows as i32);
         }
+        changed
     }
 
     pub fn set_reading(&self, reading: bool) {

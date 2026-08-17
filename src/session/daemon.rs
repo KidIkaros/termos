@@ -100,6 +100,9 @@ pub struct Daemon {
     manager: Manager,
     windows: Mutex<HashMap<String, Vec<LiveWindow>>>,
     broadcast: Mutex<HashMap<String, Arc<SessionBroadcast>>>,
+    /// Lifecycle hooks fired daemon-side for the window/session events the
+    /// daemon owns (authoritative for daemon-mode windows).
+    hook_manager: crate::hooks::Manager,
 }
 
 impl Daemon {
@@ -108,7 +111,28 @@ impl Daemon {
             manager: Manager::new(),
             windows: Mutex::new(HashMap::new()),
             broadcast: Mutex::new(HashMap::new()),
+            hook_manager: crate::hooks::Manager::new(),
         }
+    }
+
+    /// Load hooks from the `[hooks]` config section (called by the CLI before
+    /// the daemon accepts clients; kept separate so tests start hook-free).
+    pub fn load_hooks(&self, hook_config: &std::collections::HashMap<String, toml::Value>) {
+        self.hook_manager.load_from_config(hook_config);
+    }
+
+    /// Test seam: replace the hook command runner.
+    pub fn set_hook_runner<F>(&self, run: F)
+    where
+        F: Fn(&str, &crate::hooks::Context) + Send + Sync + 'static,
+    {
+        self.hook_manager.set_runner(run);
+    }
+
+    /// Fire a hook with the session name in the context.
+    fn fire_hook(&self, event: crate::hooks::Event, session: &str, mut ctx: crate::hooks::Context) {
+        ctx.session_id = session.to_string();
+        self.hook_manager.fire(event, ctx);
     }
 
     /// The session list with window counts and attach state.
@@ -151,6 +175,16 @@ impl Daemon {
             .map_err(|e| e.to_string())?;
         let broadcast = self.broadcast_for(name);
         let window = self.spawn_window("w0", "Terminal", 1, &cfg.shell, &broadcast)?;
+        self.fire_hook(
+            crate::hooks::Event::AfterNewWindow,
+            name,
+            crate::hooks::Context {
+                window_id: "w0".into(),
+                window_name: "Terminal".into(),
+                workspace: 1,
+                ..crate::hooks::Context::default()
+            },
+        );
         self.windows
             .lock()
             .unwrap()
@@ -277,6 +311,16 @@ impl Daemon {
         wins.push(live);
         drop(windows);
         self.save_session(session);
+        self.fire_hook(
+            crate::hooks::Event::AfterNewWindow,
+            session,
+            crate::hooks::Context {
+                window_id: info.id.clone(),
+                window_name: info.title.clone(),
+                workspace: info.workspace,
+                ..crate::hooks::Context::default()
+            },
+        );
         self.broadcast_event(session, &Message::WindowAdded { window: info.clone() });
         Ok(info)
     }
@@ -287,12 +331,28 @@ impl Daemon {
             .get_mut(session)
             .ok_or_else(|| format!("session '{session}' not found"))?;
         let before = wins.len();
+        let closed: Option<WindowInfo> = wins
+            .iter()
+            .find(|w| w.info.id == window)
+            .map(|w| w.info.clone());
         wins.retain(|w| w.info.id != window);
         if wins.len() == before {
             return Err(format!("window '{window}' not found"));
         }
         drop(windows);
         self.save_session(session);
+        if let Some(info) = closed {
+            self.fire_hook(
+                crate::hooks::Event::AfterCloseWindow,
+                session,
+                crate::hooks::Context {
+                    window_id: info.id.clone(),
+                    window_name: info.title.clone(),
+                    workspace: info.workspace,
+                    ..crate::hooks::Context::default()
+                },
+            );
+        }
         self.broadcast_event(session, &Message::WindowClosed { window: window.to_string() });
         Ok(())
     }

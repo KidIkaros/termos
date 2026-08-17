@@ -11,9 +11,11 @@ pub mod render;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::config::userconfig::UserConfig;
 use crate::config::Theme;
+use crate::hooks;
 use crate::layout::{AutoScheme, BSPTree, PreselectionDir, Rect, SplitType};
 use crate::session::model::WindowInfo;
 use crate::session::protocol::Message;
@@ -294,6 +296,8 @@ pub struct Os {
     /// A pending split direction to apply when the next remote window is
     /// announced (set by split keybindings in remote mode).
     pub pending_split: Option<SplitType>,
+    /// Lifecycle hooks, loaded from the `[hooks]` config section.
+    pub hook_manager: hooks::Manager,
 }
 
 /// A dock notification.
@@ -315,6 +319,8 @@ impl Os {
             Theme::built_in(&config.appearance.theme)
         };
         let shared_borders = config.appearance.shared_borders;
+        let hook_manager = hooks::Manager::new();
+        hook_manager.load_from_config(&config.hooks);
         Self {
             windows: Vec::new(),
             focused_window: None,
@@ -353,7 +359,62 @@ impl Os {
             pending_kill: None,
             remote_commands: None,
             pending_split: None,
+            hook_manager,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Hooks
+    // -----------------------------------------------------------------------
+
+    /// Build a hook context for a window index, filled with its id/title and
+    /// the current workspace/session (the Go `FireHook` helper behavior).
+    fn window_hook_ctx(&self, index: usize) -> hooks::Context {
+        let mut ctx = hooks::Context::default();
+        if let Some(w) = self.windows.get(index) {
+            ctx.window_id = w.id.clone();
+            ctx.window_name = w.title.clone();
+        }
+        ctx.workspace = self.current_workspace;
+        ctx.session_id = self.remote_session.clone().unwrap_or_default();
+        ctx
+    }
+
+    /// Fire a hook, auto-filling workspace and session when the context left
+    /// them unset (Go's `FireHookContext` behavior, os_notify.go).
+    pub fn fire_hook(&self, event: hooks::Event, mut ctx: hooks::Context) {
+        if ctx.workspace == 0 {
+            ctx.workspace = self.current_workspace;
+        }
+        if ctx.session_id.is_empty() {
+            ctx.session_id = self.remote_session.clone().unwrap_or_default();
+        }
+        self.hook_manager.fire(event, ctx);
+    }
+
+    /// Fire the after-attach hook (client attach path).
+    pub fn fire_attached(&self) {
+        self.fire_hook(hooks::Event::AfterAttach, hooks::Context::default());
+    }
+
+    /// Fire the after-detach hook and drain in-flight hooks for up to 2s so
+    /// they land before the client exits (Go's `FireDetached`).
+    pub fn fire_detached(&self) {
+        self.fire_hook(hooks::Event::AfterDetach, hooks::Context::default());
+        self.hook_manager.wait_timeout(Duration::from_secs(2));
+    }
+
+    /// Fire the after-layout-change hook (once per mutation). The port
+    /// currently only runs BSP tiling, so this fires with `bsp`; layout
+    /// switches (master-stack/scrolling) will call it when they land.
+    pub fn fire_layout_changed(&self) {
+        self.fire_hook(
+            hooks::Event::AfterLayoutChange,
+            hooks::Context {
+                layout: "bsp".into(),
+                ..hooks::Context::default()
+            },
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -419,6 +480,8 @@ impl Os {
         }
         self.workspace_mut(ws).focused = Some(index);
         self.focused_window = Some(index);
+        let ctx = self.window_hook_ctx(index);
+        self.fire_hook(hooks::Event::AfterNewWindow, ctx);
         Ok(index)
     }
 
@@ -433,10 +496,14 @@ impl Os {
         }
     }
 
-    /// Close the focused window, collapsing the BSP tree.
+    /// Close the focused window, collapsing the BSP tree. Local close path:
+    /// remote closes are initiated daemon-side, which fires its own
+    /// after-close-window hook, so this does not double-fire.
     pub fn close_focused_window(&mut self) {
         if let Some(focused) = self.focused_window {
+            let ctx = self.window_hook_ctx(focused);
             self.remove_window(focused);
+            self.fire_hook(hooks::Event::AfterCloseWindow, ctx);
         }
     }
 
@@ -595,8 +662,12 @@ impl Os {
             }
             None => ids[0],
         };
-        self.focused_window = Some(next as usize);
-        self.workspace_mut(ws).focused = Some(next as usize);
+        if self.focused_window != Some(next as usize) {
+            self.focused_window = Some(next as usize);
+            self.workspace_mut(ws).focused = Some(next as usize);
+            let ctx = self.window_hook_ctx(next as usize);
+            self.fire_hook(hooks::Event::AfterFocusChange, ctx);
+        }
     }
 
     pub fn focus_prev(&mut self) {
@@ -614,16 +685,24 @@ impl Os {
             }
             None => ids[0],
         };
-        self.focused_window = Some(next as usize);
-        self.workspace_mut(ws).focused = Some(next as usize);
+        if self.focused_window != Some(next as usize) {
+            self.focused_window = Some(next as usize);
+            self.workspace_mut(ws).focused = Some(next as usize);
+            let ctx = self.window_hook_ctx(next as usize);
+            self.fire_hook(hooks::Event::AfterFocusChange, ctx);
+        }
     }
 
     /// Focus the window at the given index (if on the current workspace).
     pub fn focus_window(&mut self, index: usize) {
         let ws = self.current_workspace;
-        if self.workspace(ws).tree.has_window(index as i32) {
+        if self.workspace(ws).tree.has_window(index as i32)
+            && self.focused_window != Some(index)
+        {
             self.focused_window = Some(index);
             self.workspace_mut(ws).focused = Some(index);
+            let ctx = self.window_hook_ctx(index);
+            self.fire_hook(hooks::Event::AfterFocusChange, ctx);
         }
     }
 
@@ -635,9 +714,22 @@ impl Os {
         if !(1..=9).contains(&number) {
             return;
         }
+        let previous = self.current_workspace;
+        if number == previous {
+            return;
+        }
         self.current_workspace = number;
         self.focused_window = self.workspace(number).focused;
         self.prefix = Prefix::None;
+        // Go does not fire when switching to the already-visible workspace.
+        let ctx = self.window_hook_ctx(self.focused_window.unwrap_or(0));
+        self.fire_hook(
+            hooks::Event::AfterWorkspaceSwitch,
+            hooks::Context {
+                previous_workspace: previous,
+                ..ctx
+            },
+        );
     }
 
     /// Move the focused window to another workspace and follow it.
@@ -699,6 +791,8 @@ impl Os {
         tree.insert_window(index as i32, focused, direction, 0.5, bounds, gap);
         self.workspace_mut(ws).focused = Some(index);
         self.focused_window = Some(index);
+        let ctx = self.window_hook_ctx(index);
+        self.fire_hook(hooks::Event::AfterNewWindow, ctx);
         Ok(index)
     }
 
@@ -727,18 +821,29 @@ impl Os {
         }
     }
 
-    /// Resize all windows to their BSP layout rects.
+    /// Resize all windows to their BSP layout rects. Windows whose size
+    /// actually changed after the initial layout fire the after-resize hook.
     pub fn sync_window_sizes(&mut self) {
         let ws = self.current_workspace;
         let bounds = self.workspace_bounds(ws);
         let layout = self.workspace(ws).tree.apply_layout(bounds, self.gap);
+        let mut resized = Vec::new();
         for (window_id, rect) in layout {
             if let Some(window) = self.windows.get_mut(window_id as usize) {
-                window.resize(WinSize {
+                let changed = window.resize(WinSize {
                     cols: rect.w.max(1) as u16,
                     rows: rect.h.max(1) as u16,
                 });
+                if changed {
+                    resized.push((window_id as usize, rect));
+                }
             }
+        }
+        for (index, rect) in resized {
+            let mut ctx = self.window_hook_ctx(index);
+            ctx.width = rect.w;
+            ctx.height = rect.h;
+            self.fire_hook(hooks::Event::AfterResize, ctx);
         }
     }
 
@@ -1357,6 +1462,65 @@ mod tests {
             .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
         assert_eq!(os.window_at(10, 5), Some(0));
         assert_eq!(os.window_at(10, 10_000), None);
+    }
+
+    #[test]
+    fn hooks_fire_on_window_lifecycle_events() {
+        let mut os = test_os();
+        let seen: Arc<Mutex<Vec<(hooks::Event, hooks::Context)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        os.hook_manager.set_runner(move |_, ctx| {
+            if let Some(ev) = ctx.event {
+                seen2.lock().unwrap().push((ev, ctx.clone()));
+            }
+        });
+        // `fire` only runs registered commands; the runner just replaces their
+        // execution, so register a placeholder for each event under test.
+        for ev in [
+            hooks::Event::AfterNewWindow,
+            hooks::Event::AfterFocusChange,
+            hooks::Event::AfterWorkspaceSwitch,
+            hooks::Event::AfterCloseWindow,
+        ] {
+            os.hook_manager.register(ev, "dummy");
+        }
+
+        // Local window creation fires after-new-window with the window id.
+        let idx = os.spawn_window("/bin/sh", Box::new(|| {})).unwrap();
+        os.hook_manager.wait();
+        assert!(seen.lock().unwrap().iter().any(|(e, c)| {
+            *e == hooks::Event::AfterNewWindow && c.window_id == format!("win-{idx}")
+        }));
+
+        // focus_next on a single window does not fire (focus unchanged).
+        let before = seen.lock().unwrap().len();
+        os.focus_next();
+        os.hook_manager.wait();
+        assert_eq!(seen.lock().unwrap().len(), before);
+
+        // With two windows, focus_next fires after-focus-change.
+        os.spawn_window("/bin/sh", Box::new(|| {})).unwrap();
+        os.hook_manager.wait();
+        os.focus_next();
+        os.hook_manager.wait();
+        assert!(seen.lock().unwrap().iter().any(|(e, _)| *e == hooks::Event::AfterFocusChange));
+
+        // Closing the focused window fires after-close-window.
+        os.close_focused_window();
+        os.hook_manager.wait();
+        assert!(seen.lock().unwrap().iter().any(|(e, _)| *e == hooks::Event::AfterCloseWindow));
+
+        // Workspace switch fires after-workspace-switch with the previous
+        // workspace; switching to the same workspace does not fire.
+        os.switch_workspace(3);
+        os.hook_manager.wait();
+        assert!(seen.lock().unwrap().iter().any(|(e, c)| {
+            *e == hooks::Event::AfterWorkspaceSwitch && c.previous_workspace == 1
+        }));
+        let before = seen.lock().unwrap().len();
+        os.switch_workspace(3);
+        os.hook_manager.wait();
+        assert_eq!(seen.lock().unwrap().len(), before);
     }
 
     /// Build an Os with one PTY-less window so selection/yank can be tested
