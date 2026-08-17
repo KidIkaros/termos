@@ -1,0 +1,48 @@
+[package]
+name = "tuios-rs"
+version = "0.1.0"
+edition = "2021"
+description = "TUIOS — a terminal multiplexer and window manager, ported to Rust"
+license = "MIT"
+
+[[bin]]
+name = "tuios"
+path = "src/main.rs"
+
+[lib]
+name = "tuios"
+path = "src/lib.rs"
+
+[dependencies]
+# Terminal I/O (raw mode, events) — the Rust counterpart of Bubble Tea's input
+crossterm = "0.28"
+# Rendering — the Rust counterpart of Lipgloss
+ratatui = "0.29"
+
+# PTY management (matching the workspace's proven nix-based pattern)
+nix = { version = "0.29", features = ["process", "term", "ioctl", "fs", "signal"] }
+
+# Channels for cross-thread communication
+crossbeam-channel = "0.5"
+
+# Unicode column width (UAX #11)
+unicode-width = "0.2"
+
+# Configuration file (TOML)
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Base64 encoding for OSC52
+base64 = "0.22"
+
+# UUIDs for window/session IDs
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"

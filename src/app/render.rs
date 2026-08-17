@@ -1,0 +1,537 @@
+//! Rendering — the compositor that paints panes, borders, and the dock bar.
+//! Ported from TUIOS `internal/app/os_render.go` and the lipgloss rendering
+//! pipeline.
+
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect as TuiRect;
+use ratatui::style::{Color as TuiColor, Modifier, Style as TuiStyle};
+use ratatui::text::Span;
+use ratatui::widgets::{Block, Borders, Widget};
+
+use crate::app::{Mode, Os, Prefix, Selection};
+use crate::layout::Rect;
+use crate::ui::{border_type, to_tui_style};
+
+/// Render the whole app into a ratatui buffer.
+pub fn render(os: &Os, buf: &mut Buffer) {
+    let area = *buf.area();
+    // A zero-size terminal (e.g. headless) has nothing to paint.
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let dock_height = 1usize;
+    let dock_area = TuiRect {
+        x: 0,
+        y: area.height.saturating_sub(dock_height as u16),
+        width: area.width,
+        height: dock_height as u16,
+    };
+    let content_area = TuiRect {
+        x: 0,
+        y: 0,
+        width: area.width,
+        height: area.height.saturating_sub(dock_height as u16),
+    };
+
+    // Paint the background.
+    let bg = os
+        .theme
+        .as_ref()
+        .map(|t| TuiColor::Rgb(t.background.0, t.background.1, t.background.2))
+        .unwrap_or(TuiColor::Reset);
+    for y in 0..content_area.height {
+        for x in 0..content_area.width {
+            buf[(content_area.x + x, content_area.y + y)].set_char(' ');
+            buf[(content_area.x + x, content_area.y + y)].set_bg(bg);
+        }
+    }
+
+    // Composite each pane.
+    let layout = os.current_layout();
+    let focused = os.focused_window;
+    let ws = os.current_workspace;
+    let all_ids = os.workspace(ws).tree.get_all_window_ids();
+
+    // Sort window IDs by layout order for stable focus ordering.
+    let mut sorted_ids: Vec<i32> = all_ids.clone();
+    sorted_ids.sort_unstable();
+
+    for &window_id in &all_ids {
+        let Some(rect) = layout.get(&window_id) else {
+            continue;
+        };
+        let Some(window) = os.windows.get(window_id as usize) else {
+            continue;
+        };
+
+        let tui_rect = rect_to_tui(*rect, content_area);
+        let is_focused = focused == Some(window_id as usize);
+        let selection = os.selection.as_ref().filter(|s| s.window == window_id as usize);
+
+        // Paint the pane content, selection highlight, and scrollbar.
+        if let Ok(emu) = window.emulator.lock() {
+            paint_emulator(buf, &emu, tui_rect, os.theme.as_ref());
+            paint_selection(buf, &emu, tui_rect, selection);
+            paint_scrollbar(buf, &emu, tui_rect, os, is_focused);
+        }
+
+        // Draw the border.
+        let border_color = if is_focused {
+            focused_border_color(os)
+        } else {
+            unfocused_border_color(os)
+        };
+        let title = window.title.clone();
+        draw_pane_border(buf, tui_rect, &title, is_focused, border_color, os);
+    }
+
+    // Draw the dock bar.
+    render_dock(os, buf, dock_area, &sorted_ids);
+
+    // Modal overlays, topmost, in priority order.
+    if os.show_quit_confirmation {
+        render_overlay(
+            buf,
+            content_area,
+            &["Quit TUIOS?  (y/n)".to_string()],
+            "Quit",
+        );
+    } else if os.scrollback_mode {
+        render_overlay(
+            buf,
+            content_area,
+            &scrollback_help_lines(),
+            "Scrollback",
+        );
+    } else if os.palette_open {
+        render_palette(os, buf, content_area);
+    } else if os.switcher_open {
+        render_switcher(os, buf, content_area);
+    } else if os.config.appearance.which_key_enabled && os.prefix != Prefix::None {
+        let lines = build_which_key_lines(os);
+        render_overlay(buf, content_area, &lines, "which-key");
+    }
+}
+
+fn scrollback_help_lines() -> Vec<String> {
+    vec![
+        "h / l    move cursor".to_string(),
+        "j / k    move cursor".to_string(),
+        "v        visual select".to_string(),
+        "y        yank (copy)".to_string(),
+        "PgUp/Dn  page".to_string(),
+        "g / G    oldest / live".to_string(),
+        "q / Esc  leave".to_string(),
+    ]
+}
+
+/// Render the command palette overlay with a query line and fuzzy-filtered
+/// commands, the selected one highlighted.
+pub fn render_palette(os: &Os, buf: &mut Buffer, area: TuiRect) {
+    let items = os.palette_items();
+    let rows: Vec<(String, String)> = items
+        .iter()
+        .map(|c| (c.label(), String::new()))
+        .collect();
+    render_list_overlay(buf, area, "Commands", &os.palette_query, &rows, os.palette_selected);
+}
+
+/// Render the workspace/window switcher overlay.
+pub fn render_switcher(os: &Os, buf: &mut Buffer, area: TuiRect) {
+    let title = match os.switcher_kind {
+        super::SwitcherKind::Workspace => "Workspaces",
+        super::SwitcherKind::Window => "Windows",
+        super::SwitcherKind::Session => "Sessions",
+    };
+    let rows: Vec<(String, String)> = os
+        .switcher_items()
+        .iter()
+        .map(|e| (e.label.clone(), e.detail.clone()))
+        .collect();
+    render_list_overlay(buf, area, title, &os.switcher_query, &rows, os.switcher_selected);
+}
+
+/// A centered, bordered list overlay: a query line at the top, rows below, and
+/// the selected row drawn reverse-video. Rows are windowed so the selection
+/// stays visible.
+pub fn render_list_overlay(
+    buf: &mut Buffer,
+    area: TuiRect,
+    title: &str,
+    query: &str,
+    rows: &[(String, String)],
+    selected: usize,
+) {
+    let max_row = rows
+        .iter()
+        .map(|(l, d)| l.chars().count() + if d.is_empty() { 0 } else { 2 + d.chars().count() })
+        .max()
+        .unwrap_or(0);
+    let query_w = query.chars().count() + 2;
+    let content_w = max_row.max(query_w).max(title.chars().count()) + 4;
+    let width = content_w.clamp(20, area.width.saturating_sub(2) as usize) as u16;
+    let height = (rows.len() + 4).clamp(3, area.height.saturating_sub(2) as usize) as u16;
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let rect = TuiRect { x, y, width, height };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(TuiStyle::default().fg(TuiColor::Yellow))
+        .title(title);
+    let mut block_buf = Buffer::empty(rect);
+    block.render(rect, &mut block_buf);
+    for yy in 0..height {
+        for xx in 0..width {
+            buf[(rect.x + xx, rect.y + yy)] = block_buf[(xx, yy)].clone();
+        }
+    }
+
+    // Query line.
+    let prompt = format!("> {query}");
+    for (j, ch) in prompt.chars().enumerate() {
+        let x = rect.x + 2 + j as u16;
+        if x < rect.x + rect.width - 2 {
+            buf[(x, rect.y + 1)].set_char(ch);
+        }
+    }
+
+    // Rows, windowed to keep the selection visible.
+    let visible = (height as usize).saturating_sub(3).max(1);
+    let start = if rows.len() > visible {
+        selected.saturating_sub(visible - 1)
+    } else {
+        0
+    };
+    for i in 0..visible {
+        let Some((label, detail)) = rows.get(start + i) else {
+            break;
+        };
+        let row_y = rect.y + 2 + i as u16;
+        if row_y >= rect.y + rect.height - 1 {
+            break;
+        }
+        let mut text = label.clone();
+        if !detail.is_empty() {
+            text.push_str("  ");
+            text.push_str(detail);
+        }
+        let is_selected = start + i == selected;
+        for (j, ch) in text.chars().enumerate() {
+            let x = rect.x + 2 + j as u16;
+            if x < rect.x + rect.width - 2 {
+                let cell = &mut buf[(x, row_y)];
+                cell.set_char(ch);
+                if is_selected {
+                    let style = cell.style().add_modifier(Modifier::REVERSED);
+                    cell.set_style(style);
+                }
+            }
+        }
+    }
+}
+
+fn rect_to_tui(rect: Rect, content_area: TuiRect) -> TuiRect {
+    TuiRect {
+        x: content_area.x + rect.x.max(0) as u16,
+        y: content_area.y + rect.y.max(0) as u16,
+        width: rect.w.max(1) as u16,
+        height: rect.h.max(1) as u16,
+    }
+}
+
+fn paint_emulator(
+    buf: &mut Buffer,
+    emu: &crate::vt::Emulator,
+    rect: TuiRect,
+    theme: Option<&crate::config::theme::Theme>,
+) {
+    let lines = emu.render_view_lines();
+    for (row_idx, row) in lines.iter().take(rect.height as usize).enumerate() {
+        let y = rect.y + row_idx as u16;
+        if y >= rect.y + rect.height {
+            break;
+        }
+        let mut col = 0u16;
+        for (content, style) in row.iter().take(rect.width as usize) {
+            let x = rect.x + col;
+            if x >= rect.x + rect.width {
+                break;
+            }
+            let cell = &mut buf[(x, y)];
+            let c = content.chars().next().unwrap_or(' ');
+            cell.set_char(c);
+            cell.set_style(to_tui_style(*style, theme));
+            col += 1;
+        }
+    }
+
+    // Draw the cursor for the focused pane as a reverse-video block. When the
+    // view is scrolled back into the scrollback the live-screen cursor is not
+    // on screen, so it is skipped.
+    if !emu.in_scrollback() {
+        let cursor = emu.cursor_position();
+        if !emu.screen().cursor.hidden {
+            let cx = rect.x + cursor.x.max(0) as u16;
+            let cy = rect.y + cursor.y.max(0) as u16;
+            if cx < rect.x + rect.width && cy < rect.y + rect.height {
+                let cell = &mut buf[(cx, cy)];
+                let mut style = cell.style();
+                style = style.add_modifier(Modifier::REVERSED);
+                cell.set_style(style);
+            }
+        }
+    }
+}
+
+/// Highlight a text selection (reverse video) over a pane's content.
+pub fn paint_selection(
+    buf: &mut Buffer,
+    emu: &crate::vt::Emulator,
+    rect: TuiRect,
+    selection: Option<&Selection>,
+) {
+    let Some(sel) = selection else {
+        return;
+    };
+    let (l_lo, l_hi) = sel.line_range();
+    let (c_lo, c_hi) = sel.col_range();
+    for row_idx in 0..rect.height as i32 {
+        let content_line = emu.content_index_for_view_row(row_idx);
+        if content_line >= l_lo && content_line <= l_hi {
+            let y = rect.y + row_idx as u16;
+            for col in c_lo..=c_hi {
+                let x = rect.x + col as u16;
+                if x < rect.x + rect.width && y < rect.y + rect.height {
+                    let cell = &mut buf[(x, y)];
+                    let style = cell.style().add_modifier(Modifier::REVERSED);
+                    cell.set_style(style);
+                }
+            }
+        }
+    }
+}
+
+/// Draw a 1-column scrollbar thumb on the right edge of a scrolled-back pane.
+pub fn paint_scrollbar(
+    buf: &mut Buffer,
+    emu: &crate::vt::Emulator,
+    rect: TuiRect,
+    os: &Os,
+    focused: bool,
+) {
+    if os.config.appearance.hide_scrollbar {
+        return;
+    }
+    if !emu.in_scrollback() || emu.is_alt_screen() {
+        return;
+    }
+    let sb_len = emu.scrollback_len();
+    if sb_len == 0 || rect.width < 3 || rect.height < 3 {
+        return;
+    }
+    let content_h = (rect.height - 2) as usize;
+    if content_h <= 2 {
+        return;
+    }
+
+    // Thumb height is the viewport's share of the whole buffer; travel is the
+    // rows the thumb can move within.
+    let total = sb_len + content_h;
+    let thumb_h = (content_h * content_h).div_ceil(total).clamp(1, content_h - 1);
+    let travel = content_h - thumb_h;
+    let offset = emu.viewport();
+    let thumb_top = if travel > 0 {
+        (travel - (offset * travel) / sb_len).clamp(0, travel)
+    } else {
+        0
+    };
+
+    let color = if focused {
+        focused_border_color(os)
+    } else {
+        unfocused_border_color(os)
+    };
+    let x = rect.x + rect.width - 2; // last content column
+    let top = rect.y + 1;
+    for i in 0..thumb_h {
+        let y = top + thumb_top as u16 + i as u16;
+        if y < top + content_h as u16 {
+            let cell = &mut buf[(x, y)];
+            cell.set_char('█');
+            cell.set_style(TuiStyle::default().fg(color));
+        }
+    }
+}
+
+fn focused_border_color(os: &Os) -> TuiColor {
+    if let Some(c) = &os.config.appearance.border_focused_color {
+        if let Some(rgb) = crate::config::theme::Rgb::parse(c) {
+            return TuiColor::Rgb(rgb.0, rgb.1, rgb.2);
+        }
+    }
+    if let Some(theme) = &os.theme {
+        TuiColor::Rgb(theme.ansi[4].0, theme.ansi[4].1, theme.ansi[4].2)
+    } else {
+        TuiColor::Blue
+    }
+}
+
+fn unfocused_border_color(os: &Os) -> TuiColor {
+    if let Some(c) = &os.config.appearance.border_unfocused_color {
+        if let Some(rgb) = crate::config::theme::Rgb::parse(c) {
+            return TuiColor::Rgb(rgb.0, rgb.1, rgb.2);
+        }
+    }
+    if let Some(theme) = &os.theme {
+        TuiColor::Rgb(theme.ansi[8].0, theme.ansi[8].1, theme.ansi[8].2)
+    } else {
+        TuiColor::DarkGray
+    }
+}
+
+fn draw_pane_border(
+    buf: &mut Buffer,
+    rect: TuiRect,
+    title: &str,
+    focused: bool,
+    color: TuiColor,
+    os: &Os,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(border_type(&os.config.appearance.border_style))
+        .border_style(TuiStyle::default().fg(color))
+        .title(Span::styled(
+            title,
+            TuiStyle::default()
+                .fg(color)
+                .add_modifier(if focused { Modifier::BOLD } else { Modifier::empty() }),
+        ));
+    let inner = rect;
+    // Draw the block manually so we can reuse `rect` without moving it.
+    let mut block_buf = Buffer::empty(inner);
+    block.render(inner, &mut block_buf);
+    for y in 0..inner.height {
+        for x in 0..inner.width {
+            let src = block_buf.cell((x, y)).unwrap();
+            if src.symbol() != " " || src.style().fg.is_some() {
+                buf[(inner.x + x, inner.y + y)] = src.clone();
+            }
+        }
+    }
+}
+
+fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
+    let bg = os
+        .theme
+        .as_ref()
+        .map(|t| TuiColor::Rgb(t.ansi[0].0, t.ansi[0].1, t.ansi[0].2))
+        .unwrap_or(TuiColor::DarkGray);
+    let fg = os
+        .theme
+        .as_ref()
+        .map(|t| TuiColor::Rgb(t.foreground.0, t.foreground.1, t.foreground.2))
+        .unwrap_or(TuiColor::White);
+
+    // Fill the dock background.
+    for x in 0..area.width {
+        buf[(area.x + x, area.y)].set_bg(bg);
+    }
+
+    let mode_name = if os.palette_open {
+        "PALETTE"
+    } else if os.switcher_open {
+        "SWITCH"
+    } else if os.scrollback_mode {
+        "SCROLL"
+    } else {
+        match os.mode {
+            Mode::WindowManagement => "WM",
+            Mode::Terminal => "TERM",
+        }
+    };
+
+    let mut text = format!(" {} {}:{} ", mode_name, os.current_workspace, sorted_ids.len());
+    if os.prefix != Prefix::None {
+        text.push_str("⌨ ");
+    }
+    if let Some(notif) = os.notifications.last() {
+        text.push_str(&format!(" | {}", notif.message));
+    }
+
+    // Draw the text, truncating to the dock width.
+    for (i, ch) in text.chars().enumerate().take(area.width as usize) {
+        let cell = &mut buf[(area.x + i as u16, area.y)];
+        cell.set_char(ch);
+        cell.set_style(TuiStyle::default().fg(fg).bg(bg));
+    }
+}
+
+/// Build a help overlay (the which-key popup) as a list of lines.
+pub fn build_which_key_lines(os: &Os) -> Vec<String> {
+    use crate::config::keybindings;
+    let prefix_type = match os.prefix {
+        Prefix::Workspace => "workspace",
+        Prefix::Window => "window",
+        Prefix::Minimize => "minimize",
+        _ => "",
+    };
+    let bindings = keybindings::get_prefix_keybindings(prefix_type, false);
+    let mut lines = Vec::new();
+    lines.push(format!("{:?} commands:", os.prefix));
+    for b in bindings {
+        lines.push(format!("  {:10} {}", b.key, b.description));
+    }
+    lines
+}
+
+/// Render a centered overlay (quit confirmation, help) over the content.
+pub fn render_overlay(buf: &mut Buffer, area: TuiRect, lines: &[String], title: &str) {
+    let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4;
+    let height = lines.len() as u16 + 4;
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let rect = TuiRect { x, y, width, height };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(TuiStyle::default().fg(TuiColor::Yellow))
+        .title(title);
+    let mut block_buf = Buffer::empty(rect);
+    block.render(rect, &mut block_buf);
+    for yy in 0..height {
+        for xx in 0..width {
+            buf[(rect.x + xx, rect.y + yy)] = block_buf[(xx, yy)].clone();
+        }
+    }
+
+    for (i, line) in lines.iter().enumerate() {
+        let y = rect.y + 2 + i as u16;
+        for (j, ch) in line.chars().enumerate() {
+            let x = rect.x + 2 + j as u16;
+            if x < rect.x + rect.width - 2 && y < rect.y + rect.height - 1 {
+                buf[(x, y)].set_char(ch);
+            }
+        }
+    }
+}
+
+/// Render a list of text lines into the buffer (used for overlays).
+pub fn render_text_lines(buf: &mut Buffer, area: TuiRect, lines: &[String]) {
+    for (i, line) in lines.iter().enumerate() {
+        let y = area.y + i as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+        for (j, ch) in line.chars().enumerate() {
+            let x = area.x + j as u16;
+            if x >= area.x + area.width {
+                break;
+            }
+            buf[(x, y)].set_char(ch);
+        }
+    }
+}
