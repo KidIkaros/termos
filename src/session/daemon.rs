@@ -103,6 +103,10 @@ pub struct Daemon {
     /// Lifecycle hooks fired daemon-side for the window/session events the
     /// daemon owns (authoritative for daemon-mode windows).
     hook_manager: crate::hooks::Manager,
+    /// Per-session id of the most recently active window (updated by
+    /// `Input`/`Resize`). The `set-agent-state` verb targets it when no
+    /// window is named — the port's approximation of "focused".
+    last_active: Mutex<HashMap<String, String>>,
 }
 
 impl Daemon {
@@ -112,6 +116,7 @@ impl Daemon {
             windows: Mutex::new(HashMap::new()),
             broadcast: Mutex::new(HashMap::new()),
             hook_manager: crate::hooks::Manager::new(),
+            last_active: Mutex::new(HashMap::new()),
         }
     }
 
@@ -232,6 +237,9 @@ impl Daemon {
                 workspace,
                 cols: size.cols,
                 rows: size.rows,
+                agent_state: String::new(),
+                agent_message: String::new(),
+                agent_harness: String::new(),
             },
             writer,
             _handle: handle,
@@ -274,22 +282,87 @@ impl Daemon {
         Ok(())
     }
 
-    fn write_input(&self, window: &str, data: &[u8]) {
-        for wins in self.windows.lock().unwrap().values() {
+    fn write_input(&self, session: &str, window: &str, data: &[u8]) {
+        let windows = self.windows.lock().unwrap();
+        if let Some(wins) = windows.get(session) {
             if let Some(w) = wins.iter().find(|w| w.info.id == window) {
                 w.writer.write(data);
-                return;
+                drop(windows);
+                self.last_active
+                    .lock()
+                    .unwrap()
+                    .insert(session.to_string(), window.to_string());
             }
         }
     }
 
-    fn resize(&self, window: &str, cols: u16, rows: u16) {
-        for wins in self.windows.lock().unwrap().values() {
+    fn resize(&self, session: &str, window: &str, cols: u16, rows: u16) {
+        let windows = self.windows.lock().unwrap();
+        if let Some(wins) = windows.get(session) {
             if let Some(w) = wins.iter().find(|w| w.info.id == window) {
                 w.writer.resize(WinSize { cols, rows });
-                return;
+                drop(windows);
+                self.last_active
+                    .lock()
+                    .unwrap()
+                    .insert(session.to_string(), window.to_string());
             }
         }
+    }
+
+    /// Report a window's agent state (`set-agent-state`). `window: None`
+    /// targets the session's most recently active window, falling back to its
+    /// first. Broadcasts `AgentStateChanged` to attached clients.
+    fn set_agent_state(
+        &self,
+        session: &str,
+        window: Option<&str>,
+        state: &str,
+        message: &str,
+        harness: &str,
+    ) -> Result<String, String> {
+        let mut windows = self.windows.lock().unwrap();
+        let wins = windows
+            .get_mut(session)
+            .ok_or_else(|| format!("session '{session}' not found"))?;
+        let target = match window {
+            Some(w) => {
+                let by_id = wins.iter().find(|w2| w2.info.id == w);
+                let by_title = wins
+                    .iter()
+                    .find(|w2| w2.info.title == w)
+                    .or_else(|| wins.iter().find(|w2| w2.info.title.starts_with(w)));
+                by_id.or(by_title).map(|w2| w2.info.id.clone())
+            }
+            None => self
+                .last_active
+                .lock()
+                .unwrap()
+                .get(session)
+                .cloned()
+                .or_else(|| wins.first().map(|w| w.info.id.clone())),
+        };
+        let Some(target) = target else {
+            return Err(format!("session '{session}' has no windows"));
+        };
+        let Some(live) = wins.iter_mut().find(|w| w.info.id == target) else {
+            return Err(format!("window '{target}' not found"));
+        };
+        live.info.agent_state = state.to_string();
+        live.info.agent_message = message.to_string();
+        live.info.agent_harness = harness.to_string();
+        let info = live.info.clone();
+        drop(windows);
+        self.broadcast_event(
+            session,
+            &Message::AgentStateChanged {
+                window: info.id.clone(),
+                state: info.agent_state,
+                message: info.agent_message,
+                harness: info.agent_harness,
+            },
+        );
+        Ok(info.id)
     }
 
     fn add_window(&self, session: &str, shell: &str, workspace: i32) -> Result<WindowInfo, String> {
@@ -525,12 +598,54 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                     }
                 }
             }
-            Message::Input { window, data } => daemon.write_input(&window, &data),
+            Message::Input { window, data } => {
+                if let Some((session, _, _)) = &attached {
+                    daemon.write_input(session, &window, &data);
+                }
+            }
             Message::Resize {
                 window,
                 cols,
                 rows,
-            } => daemon.resize(&window, cols, rows),
+            } => {
+                if let Some((session, _, _)) = &attached {
+                    daemon.resize(session, &window, cols, rows);
+                }
+            }
+            Message::SetAgentState {
+                session,
+                window,
+                state,
+                message,
+                harness,
+            } => {
+                // Resolve the target session: named, else the session this
+                // connection is attached to, else the first one.
+                let target_session = match &session {
+                    Some(s) => Some(s.clone()),
+                    None => attached.as_ref().map(|(s, _, _)| s.clone()),
+                };
+                match target_session {
+                    Some(s) => match daemon.set_agent_state(&s, window.as_deref(), &state, &message, &harness) {
+                        Ok(window) => {
+                            let _ = send(&writer, &Message::AgentStateChanged {
+                                window,
+                                state,
+                                message,
+                                harness,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = send(&writer, &Message::Error { message: e });
+                        }
+                    },
+                    None => {
+                        let _ = send(&writer, &Message::Error {
+                            message: "no session targeted (attach to one or pass -s)".into(),
+                        });
+                    }
+                }
+            }
             _ => {}
         }
     }

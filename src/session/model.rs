@@ -55,6 +55,15 @@ pub struct WindowInfo {
     pub workspace: i32,
     pub cols: u16,
     pub rows: u16,
+    /// The window's agent state, wire spelling (`none` when not reporting).
+    #[serde(default)]
+    pub agent_state: String,
+    /// The free-text note the last agent report carried.
+    #[serde(default)]
+    pub agent_message: String,
+    /// The harness id the last agent report named (e.g. `claude-code`).
+    #[serde(default)]
+    pub agent_harness: String,
 }
 
 /// Per-session spawn configuration.

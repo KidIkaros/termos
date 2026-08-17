@@ -457,6 +457,16 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
     if os.prefix != Prefix::None {
         text.push_str("⌨ ");
     }
+    // Agent-state indicator for the focused pane.
+    let agent = os.focused_agent_state();
+    if !agent.is_empty() && agent != "none" {
+        text.push_str(&format!(" ✦{agent}"));
+        let msg = os.focused_agent_message();
+        if !msg.is_empty() {
+            text.push_str(&format!(" \"{msg}\""));
+        }
+        text.push(' ');
+    }
     if let Some(notif) = os.notifications.last() {
         text.push_str(&format!(" | {}", notif.message));
     }

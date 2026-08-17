@@ -29,6 +29,97 @@ pub struct UserConfig {
     /// Loaded into `hooks::Manager` at startup (see `internal/hooks/hooks.go`).
     #[serde(default)]
     pub hooks: std::collections::HashMap<String, toml::Value>,
+    /// Alert/notification sinks, including the `[notifications.agent]` table.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
+}
+
+/// The `[notifications]` table.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NotificationsConfig {
+    /// What tuios does when a pane's agent state changes.
+    #[serde(default)]
+    pub agent: AgentAlertsConfig,
+}
+
+/// The `[notifications.agent]` table. Every toggle is an `Option` so `None`
+/// can mean "unset, use the default" and an explicit `false` survives a
+/// reload, matching the Go pointer-field design.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentAlertsConfig {
+    /// Master switch; false silences every sink including the command.
+    /// Default: true.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Which transitions alert at all.
+    #[serde(default)]
+    pub states: AgentAlertStates,
+    /// In-band terminal notification to the attached client. Default: true.
+    #[serde(default)]
+    pub notify: Option<bool>,
+    /// Make the alert audible (see `sound_mode`). Default: false.
+    #[serde(default)]
+    pub sound: Option<bool>,
+    /// `audio`, `bell`, or `both`. Default: `audio`.
+    #[serde(default)]
+    pub sound_mode: String,
+    /// Shortest gap between audible cues (seconds). Default: 3.
+    #[serde(default)]
+    pub sound_cooldown_seconds: Option<i64>,
+    /// User-supplied cue files.
+    #[serde(default)]
+    pub sounds: AgentAlertSounds,
+    /// Show the message in tuios's dock, clickable, jumping to the pane.
+    /// Default: true.
+    #[serde(default)]
+    pub dock: Option<bool>,
+    /// Shell command run on an alert; shorthand for the after-agent-state
+    /// hook. Default: empty (nothing runs).
+    #[serde(default)]
+    pub command: String,
+    /// Hold an alert this long, dropping it if the pane leaves the state
+    /// before it expires (seconds; 0 alerts immediately). Default: 2.
+    #[serde(default)]
+    pub settle_seconds: Option<i64>,
+    /// Drop alerts for the pane the user is already looking at. Default: true.
+    #[serde(default)]
+    pub suppress_focused: Option<bool>,
+    /// Silence every sink inside `"HH:MM-HH:MM"` (local time; wraps midnight).
+    /// Default: empty (never quiet).
+    #[serde(default)]
+    pub quiet_hours: String,
+}
+
+/// One toggle per agent state, naming the states worth interrupting for.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentAlertStates {
+    /// Default: true.
+    #[serde(default)]
+    pub needs_input: Option<bool>,
+    /// Default: true.
+    #[serde(default)]
+    pub errored: Option<bool>,
+    /// Default: true.
+    #[serde(default)]
+    pub done: Option<bool>,
+    /// Default: false (the flappy, silence-guessed state).
+    #[serde(default)]
+    pub idle: Option<bool>,
+    /// Default: false.
+    #[serde(default)]
+    pub working: Option<bool>,
+}
+
+/// User-supplied cue files, a path per cue. A path that does not exist falls
+/// back to the built-in cue.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentAlertSounds {
+    /// Cue for an agent that stopped (`done`, `idle`).
+    #[serde(default)]
+    pub done: String,
+    /// Cue for an agent waiting on a human or failed (`needs_input`, `errored`).
+    #[serde(default)]
+    pub needs_input: String,
 }
 
 /// Appearance settings.
@@ -177,6 +268,7 @@ impl UserConfig {
             startup: StartupConfig::default(),
             daemon: DaemonConfig::default(),
             hooks: std::collections::HashMap::new(),
+            notifications: NotificationsConfig::default(),
         };
         cfg.keybindings.fill_missing();
         cfg

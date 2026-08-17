@@ -68,7 +68,8 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             let name = args.get(2).map(|s| s.as_str());
             cmd_run(name)
         }
-        other => Err(format!("unknown command '{other}' (try: daemon, run, attach, list, kill)").into()),
+        "set-agent-state" => cmd_set_agent_state(&args[2..]),
+        other => Err(format!("unknown command '{other}' (try: daemon, run, attach, list, kill, set-agent-state)").into()),
     }
 }
 
@@ -101,6 +102,86 @@ fn cmd_kill(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_attach(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     run_remote_tui(name)
+}
+
+/// `tuios set-agent-state <state> [-s session] [-w window] [-m message]
+/// [--harness H]` — report a pane's agent state to the daemon.
+fn cmd_set_agent_state(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let state = args
+        .first()
+        .ok_or("usage: tuios set-agent-state <state> [-s session] [-w window] [-m message] [--harness H]")?;
+    if tuios::app::agent_alert::parse_agent_state(state).is_none() {
+        return Err(format!(
+            "invalid state '{state}' (valid: {})",
+            tuios::app::agent_alert::AGENT_STATE_NAMES.join(", ")
+        )
+        .into());
+    }
+
+    let mut session: Option<String> = None;
+    let mut window: Option<String> = None;
+    let mut message = String::new();
+    let mut harness = String::new();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                session = args.get(i).cloned();
+            }
+            "-w" | "--window" => {
+                i += 1;
+                window = args.get(i).cloned();
+            }
+            "-m" | "--message" => {
+                i += 1;
+                message = args.get(i).cloned().unwrap_or_default();
+            }
+            "--harness" => {
+                i += 1;
+                harness = args.get(i).cloned().unwrap_or_default();
+            }
+            other => return Err(format!("unknown flag '{other}'").into()),
+        }
+        i += 1;
+    }
+
+    // Resolve the target session: named, else the only one, else error.
+    let client = DaemonClient::connect()?;
+    let session = match session {
+        Some(s) => s,
+        None => {
+            let sessions = client.list()?;
+            match sessions.len() {
+                1 => sessions[0].name.clone(),
+                0 => return Err("no sessions; create one with `tuios run`".into()),
+                _ => {
+                    return Err("multiple sessions; pass -s <session>".into());
+                }
+            }
+        }
+    };
+
+    // Send and wait for the daemon's echo/error.
+    client.send(&Message::SetAgentState {
+        session: Some(session.clone()),
+        window,
+        state: state.clone(),
+        message,
+        harness,
+    })?;
+    client.set_read_timeout(Duration::from_secs(3))?;
+    loop {
+        match client.recv() {
+            Ok(Message::AgentStateChanged { window, state, .. }) => {
+                println!("{session}: {window} → {state}");
+                return Ok(());
+            }
+            Ok(Message::Error { message }) => return Err(message.into()),
+            Ok(_) => continue,
+            Err(e) => return Err(format!("no reply from daemon: {e}").into()),
+        }
+    }
 }
 
 fn cmd_run(name: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
@@ -144,6 +225,13 @@ enum RemoteEvent {
     WindowAdded(WindowInfo),
     /// A window was closed in the attached session.
     WindowClosed(String),
+    /// A window's agent state changed (broadcast).
+    AgentStateChanged {
+        window: String,
+        state: String,
+        message: String,
+        harness: String,
+    },
     /// The daemon reported an error.
     Error(String),
 }
@@ -259,6 +347,19 @@ fn spawn_reader(
                 Message::WindowClosed { window } => {
                     let _ = events.send(RemoteEvent::WindowClosed(window));
                 }
+                Message::AgentStateChanged {
+                    window,
+                    state,
+                    message,
+                    harness,
+                } => {
+                    let _ = events.send(RemoteEvent::AgentStateChanged {
+                        window,
+                        state,
+                        message,
+                        harness,
+                    });
+                }
                 Message::Attached { windows } => {
                     let _ = events.send(RemoteEvent::Attached { windows });
                 }
@@ -332,6 +433,14 @@ fn run_remote_event_loop(
                     outputs.lock().unwrap().remove(&id);
                     os.notify("window closed", "info");
                 }
+                RemoteEvent::AgentStateChanged {
+                    window,
+                    state,
+                    message,
+                    harness,
+                } => {
+                    os.handle_agent_state_changed(&window, &state, &message, &harness);
+                }
                 RemoteEvent::Attached { .. } => {} // handled by pending actions
                 RemoteEvent::ListResult { sessions } => {
                     os.remote_sessions = sessions;
@@ -343,12 +452,22 @@ fn run_remote_event_loop(
         }
 
         // Render + input.
+        os.tick_agent_alerts();
         os.sync_window_sizes();
         if last_render.elapsed() >= frame_budget {
             terminal.draw(|frame| {
                 render(os, frame.buffer_mut());
             })?;
             last_render = Instant::now();
+        }
+
+        // Flush host-terminal sequences queued by alerts.
+        let host_seq = os.take_host_sequence();
+        if !host_seq.is_empty() {
+            use std::io::Write;
+            let mut stdout = stdout();
+            let _ = stdout.write_all(&host_seq);
+            let _ = stdout.flush();
         }
 
         if poll(Duration::from_millis(8))? {
@@ -572,6 +691,9 @@ fn run_event_loop(
     let frame_budget = Duration::from_millis(16); // ~60 FPS
 
     loop {
+        // Raise any agent alerts whose settle window has expired.
+        os.tick_agent_alerts();
+
         // Sync window sizes to the current layout.
         os.sync_window_sizes();
 
@@ -581,6 +703,16 @@ fn run_event_loop(
                 render(os, frame.buffer_mut());
             })?;
             last_render = Instant::now();
+        }
+
+        // Flush host-terminal sequences queued by alerts (OSC 9 / BEL) after
+        // the draw so they never interleave a frame.
+        let host_seq = os.take_host_sequence();
+        if !host_seq.is_empty() {
+            use std::io::Write;
+            let mut stdout = stdout();
+            let _ = stdout.write_all(&host_seq);
+            let _ = stdout.flush();
         }
 
         // Poll for input.

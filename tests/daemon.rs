@@ -244,3 +244,99 @@ fn daemon_fires_window_lifecycle_hooks() {
         *e == tuios::hooks::Event::AfterCloseWindow && sess == "hooks" && wid == "w1"
     }));
 }
+
+/// `set-agent-state` reports a window's agent state; attached clients receive
+/// the `AgentStateChanged` broadcast.
+#[test]
+fn daemon_set_agent_state_broadcasts_to_clients() {
+    use std::sync::Mutex;
+
+    isolate_state_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("tuios.sock");
+
+    let daemon = Arc::new(Daemon::new());
+    let path = socket.clone();
+    std::thread::spawn(move || {
+        let _ = daemon.run(&path);
+    });
+
+    let client = loop {
+        match DaemonClient::connect_to(&socket) {
+            Ok(c) => break c,
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    client.new_session("agent", "/bin/sh").unwrap();
+    client.attach("agent").unwrap();
+
+    // The reporting CLI is a separate connection (not attached).
+    let reporter = DaemonClient::connect_to(&socket).unwrap();
+    reporter
+        .send(&Message::SetAgentState {
+            session: Some("agent".to_string()),
+            window: None, // targets the most recently active / first window
+            state: "needs_input".to_string(),
+            message: "awaiting approval".to_string(),
+            harness: "claude-code".to_string(),
+        })
+        .unwrap();
+
+    // The attached client sees the broadcast with the full payload.
+    let got: Arc<Mutex<Option<Message>>> = Arc::new(Mutex::new(None));
+    client.set_read_timeout(Duration::from_secs(3)).unwrap();
+    for _ in 0..40 {
+        match client.recv() {
+            Ok(Message::AgentStateChanged {
+                window,
+                state,
+                message,
+                harness,
+            }) if state == "needs_input" => {
+                assert_eq!(window, "w0");
+                assert_eq!(message, "awaiting approval");
+                assert_eq!(harness, "claude-code");
+                *got.lock().unwrap() = Some(Message::AgentStateChanged {
+                    window,
+                    state,
+                    message,
+                    harness,
+                });
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(
+        got.lock().unwrap().is_some(),
+        "attached client did not receive the AgentStateChanged broadcast"
+    );
+
+    // An attached client also sees the state in a fresh attach (WindowInfo).
+    let mut fresh = DaemonClient::connect_to(&socket).unwrap();
+    let windows = fresh.attach("agent").unwrap();
+    assert_eq!(windows[0].agent_state, "needs_input");
+    assert_eq!(windows[0].agent_harness, "claude-code");
+
+    // Invalid state is rejected at the CLI layer; the daemon rejects an
+    // unknown window.
+    let bad = DaemonClient::connect_to(&socket).unwrap();
+    bad.send(&Message::SetAgentState {
+        session: Some("agent".to_string()),
+        window: Some("nope".to_string()),
+        state: "done".to_string(),
+        message: String::new(),
+        harness: String::new(),
+    })
+    .unwrap();
+    bad.set_read_timeout(Duration::from_secs(3)).unwrap();
+    let mut rejected = false;
+    for _ in 0..10 {
+        if let Ok(Message::Error { .. }) = bad.recv() {
+            rejected = true;
+            break;
+        }
+    }
+    assert!(rejected, "unknown window should error");
+}

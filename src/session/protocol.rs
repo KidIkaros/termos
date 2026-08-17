@@ -59,6 +59,23 @@ pub enum Message {
     PtyOutput { window: String, data: Vec<u8> },
     /// Daemon → client: a window's shell exited.
     PtyClosed { window: String },
+    /// Client → daemon: report a window's agent state (`set-agent-state`).
+    /// `window: None` targets the session's most recently active window (the
+    /// port's approximation of "focused", since focus lives client-side).
+    SetAgentState {
+        session: Option<String>,
+        window: Option<String>,
+        state: String,
+        message: String,
+        harness: String,
+    },
+    /// Daemon → client: a window's agent state changed (broadcast).
+    AgentStateChanged {
+        window: String,
+        state: String,
+        message: String,
+        harness: String,
+    },
     /// Daemon → client: an error reply.
     Error { message: String },
 }
@@ -144,10 +161,60 @@ mod tests {
                 workspace: 1,
                 cols: 80,
                 rows: 24,
+                agent_state: String::new(),
+                agent_message: String::new(),
+                agent_harness: String::new(),
             }],
         };
         match round_trip(msg) {
             Message::Attached { windows } => assert_eq!(windows[0].cols, 80),
+            other => panic!("wrong message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_state_messages_round_trip() {
+        let msg = Message::SetAgentState {
+            session: Some("dev".to_string()),
+            window: Some("w1".to_string()),
+            state: "needs_input".to_string(),
+            message: "awaiting approval".to_string(),
+            harness: "claude-code".to_string(),
+        };
+        match round_trip(msg) {
+            Message::SetAgentState {
+                session,
+                window,
+                state,
+                message,
+                harness,
+            } => {
+                assert_eq!(session.as_deref(), Some("dev"));
+                assert_eq!(window.as_deref(), Some("w1"));
+                assert_eq!(state, "needs_input");
+                assert_eq!(message, "awaiting approval");
+                assert_eq!(harness, "claude-code");
+            }
+            other => panic!("wrong message: {other:?}"),
+        }
+
+        let changed = Message::AgentStateChanged {
+            window: "w0".to_string(),
+            state: "done".to_string(),
+            message: String::new(),
+            harness: "claude".to_string(),
+        };
+        match round_trip(changed) {
+            Message::AgentStateChanged {
+                window,
+                state,
+                harness,
+                ..
+            } => {
+                assert_eq!(window, "w0");
+                assert_eq!(state, "done");
+                assert_eq!(harness, "claude");
+            }
             other => panic!("wrong message: {other:?}"),
         }
     }

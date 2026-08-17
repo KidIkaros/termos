@@ -6,6 +6,7 @@
 //! render state, mirroring the Model-View-Update pattern the Go code gets from
 //! Bubble Tea.
 
+pub mod agent_alert;
 pub mod input;
 pub mod render;
 
@@ -298,6 +299,13 @@ pub struct Os {
     pub pending_split: Option<SplitType>,
     /// Lifecycle hooks, loaded from the `[hooks]` config section.
     pub hook_manager: hooks::Manager,
+    /// Agent alerts parked in their settle window, keyed by window id.
+    pending_agent_alerts: HashMap<String, agent_alert::PendingAgentAlert>,
+    /// Global audible-cue cooldown across every pane.
+    sound_cue: agent_alert::SoundCue,
+    /// Host-terminal sequences queued by alerts (OSC 9 / BEL), flushed by the
+    /// event loop after each draw so they never interleave a frame.
+    host_output: Vec<u8>,
 }
 
 /// A dock notification.
@@ -321,6 +329,12 @@ impl Os {
         let shared_borders = config.appearance.shared_borders;
         let hook_manager = hooks::Manager::new();
         hook_manager.load_from_config(&config.hooks);
+        // `[notifications.agent] command` is shorthand for registering one
+        // command under the after-agent-state hook (Go's factory.go).
+        let agent_command = config.notifications.agent.command.trim().to_string();
+        if !agent_command.is_empty() {
+            hook_manager.register(hooks::Event::AfterAgentState, agent_command);
+        }
         Self {
             windows: Vec::new(),
             focused_window: None,
@@ -360,6 +374,9 @@ impl Os {
             remote_commands: None,
             pending_split: None,
             hook_manager,
+            pending_agent_alerts: HashMap::new(),
+            sound_cue: agent_alert::SoundCue::new(),
+            host_output: Vec::new(),
         }
     }
 
@@ -415,6 +432,196 @@ impl Os {
                 ..hooks::Context::default()
             },
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Agent state + alerts
+    // -----------------------------------------------------------------------
+
+    /// The index of the window with `window_id`, if any.
+    fn window_index_by_id(&self, window_id: &str) -> Option<usize> {
+        self.windows.iter().position(|w| w.id == window_id)
+    }
+
+    /// Handle a daemon `AgentStateChanged` broadcast: update the window and
+    /// run the alert policy on the transition.
+    pub fn handle_agent_state_changed(
+        &mut self,
+        window_id: &str,
+        state: &str,
+        message: &str,
+        harness: &str,
+    ) {
+        let Some(index) = self.window_index_by_id(window_id) else {
+            return;
+        };
+        let from = self.windows[index].agent_state.clone();
+        self.windows[index].agent_state = state.to_string();
+        self.windows[index].agent_message = message.to_string();
+        self.windows[index].agent_harness = harness.to_string();
+        self.consider_agent_alert(window_id.to_string(), from, state.to_string());
+    }
+
+    /// Resolve the current `[notifications.agent]` policy. Resolved per call
+    /// rather than cached: transitions are rare, the resolve is a few field
+    /// reads, and a config reload is picked up with no extra wiring.
+    fn agent_alert_policy(&self) -> agent_alert::AgentAlertPolicy {
+        agent_alert::resolve_agent_alerts(&self.config.notifications.agent)
+    }
+
+    /// Decide what one transition earns. Any further transition retires
+    /// whatever was parked for this pane: the state it was going to announce
+    /// is no longer the state the pane is in (the whole anti-flicker rule).
+    pub fn consider_agent_alert(&mut self, window_id: String, from: String, to: String) {
+        let policy = self.agent_alert_policy();
+        self.pending_agent_alerts.remove(&window_id);
+
+        if !policy.alerts(&to) {
+            return;
+        }
+        if policy.suppress_focused {
+            if let Some(focused) = self.focused_window {
+                if self.windows.get(focused).map(|w| w.id == window_id).unwrap_or(false) {
+                    return;
+                }
+            }
+        }
+        if policy.quiet(local_minutes_since_midnight()) {
+            return;
+        }
+        if policy.settle <= std::time::Duration::ZERO {
+            self.fire_agent_alert(&window_id, &from, &to, &policy);
+            return;
+        }
+        self.pending_agent_alerts.insert(
+            window_id.clone(),
+            agent_alert::PendingAgentAlert {
+                window_id,
+                from,
+                to,
+                due: std::time::Instant::now() + policy.settle,
+            },
+        );
+    }
+
+    /// Raise the parked alerts whose settle window has expired and whose pane
+    /// is still in the state they were parked for. Called from the event-loop
+    /// tick; cheap no-op when nothing is parked.
+    pub fn tick_agent_alerts(&mut self) {
+        if self.pending_agent_alerts.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let policy = self.agent_alert_policy();
+        let due: Vec<agent_alert::PendingAgentAlert> = self
+            .pending_agent_alerts
+            .values()
+            .filter(|p| now >= p.due)
+            .cloned()
+            .collect();
+        for p in due {
+            self.pending_agent_alerts.remove(&p.window_id);
+            // Re-validate rather than trust the parked state: the pane may
+            // have closed, moved on, or been focused while it waited.
+            let Some(index) = self.window_index_by_id(&p.window_id) else {
+                continue;
+            };
+            if self.windows[index].agent_state != p.to {
+                continue;
+            }
+            if policy.suppress_focused {
+                if let Some(focused) = self.focused_window {
+                    if self.windows.get(focused).map(|w| w.id == p.window_id).unwrap_or(false) {
+                        continue;
+                    }
+                }
+            }
+            self.fire_agent_alert(&p.window_id, &p.from, &p.to, &policy);
+        }
+    }
+
+    /// Write the alert to every sink the policy leaves on: dock notification,
+    /// host sequence (OSC 9 + optional BEL), audible cue, and the
+    /// after-agent-state hook.
+    fn fire_agent_alert(
+        &mut self,
+        window_id: &str,
+        from: &str,
+        to: &str,
+        policy: &agent_alert::AgentAlertPolicy,
+    ) {
+        let Some(index) = self.window_index_by_id(window_id) else {
+            return;
+        };
+        let name = if self.windows[index].title.is_empty() {
+            "pane".to_string()
+        } else {
+            self.windows[index].title.clone()
+        };
+        let text = format!("{} {}", name, agent_transition_notice(to));
+
+        if policy.dock {
+            self.notify(&text, "agent");
+        }
+        let mut seq = Vec::new();
+        if policy.notify {
+            seq.extend_from_slice(format!("\x1b]9;{text}\x07").as_bytes());
+        }
+        if policy.plays_bell() {
+            seq.push(0x07);
+        }
+        self.queue_host_sequence(seq);
+
+        if policy.plays_audio() {
+            let file = policy.cue_file(to);
+            self.sound_cue.play(file, policy.sound_cooldown);
+        }
+
+        self.fire_hook(
+            hooks::Event::AfterAgentState,
+            hooks::Context {
+                window_id: window_id.to_string(),
+                window_name: name,
+                workspace: self.current_workspace,
+                session_id: self.remote_session.clone().unwrap_or_default(),
+                agent_state: to.to_string(),
+                prev_agent_state: from.to_string(),
+                agent_harness: self.windows[index].agent_harness.clone(),
+                agent_message: self.windows[index].agent_message.clone(),
+                ..hooks::Context::default()
+            },
+        );
+    }
+
+    /// Queue bytes to write to the host terminal (alert notifications, BEL).
+    /// The event loop flushes them after each draw so they never interleave a
+    /// frame.
+    pub fn queue_host_sequence(&mut self, bytes: Vec<u8>) {
+        if !bytes.is_empty() {
+            self.host_output.extend_from_slice(&bytes);
+        }
+    }
+
+    /// Drain the queued host-terminal sequences.
+    pub fn take_host_sequence(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.host_output)
+    }
+
+    /// The focused window's agent state wire value ("" = none), for the dock
+    /// indicator.
+    pub fn focused_agent_state(&self) -> &str {
+        self.focused_window
+            .and_then(|i| self.windows.get(i))
+            .map(|w| w.agent_state.as_str())
+            .unwrap_or("")
+    }
+
+    /// The focused window's agent message, if any.
+    pub fn focused_agent_message(&self) -> &str {
+        self.focused_window
+            .and_then(|i| self.windows.get(i))
+            .map(|w| w.agent_message.as_str())
+            .unwrap_or("")
     }
 
     // -----------------------------------------------------------------------
@@ -1385,6 +1592,30 @@ impl Os {
     }
 }
 
+/// The human word for a transition into `state`, for the alert text. Empty
+/// means the state is not one that gets announced.
+fn agent_transition_notice(state: &str) -> String {
+    match state {
+        "needs_input" => "needs your input".into(),
+        "errored" => "errored".into(),
+        "done" => "finished".into(),
+        _ => String::new(),
+    }
+}
+
+/// Minutes since local midnight (libc localtime, no extra deps).
+fn local_minutes_since_midnight() -> i32 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut tm: nix::libc::tm = unsafe { std::mem::zeroed() };
+    unsafe {
+        nix::libc::localtime_r(&now, &mut tm);
+    }
+    tm.tm_hour as i32 * 60 + tm.tm_min as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1616,6 +1847,94 @@ mod tests {
     }
 
     #[test]
+    fn agent_alert_fires_dock_hook_and_host_sequence() {
+        let mut os = os_with_window();
+        os.config.notifications.agent.suppress_focused = Some(false);
+        os.config.notifications.agent.settle_seconds = Some(0);
+        os.hook_manager.register(hooks::Event::AfterAgentState, "dummy");
+        let seen: Arc<Mutex<Vec<hooks::Context>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        os.hook_manager.set_runner(move |_, ctx| {
+            seen2.lock().unwrap().push(ctx.clone());
+        });
+
+        os.handle_agent_state_changed("w0", "working", "", "");
+        os.handle_agent_state_changed("w0", "needs_input", "awaiting approval", "claude-code");
+        os.hook_manager.wait();
+
+        assert!(!os.notifications.is_empty());
+        let host = os.take_host_sequence();
+        assert!(
+            host.starts_with(b"\x1b]9;"),
+            "expected an OSC 9 notification in {:?}",
+            String::from_utf8_lossy(&host)
+        );
+        let ctxs = seen.lock().unwrap();
+        let ctx = ctxs.last().expect("hook fired");
+        assert_eq!(ctx.agent_state, "needs_input");
+        assert_eq!(ctx.prev_agent_state, "working");
+        assert_eq!(ctx.agent_message, "awaiting approval");
+        assert_eq!(ctx.agent_harness, "claude-code");
+        assert_eq!(ctx.window_id, "w0");
+    }
+
+    #[test]
+    fn agent_alert_suppresses_focused_and_non_alerting_states() {
+        let mut os = os_with_window();
+        // Default policy: suppress_focused (w0 is focused) and working is not
+        // an alerting state.
+        os.handle_agent_state_changed("w0", "working", "", "");
+        os.tick_agent_alerts();
+        assert!(os.notifications.is_empty());
+        assert!(os.take_host_sequence().is_empty());
+
+        os.handle_agent_state_changed("w0", "needs_input", "", "");
+        os.tick_agent_alerts();
+        assert!(os.notifications.is_empty(), "focused pane must be suppressed");
+        assert!(os.take_host_sequence().is_empty());
+    }
+
+    #[test]
+    fn agent_alert_settle_window_parks_then_fires() {
+        let mut os = os_with_window();
+        os.focused_window = None; // nothing focused → nothing suppressed
+        os.hook_manager.register(hooks::Event::AfterAgentState, "dummy");
+        let fired = Arc::new(Mutex::new(0usize));
+        let fired2 = fired.clone();
+        os.hook_manager.set_runner(move |_, _| {
+            *fired2.lock().unwrap() += 1;
+        });
+
+        // needs_input alerts; default settle (2s) parks it.
+        os.handle_agent_state_changed("w0", "needs_input", "", "");
+        assert!(os.notifications.is_empty());
+        assert!(!os.pending_agent_alerts.is_empty());
+
+        // A further transition retires the parked alert (anti-flicker).
+        os.handle_agent_state_changed("w0", "working", "", "");
+        os.tick_agent_alerts();
+        assert!(os.notifications.is_empty());
+        assert!(os.pending_agent_alerts.is_empty());
+
+        // Park an already-due alert and flush it.
+        os.handle_agent_state_changed("w0", "done", "all done", "claude");
+        os.pending_agent_alerts.insert(
+            "w0".to_string(),
+            agent_alert::PendingAgentAlert {
+                window_id: "w0".into(),
+                from: String::new(),
+                to: "done".into(),
+                due: std::time::Instant::now() - std::time::Duration::from_secs(1),
+            },
+        );
+        os.tick_agent_alerts();
+        assert!(!os.notifications.is_empty());
+        assert!(!os.take_host_sequence().is_empty());
+        os.hook_manager.wait();
+        assert_eq!(*fired.lock().unwrap(), 1);
+    }
+
+    #[test]
     fn add_and_remove_remote_window() {
         let mut os = test_os();
         let (_out_tx, out_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
@@ -1625,6 +1944,9 @@ mod tests {
             workspace: 1,
             cols: 20,
             rows: 10,
+            agent_state: String::new(),
+            agent_message: String::new(),
+            agent_harness: String::new(),
         };
         let idx = os.add_remote_window(info, Box::new(NullSink), out_rx, None);
         assert_eq!(idx, 0);
@@ -1648,6 +1970,9 @@ mod tests {
             workspace: 2,
             cols: 20,
             rows: 10,
+            agent_state: String::new(),
+            agent_message: String::new(),
+            agent_harness: String::new(),
         };
         os.add_remote_window(info, Box::new(NullSink), out_rx, None);
         os.clear_all_windows();

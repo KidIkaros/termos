@@ -21,6 +21,12 @@ pub struct Window {
     pub exited: bool,
     /// The last size applied, so a same-size resize is a no-op.
     last_size: Option<WinSize>,
+    /// The window's agent state, wire spelling (`none` when not reporting).
+    pub agent_state: String,
+    /// The free-text note the last agent report carried.
+    pub agent_message: String,
+    /// The harness id the last agent report named.
+    pub agent_harness: String,
 }
 
 impl Window {
@@ -51,6 +57,9 @@ impl Window {
             handle: Some(handle),
             reading: Arc::new(AtomicBool::new(true)),
             exited: false,
+            agent_state: String::new(),
+            agent_message: String::new(),
+            agent_harness: String::new(),
             last_size: None,
         })
     }
@@ -76,6 +85,9 @@ impl Window {
             handle: None,
             reading: Arc::new(AtomicBool::new(true)),
             exited: false,
+            agent_state: String::new(),
+            agent_message: String::new(),
+            agent_harness: String::new(),
             last_size: None,
         }
     }
@@ -90,6 +102,9 @@ impl Window {
             handle: None,
             reading: Arc::new(AtomicBool::new(true)),
             exited: false,
+            agent_state: String::new(),
+            agent_message: String::new(),
+            agent_harness: String::new(),
             last_size: None,
         }
     }
