@@ -7,4 +7,6 @@ pub mod header;
 pub mod lexer;
 pub mod parser;
 pub mod player;
+pub mod recorder;
+pub mod tapes;
 pub mod token;

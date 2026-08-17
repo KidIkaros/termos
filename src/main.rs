@@ -91,6 +91,24 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     let file = args.get(3).ok_or("usage: tuios tape play <file.tape>")?;
                     cmd_tape_play(file)
                 }
+                "validate" => {
+                    let file = args.get(3).ok_or("usage: tuios tape validate <file.tape>")?;
+                    cmd_tape_validate(file)
+                }
+                "list" | "ls" => cmd_tape_list(),
+                "show" => {
+                    let name = args.get(3).ok_or("usage: tuios tape show <name>")?;
+                    cmd_tape_show(name)
+                }
+                "delete" | "rm" => {
+                    let name = args.get(3).ok_or("usage: tuios tape delete <name>")?;
+                    cmd_tape_delete(name)
+                }
+                "dir" => {
+                    let dir = tuios::tape::tapes::tape_dir()?;
+                    println!("{}", dir.display());
+                    Ok(())
+                }
                 other => Err(format!(
                     "unknown tape subcommand '{other}' (try: play, validate, list, show, delete, dir, exec)"
                 )
@@ -154,6 +172,59 @@ fn cmd_kill(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_attach(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     run_remote_tui(name)
+}
+
+/// `tuios tape validate <file.tape>` — parse-check without running.
+fn cmd_tape_validate(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read tape file: {e}"))?;
+    let (commands, parse_errors) = tuios::tape::parser::parse_file(&content);
+    if !parse_errors.is_empty() {
+        eprintln!("Parsing errors found:");
+        for err in &parse_errors {
+            eprintln!("  ✗ {err}");
+        }
+        return Err("tape file has parsing errors".into());
+    }
+    println!("✓ Tape file is valid");
+    println!("  File: {path}");
+    println!("  Commands: {}", commands.len());
+    Ok(())
+}
+
+/// `tuios tape list` — list recorded tapes.
+fn cmd_tape_list() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tuios::tape::tapes::tape_dir()?;
+    println!("Tape Recordings");
+    println!("Location: {}\n", dir.display());
+    let files = tuios::tape::tapes::list_tapes()?;
+    if files.is_empty() {
+        println!("No tape recordings found");
+        println!("Use Ctrl+B, T, r in TUIOS to start recording");
+        return Ok(());
+    }
+    for f in files {
+        let name = f.file_name().unwrap_or_default().to_string_lossy();
+        let size = std::fs::metadata(&f).map(|m| m.len()).unwrap_or(0);
+        println!("  {name:<40} {size:>8} bytes");
+    }
+    Ok(())
+}
+
+/// `tuios tape show <name>` — print a recording's content.
+fn cmd_tape_show(name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let path = tuios::tape::tapes::resolve_tape_path(name);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|_| format!("no such tape: {name}"))?;
+    print!("{content}");
+    Ok(())
+}
+
+/// `tuios tape delete <name>` — delete a recording.
+fn cmd_tape_delete(name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let path = tuios::tape::tapes::delete_tape(name)?;
+    println!("deleted {}", path.display());
+    Ok(())
 }
 
 /// `tuios tape play <file.tape>` — run the TUI with the tape driving it.

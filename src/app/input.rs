@@ -155,13 +155,25 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         return handle_switcher(os, key);
     }
 
+    // The tape manager overlay captures keys while open.
+    if os.tape_manager_open {
+        return handle_tape_manager(os, key);
+    }
+
     // A pending prefix consumes the next key.
     match os.prefix {
         Prefix::Leader => return handle_leader_key(os, key),
         Prefix::Workspace => return handle_workspace_prefix(os, key),
         Prefix::Window => return handle_window_prefix(os, key),
         Prefix::Minimize => return handle_minimize_prefix(os, key),
+        Prefix::Tape => return handle_tape_prefix(os, key),
         Prefix::None => {}
+    }
+
+    // The leader key works from both modes (Go's prefix routing).
+    if is_leader_key(key, os.leader_key()) {
+        os.prefix = Prefix::Leader;
+        return KeyResult::Consumed;
     }
 
     // In terminal mode, most keys pass through; a few chords stay local.
@@ -218,6 +230,7 @@ fn handle_terminal_mode(os: &mut Os, key: &KeyEvent) -> KeyResult {
     let data = encode_key(key);
     if !data.is_empty() {
         os.write_to_focused(&data);
+        os.record_terminal_key(key);
         KeyResult::Passthrough
     } else {
         KeyResult::Consumed
@@ -349,6 +362,10 @@ fn handle_leader_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         }
         KeyCode::Char('m') => {
             os.prefix = Prefix::Minimize;
+            KeyResult::Consumed
+        }
+        KeyCode::Char('T') => {
+            os.prefix = Prefix::Tape;
             KeyResult::Consumed
         }
         // Split horizontal / vertical.
@@ -514,6 +531,80 @@ fn handle_minimize_prefix(os: &mut Os, key: &KeyEvent) -> KeyResult {
     let _ = key;
     os.prefix = Prefix::None;
     KeyResult::Consumed
+}
+
+// ---------------------------------------------------------------------------
+// Tape prefix + manager
+// ---------------------------------------------------------------------------
+
+/// `Ctrl+B T` — the tape prefix: `r` record, `s` stop, `m` manager, Esc cancel.
+fn handle_tape_prefix(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Esc => {
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        KeyCode::Char('r') => {
+            os.prefix = Prefix::None;
+            os.start_recording();
+            KeyResult::Consumed
+        }
+        KeyCode::Char('s') => {
+            os.prefix = Prefix::None;
+            os.stop_recording();
+            KeyResult::Consumed
+        }
+        KeyCode::Char('m') => {
+            os.open_tape_manager();
+            KeyResult::Consumed
+        }
+        _ => {
+            os.prefix = Prefix::None;
+            KeyResult::Ignored
+        }
+    }
+}
+
+/// The tape manager overlay: filter, navigate, Enter to play, Esc to close.
+fn handle_tape_manager(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Esc => {
+            os.tape_manager_open = false;
+            KeyResult::Consumed
+        }
+        KeyCode::Enter => {
+            os.play_selected_tape();
+            KeyResult::Consumed
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            let items = os.tape_manager_items().len();
+            if items > 0 {
+                os.tape_manager_selected =
+                    (os.tape_manager_selected + items - 1) % items;
+            }
+            KeyResult::Consumed
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let items = os.tape_manager_items().len();
+            if items > 0 {
+                os.tape_manager_selected = (os.tape_manager_selected + 1) % items;
+            }
+            KeyResult::Consumed
+        }
+        KeyCode::Backspace => {
+            os.tape_manager_query.pop();
+            os.tape_manager_selected = 0;
+            KeyResult::Consumed
+        }
+        KeyCode::Char(c) => {
+            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                os.tape_manager_query.push(c);
+                os.tape_manager_selected = 0;
+            }
+            KeyResult::Consumed
+        }
+        _ => KeyResult::Consumed,
+    }
 }
 
 // ---------------------------------------------------------------------------

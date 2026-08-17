@@ -89,7 +89,9 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     render_dock(os, buf, dock_area, &sorted_ids);
 
     // Modal overlays, topmost, in priority order.
-    if os.show_quit_confirmation {
+    if os.tape_manager_open {
+        render_tape_manager(os, buf, content_area);
+    } else if os.show_quit_confirmation {
         render_overlay(
             buf,
             content_area,
@@ -184,7 +186,7 @@ pub fn render_list_overlay(
     block.render(rect, &mut block_buf);
     for yy in 0..height {
         for xx in 0..width {
-            buf[(rect.x + xx, rect.y + yy)] = block_buf[(xx, yy)].clone();
+            buf[(rect.x + xx, rect.y + yy)] = block_buf[(rect.x + xx, rect.y + yy)].clone();
         }
     }
 
@@ -474,6 +476,10 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
         let state = if os.script_paused { "⏸" } else { "▶" };
         text.push_str(&format!(" {state} tape {pct:>3}%"));
     }
+    // Recording indicator.
+    if os.recording_active() {
+        text.push_str(" ● rec");
+    }
     // Agent-state indicator for the focused pane.
     let agent = os.focused_agent_state();
     if !agent.is_empty() && agent != "none" {
@@ -496,6 +502,28 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
     }
 }
 
+/// Render the tape manager overlay: a filterable list of recorded tapes.
+fn render_tape_manager(os: &Os, buf: &mut Buffer, area: TuiRect) {
+    let items = os.tape_manager_items();
+    let mut lines = Vec::new();
+    lines.push(format!("Filter: {}", os.tape_manager_query));
+    lines.push(String::new());
+    if items.is_empty() {
+        lines.push("No recordings yet — Ctrl+B T r to start recording".into());
+    }
+    for (i, path) in items.iter().enumerate() {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let marker = if i == os.tape_manager_selected { "▶ " } else { "  " };
+        lines.push(format!("{marker}{name}"));
+    }
+    lines.push(String::new());
+    lines.push("Enter: play   j/k: move   type: filter   Esc: close".into());
+    render_overlay(buf, area, &lines, "Tape manager");
+}
+
 /// Build a help overlay (the which-key popup) as a list of lines.
 pub fn build_which_key_lines(os: &Os) -> Vec<String> {
     use crate::config::keybindings;
@@ -515,9 +543,12 @@ pub fn build_which_key_lines(os: &Os) -> Vec<String> {
 }
 
 /// Render a centered overlay (quit confirmation, help) over the content.
+/// The rect is clamped to the area so a long help list cannot overflow the
+/// screen (and indexing beyond the buffer panics).
 pub fn render_overlay(buf: &mut Buffer, area: TuiRect, lines: &[String], title: &str) {
-    let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4;
-    let height = lines.len() as u16 + 4;
+    let width = (lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4)
+        .min(area.width);
+    let height = (lines.len() as u16 + 4).min(area.height);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     let rect = TuiRect { x, y, width, height };
@@ -531,7 +562,7 @@ pub fn render_overlay(buf: &mut Buffer, area: TuiRect, lines: &[String], title: 
     block.render(rect, &mut block_buf);
     for yy in 0..height {
         for xx in 0..width {
-            buf[(rect.x + xx, rect.y + yy)] = block_buf[(xx, yy)].clone();
+            buf[(rect.x + xx, rect.y + yy)] = block_buf[(rect.x + xx, rect.y + yy)].clone();
         }
     }
 

@@ -45,6 +45,8 @@ pub enum Prefix {
     Window,
     /// Leader, then `m` — minimize sub-prefix.
     Minimize,
+    /// Leader, then `T` — tape prefix (record/manager).
+    Tape,
 }
 
 /// A command the command palette can run. Ported from the TUIOS command list,
@@ -320,6 +322,12 @@ pub struct Os {
     /// holds until the pane arrives or the deadline passes.
     script_await_windows: usize,
     script_await_deadline: Option<std::time::Instant>,
+    /// Active tape recorder, if recording.
+    pub recorder: Option<crate::tape::recorder::Recorder>,
+    /// Tape manager overlay state.
+    pub tape_manager_open: bool,
+    pub tape_manager_query: String,
+    pub tape_manager_selected: usize,
 }
 
 /// A dock notification.
@@ -398,6 +406,10 @@ impl Os {
             script_wait_regex: None,
             script_await_windows: 0,
             script_await_deadline: None,
+            recorder: None,
+            tape_manager_open: false,
+            tape_manager_query: String::new(),
+            tape_manager_selected: 0,
         }
     }
 
@@ -871,6 +883,165 @@ impl Os {
     }
 
     // -----------------------------------------------------------------------
+    // Tape recording
+    // -----------------------------------------------------------------------
+
+    /// Start recording user interactions, capturing the initial state.
+    pub fn start_recording(&mut self) {
+        let mode = if self.mode == Mode::Terminal {
+            "terminal"
+        } else {
+            "window"
+        };
+        let mut recorder = crate::tape::recorder::Recorder::new();
+        recorder.start_with_state(mode, self.current_workspace, true);
+        self.recorder = Some(recorder);
+        self.notify("recording… (Ctrl+B T s to stop)", "info");
+    }
+
+    /// Stop recording, save the tape, and return its path.
+    pub fn stop_recording(&mut self) -> Option<std::path::PathBuf> {
+        let recorder = self.recorder.as_mut()?;
+        recorder.stop();
+        let count = recorder.command_count();
+        let content = recorder.string("Recorded in TUIOS");
+        let name = format!("recording-{}", crate::tape::tapes::timestamp_stamp());
+        match crate::tape::tapes::save_tape(&name, &content) {
+            Ok(path) => {
+                self.notify(format!("saved {count} commands to {}", path.display()), "info");
+                self.recorder = None;
+                Some(path)
+            }
+            Err(e) => {
+                self.notify(format!("failed to save tape: {e}"), "error");
+                self.recorder = None;
+                None
+            }
+        }
+    }
+
+    /// Record a terminal-mode key press (if recording).
+    pub fn record_terminal_key(&mut self, key: &crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let Some(recorder) = self.recorder.as_mut() else {
+            return;
+        };
+        if !recorder.is_recording() {
+            return;
+        }
+        match key.code {
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                recorder.record_type(&c.to_string());
+            }
+            KeyCode::Enter => recorder.record_key("enter"),
+            KeyCode::Backspace => recorder.record_key("backspace"),
+            KeyCode::Tab => recorder.record_key("tab"),
+            KeyCode::Esc => recorder.record_key("esc"),
+            KeyCode::Delete => recorder.record_key("delete"),
+            KeyCode::Up => recorder.record_key("up"),
+            KeyCode::Down => recorder.record_key("down"),
+            KeyCode::Left => recorder.record_key("left"),
+            KeyCode::Right => recorder.record_key("right"),
+            KeyCode::Home => recorder.record_key("home"),
+            KeyCode::End => recorder.record_key("end"),
+            KeyCode::PageUp => recorder.record_key("pageup"),
+            KeyCode::PageDown => recorder.record_key("pagedown"),
+            KeyCode::Char(c) => {
+                let mut combo = String::new();
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    combo.push_str("ctrl+");
+                }
+                if key.modifiers.contains(KeyModifiers::ALT) {
+                    combo.push_str("alt+");
+                }
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    combo.push_str("shift+");
+                }
+                combo.push(c);
+                recorder.record_key(&combo);
+            }
+            _ => {}
+        }
+    }
+
+    /// Record a window-management action (if recording). Hooks in the Os
+    /// lifecycle methods feed this.
+    pub fn record_action(&mut self, action: &str, args: &[&str]) {
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.record_action(action, args);
+        }
+    }
+
+    /// Record a workspace switch (if recording).
+    pub fn record_workspace_switch(&mut self, workspace: i32) {
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.record_workspace_switch(workspace);
+        }
+    }
+
+    /// True while a recording is active (for the dock indicator).
+    pub fn recording_active(&self) -> bool {
+        self.recorder
+            .as_ref()
+            .map(|r| r.is_recording())
+            .unwrap_or(false)
+    }
+
+    /// Open the tape manager overlay.
+    pub fn open_tape_manager(&mut self) {
+        self.tape_manager_open = true;
+        self.tape_manager_query.clear();
+        self.tape_manager_selected = 0;
+        self.prefix = Prefix::None;
+    }
+
+    /// The tape files for the manager overlay, filtered by the query.
+    pub fn tape_manager_items(&self) -> Vec<std::path::PathBuf> {
+        let Ok(files) = crate::tape::tapes::list_tapes() else {
+            return Vec::new();
+        };
+        let query = self.tape_manager_query.to_lowercase();
+        files
+            .into_iter()
+            .filter(|p| {
+                query.is_empty()
+                    || p.file_name()
+                        .map(|n| n.to_string_lossy().to_lowercase().contains(&query))
+                        .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    /// Play the selected tape from the manager (loads it as the script).
+    pub fn play_selected_tape(&mut self) {
+        let files = self.tape_manager_items();
+        let Some(path) = files.get(self.tape_manager_selected) else {
+            self.notify("no tape selected", "info");
+            return;
+        };
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                self.notify(format!("failed to read tape: {e}"), "error");
+                return;
+            }
+        };
+        let (commands, errors) = crate::tape::parser::parse_file(&content);
+        if !errors.is_empty() || commands.is_empty() {
+            self.notify("tape failed to parse", "error");
+            return;
+        }
+        self.script_mode = true;
+        self.script_paused = false;
+        self.script_player = Some(crate::tape::player::Player::new(commands));
+        self.tape_manager_open = false;
+        self.notify("tape started", "info");
+    }
+
+    // -----------------------------------------------------------------------
     // Workspace helpers
     // -----------------------------------------------------------------------
 
@@ -935,6 +1106,7 @@ impl Os {
         }
         self.workspace_mut(ws).focused = Some(index);
         self.focused_window = Some(index);
+        self.record_action("new_window", &[]);
         let ctx = self.window_hook_ctx(index);
         self.fire_hook(hooks::Event::AfterNewWindow, ctx);
         Ok(index)
@@ -958,6 +1130,7 @@ impl Os {
         if let Some(focused) = self.focused_window {
             let ctx = self.window_hook_ctx(focused);
             self.remove_window(focused);
+            self.record_action("close_window", &[]);
             self.fire_hook(hooks::Event::AfterCloseWindow, ctx);
         }
     }
@@ -1120,6 +1293,7 @@ impl Os {
         if self.focused_window != Some(next as usize) {
             self.focused_window = Some(next as usize);
             self.workspace_mut(ws).focused = Some(next as usize);
+            self.record_action("next_window", &[]);
             let ctx = self.window_hook_ctx(next as usize);
             self.fire_hook(hooks::Event::AfterFocusChange, ctx);
         }
@@ -1143,6 +1317,7 @@ impl Os {
         if self.focused_window != Some(next as usize) {
             self.focused_window = Some(next as usize);
             self.workspace_mut(ws).focused = Some(next as usize);
+            self.record_action("prev_window", &[]);
             let ctx = self.window_hook_ctx(next as usize);
             self.fire_hook(hooks::Event::AfterFocusChange, ctx);
         }
@@ -1176,6 +1351,7 @@ impl Os {
         self.current_workspace = number;
         self.focused_window = self.workspace(number).focused;
         self.prefix = Prefix::None;
+        self.record_workspace_switch(number);
         // Go does not fire when switching to the already-visible workspace.
         let ctx = self.window_hook_ctx(self.focused_window.unwrap_or(0));
         self.fire_hook(
@@ -1248,6 +1424,7 @@ impl Os {
         tree.insert_window(index as i32, focused, direction, 0.5, bounds, gap);
         self.workspace_mut(ws).focused = Some(index);
         self.focused_window = Some(index);
+        self.record_action("new_window", &[]);
         let ctx = self.window_hook_ctx(index);
         self.fire_hook(hooks::Event::AfterNewWindow, ctx);
         Ok(index)
@@ -1261,12 +1438,18 @@ impl Os {
     pub fn enter_terminal_mode(&mut self) {
         self.mode = Mode::Terminal;
         self.prefix = Prefix::None;
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.record_mode_switch(crate::tape::command::CommandType::TerminalMode);
+        }
     }
 
     /// Leave terminal mode back to window management.
     pub fn leave_terminal_mode(&mut self) {
         self.mode = Mode::WindowManagement;
         self.prefix = Prefix::None;
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.record_mode_switch(crate::tape::command::CommandType::WindowManagementMode);
+        }
     }
 
     /// Write bytes to the focused window's PTY.
@@ -2529,6 +2712,26 @@ mod tests {
     }
 
     #[test]
+    fn render_overlay_does_not_panic_on_offset_rects() {
+        // Regression: overlays narrower than the screen (which-key, switcher,
+        // tape manager) used absolute indexing into an offset block buffer.
+        use crate::app::render::render;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut os = test_os();
+        os.prefix = Prefix::Tape; // narrow which-key popup
+        let mut terminal = Terminal::new(TestBackend::new(80, 25)).unwrap();
+        terminal.draw(|f| render(&os, f.buffer_mut())).unwrap();
+        os.prefix = Prefix::None;
+        os.tape_manager_open = true; // tape manager overlay
+        terminal.draw(|f| render(&os, f.buffer_mut())).unwrap();
+        os.tape_manager_open = false;
+        os.switcher_open = true; // switcher overlay
+        terminal.draw(|f| render(&os, f.buffer_mut())).unwrap();
+    }
+
+    #[test]
     fn render_shows_pane_content_inside_the_border() {
         // Regression: the pane border ring must not wipe the content drawn
         // under it, and content must be inset by one cell.
@@ -2575,6 +2778,46 @@ mod tests {
             })
             .collect();
         assert_eq!(row, "│hello  ");
+    }
+
+    #[test]
+    fn recording_captures_lifecycle_and_typing() {
+        let mut os = os_with_window();
+        os.start_recording();
+        // Terminal input accumulates into a Type command.
+        {
+            use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+            let k = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+            os.record_terminal_key(&k);
+            os.record_terminal_key(&k);
+            let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+            os.record_terminal_key(&enter);
+        }
+        // A mode switch flushes and records.
+        os.enter_terminal_mode();
+        // A new window records an action.
+        os.spawn_window("/bin/sh", Box::new(|| {})).unwrap();
+
+        let recorder = os.recorder.as_ref().unwrap();
+        let types: Vec<_> = recorder
+            .commands()
+            .iter()
+            .map(|c| c.type_)
+            .collect();
+        assert!(types.contains(&crate::tape::command::CommandType::Type));
+        assert!(types.contains(&crate::tape::command::CommandType::Enter));
+        assert!(types.contains(&crate::tape::command::CommandType::TerminalMode));
+        assert!(types.contains(&crate::tape::command::CommandType::NewWindow));
+
+        // Stop saves a real .tape file and clears the recorder.
+        let path = os.stop_recording().expect("saved tape");
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("NewWindow"));
+        assert!(content.contains("DisableAnimations"));
+        assert!(os.recorder.is_none());
+        // Clean up the artifact.
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

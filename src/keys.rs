@@ -72,7 +72,7 @@ pub fn encode_key_name(name: &str) -> Option<Vec<u8>> {
     if ctrl && bytes.len() == 1 {
         // Ctrl+letter → ASCII control char.
         let b = bytes[0].to_ascii_uppercase();
-        if (b'A'..=b'Z').contains(&b) {
+        if b.is_ascii_uppercase() {
             bytes = vec![b - b'A' + 1];
         } else {
             return None; // ctrl with a non-letter
