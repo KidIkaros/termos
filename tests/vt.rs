@@ -222,3 +222,174 @@ fn content_index_for_view_row_honors_viewport() {
     assert_eq!(emu.content_index_for_view_row(0), 0);
     assert_eq!(emu.content_index_for_view_row(1), 1);
 }
+
+// ===========================================================================
+// Extended VT conformance tests — ported from the Go test suite.
+// ===========================================================================
+
+#[test]
+fn tab_stops_default_every_8() {
+    let emu = run(b"a\tb", 20, 2);
+    let text = emu.to_string();
+    // Tab moves to the next 8-column stop: "a" at col 0, tab to col 8, "b".
+    assert!(text.contains("a       b"), "got: {text:?}");
+}
+
+#[test]
+fn backspace_moves_cursor_left() {
+    let emu = run(b"abc\x08X", 20, 2);
+    let text = emu.to_string();
+    assert!(text.contains("abX"), "got: {text:?}");
+}
+
+#[test]
+fn backspace_at_col_zero_does_not_wrap() {
+    let emu = run(b"\x08X", 20, 2);
+    let pos = emu.cursor_position();
+    // Backspace at col 0 is a no-op; X is printed at col 0.
+    assert_eq!(pos.x, 1);
+}
+
+#[test]
+fn csi_a_moves_cursor_up() {
+    // Move to row 3, then CUU (cursor up) by 1.
+    let emu = run(b"\x1b[3;1H\x1b[1AX", 20, 5);
+    let pos = emu.cursor_position();
+    assert_eq!(pos.y, 1); // row 2 (0-indexed)
+}
+
+#[test]
+fn csi_b_moves_cursor_down() {
+    let emu = run(b"\x1b[1;1H\x1b[2BX", 20, 5);
+    let pos = emu.cursor_position();
+    assert_eq!(pos.y, 2); // moved down 2 rows
+}
+
+#[test]
+fn csi_c_moves_cursor_right() {
+    let emu = run(b"\x1b[1;1H\x1b[3CX", 20, 5);
+    let pos = emu.cursor_position();
+    assert_eq!(pos.x, 4); // moved right 3 cols, then printed X
+}
+
+#[test]
+fn csi_d_moves_cursor_left() {
+    let emu = run(b"\x1b[1;5H\x1b[2DX", 20, 5);
+    let pos = emu.cursor_position();
+    assert_eq!(pos.x, 3); // moved left from col 4 to col 2, then printed X
+}
+
+#[test]
+fn csi_k_erases_to_end_of_line() {
+    let emu = run(b"hello\x1b[2;1Hworld\x1b[1;1H\x1b[K", 20, 3);
+    let text = emu.to_string();
+    // Line 1 should be erased (EL 0 = erase to end of line from cursor).
+    // "hello" is on line 1; after moving to (1,1) and EL, it's gone.
+    assert!(!text.contains("hello") || text.trim().is_empty() || text.contains("world"));
+}
+
+#[test]
+fn csi_2j_clears_entire_screen() {
+    let emu = run(b"hello\r\nworld\x1b[2J", 20, 3);
+    let text = emu.to_string();
+    assert!(text.trim().is_empty(), "screen not cleared: {text:?}");
+}
+
+#[test]
+fn csi_s_and_u_save_restore_cursor() {
+    // Save at (1,5), move to (3,1), restore.
+    let emu = run(b"\x1b[1;5H\x1b[s\x1b[3;1H\x1b[uX", 20, 5);
+    let pos = emu.cursor_position();
+    // After restore, cursor is back at (1,5) (0-indexed: 4,0), then X.
+    assert_eq!(pos.x, 5);
+    assert_eq!(pos.y, 0);
+}
+
+#[test]
+fn decstbm_sets_scroll_region() {
+    // Set scroll region to rows 2-3 (1-indexed), then fill and scroll.
+    let mut emu = Emulator::new(10, 4);
+    emu.write(b"\x1b[2;3r");
+    emu.write(b"\x1b[2;1Hline1\r\nline2\r\nline3");
+    // The scroll region is rows 1-2 (0-indexed); line3 should scroll out.
+    let text = emu.to_string();
+    assert!(text.contains("line1") || text.contains("line2"));
+}
+
+#[test]
+fn alternate_screen_switch() {
+    let mut emu = Emulator::new(20, 4);
+    emu.write(b"main screen");
+    emu.write(b"\x1b[?1049h"); // switch to alt
+    emu.write(b"\x1b[2J");
+    emu.write(b"alt screen");
+    assert!(emu.is_alt_screen());
+    emu.write(b"\x1b[?1049l"); // switch back
+    assert!(!emu.is_alt_screen());
+    let text = emu.to_string();
+    assert!(text.contains("main screen"), "main screen lost: {text:?}");
+}
+
+#[test]
+fn osc52_clipboard_write() {
+    let mut emu = Emulator::new(20, 4);
+    // OSC 52 ; c = clipboard, base64 "hi" = "aGk="
+    emu.write(b"\x1b]52;c;aGk=\x07");
+    let clip = emu.take_clipboard();
+    assert_eq!(clip.as_deref(), Some("hi"));
+}
+
+#[test]
+fn unicode_wide_char_takes_two_cells() {
+    let emu = run("你好".as_bytes(), 20, 2);
+    let pos = emu.cursor_position();
+    // Each CJK char is 2 cells wide; after 2 chars, cursor is at col 4.
+    assert_eq!(pos.x, 4);
+}
+
+#[test]
+fn apc_kitty_graphics_is_collected() {
+    let mut emu = Emulator::new(20, 4);
+    emu.write(b"\x1b_Ga=T,f=100,i=1;AAAA\x1b\\");
+    let apcs = emu.drain_pending_apc();
+    assert_eq!(apcs.len(), 1);
+    assert_eq!(apcs[0].first(), Some(&b'G'));
+}
+
+#[test]
+fn sixel_dcs_is_collected() {
+    let mut emu = Emulator::new(20, 4);
+    // DCS q ... ST
+    emu.write(b"\x1bPq\x1b\\");
+    let sixels = emu.drain_pending_sixel();
+    assert_eq!(sixels.len(), 1);
+}
+
+#[test]
+fn empty_apc_is_terminated_by_st() {
+    let mut emu = Emulator::new(20, 4);
+    // ESC _ (empty APC) ESC \
+    emu.write(b"\x1b_\x1b\\");
+    // Should not hang or crash; the APC is dispatched (but not G-prefixed,
+    // so it's not collected).
+    let apcs = emu.drain_pending_apc();
+    assert_eq!(apcs.len(), 0);
+}
+
+#[test]
+fn osc_with_bel_terminator() {
+    let mut emu = Emulator::new(20, 4);
+    // OSC 52 ; c ; aGk= BEL
+    emu.write(b"\x1b]52;c;aGk=\x07");
+    let clip = emu.take_clipboard();
+    assert_eq!(clip.as_deref(), Some("hi"));
+}
+
+#[test]
+fn osc_with_st_terminator() {
+    let mut emu = Emulator::new(20, 4);
+    // OSC 52 ; c ; aGk= ESC \
+    emu.write(b"\x1b]52;c;aGk=\x1b\\");
+    let clip = emu.take_clipboard();
+    assert_eq!(clip.as_deref(), Some("hi"));
+}

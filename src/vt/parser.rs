@@ -491,7 +491,7 @@ impl Parser {
             0x1b => {
                 // Might be ST (ESC \) or an escape into something else.
                 self.string_raw.push(byte);
-                State::Osc
+                State::StringTerminator { kind: StringKind::Osc }
             }
             0x07 => {
                 // BEL terminates OSC.
@@ -631,9 +631,9 @@ impl Parser {
     fn dcs_passthrough<H: Handler>(&mut self, byte: u8, handler: &mut H) -> State {
         match byte {
             0x1b => {
-                // Possible ST or other escape; buffer and decide on next byte.
+                // Possible ST (ESC \) or other escape.
                 self.string_raw.push(byte);
-                State::DcsPassthrough
+                State::StringTerminator { kind: StringKind::Dcs }
             }
             0x9c => {
                 // ST (C1).
@@ -729,19 +729,46 @@ impl Parser {
     }
 
     fn dispatch_string<H: Handler>(&mut self, handler: &mut H, kind: StringKind) {
-        let seq = StringSequence {
-            data: std::mem::take(&mut self.string_data),
-        };
         match kind {
-            StringKind::Apc => handler.apc(&seq),
-            StringKind::Pm => handler.pm(&seq),
-            StringKind::Sos => handler.sos(&seq),
+            StringKind::Osc => {
+                handler.osc(&OscSequence {
+                    data: std::mem::take(&mut self.string_data),
+                });
+            }
+            StringKind::Dcs => {
+                handler.dcs(&DcsSequence {
+                    params: self.params.clone(),
+                    intermediates: self.intermediates.clone(),
+                    final_byte: self.dcs_final,
+                    data: std::mem::take(&mut self.string_data),
+                });
+            }
+            StringKind::Apc => {
+                let seq = StringSequence {
+                    data: std::mem::take(&mut self.string_data),
+                };
+                handler.apc(&seq);
+            }
+            StringKind::Pm => {
+                let seq = StringSequence {
+                    data: std::mem::take(&mut self.string_data),
+                };
+                handler.pm(&seq);
+            }
+            StringKind::Sos => {
+                let seq = StringSequence {
+                    data: std::mem::take(&mut self.string_data),
+                };
+                handler.sos(&seq);
+            }
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StringKind {
+    Osc,
+    Dcs,
     Apc,
     Pm,
     Sos,
