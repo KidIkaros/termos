@@ -13,6 +13,8 @@ pub mod scrollback;
 
 pub use cell::{Cell, Color, Decoration, Link, Style};
 pub use emulator::{Emulator, MODE_ALT_SCREEN, MODE_AUTO_WRAP};
-pub use parser::{CsiSequence, DcsSequence, Handler, OscSequence, Param, Parser, State, StringSequence};
+pub use parser::{
+    CsiSequence, DcsSequence, Handler, OscSequence, Param, Parser, State, StringSequence,
+};
 pub use screen::{Position, ScreenBuffer, ScrollRegion};
 pub use scrollback::Scrollback;

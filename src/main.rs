@@ -196,8 +196,8 @@ fn cmd_attach(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 /// `tuios tape validate <file.tape>` — parse-check without running.
 fn cmd_tape_validate(path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("failed to read tape file: {e}"))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("failed to read tape file: {e}"))?;
     let (commands, parse_errors) = tuios::tape::parser::parse_file(&content);
     if !parse_errors.is_empty() {
         eprintln!("Parsing errors found:");
@@ -234,8 +234,7 @@ fn cmd_tape_list() -> Result<(), Box<dyn std::error::Error>> {
 /// `tuios tape show <name>` — print a recording's content.
 fn cmd_tape_show(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let path = tuios::tape::tapes::resolve_tape_path(name);
-    let content = std::fs::read_to_string(&path)
-        .map_err(|_| format!("no such tape: {name}"))?;
+    let content = std::fs::read_to_string(&path).map_err(|_| format!("no such tape: {name}"))?;
     print!("{content}");
     Ok(())
 }
@@ -250,8 +249,8 @@ fn cmd_tape_delete(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 /// `tuios tape exec -s <session> <file.tape>` — run a tape headlessly against
 /// a running daemon session's attached clients.
 fn cmd_tape_exec(session: Option<&str>, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let script = std::fs::read_to_string(path)
-        .map_err(|e| format!("failed to read tape file: {e}"))?;
+    let script =
+        std::fs::read_to_string(path).map_err(|e| format!("failed to read tape file: {e}"))?;
     let (commands, errors) = tuios::tape::parser::parse_file(&script);
     if !errors.is_empty() || commands.is_empty() {
         return Err("tape script has no commands or contains errors".into());
@@ -380,9 +379,9 @@ fn cmd_tape_play(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 /// `tuios set-agent-state <state> [-s session] [-w window] [-m message]
 /// [--harness H]` — report a pane's agent state to the daemon.
 fn cmd_set_agent_state(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let state = args
-        .first()
-        .ok_or("usage: tuios set-agent-state <state> [-s session] [-w window] [-m message] [--harness H]")?;
+    let state = args.first().ok_or(
+        "usage: tuios set-agent-state <state> [-s session] [-w window] [-m message] [--harness H]",
+    )?;
     if tuios::app::agent_alert::parse_agent_state(state).is_none() {
         return Err(format!(
             "invalid state '{state}' (valid: {})",
@@ -523,7 +522,10 @@ fn cmd_agent_verb(args: &[String], verb: Verb) -> Result<(), Box<dyn std::error:
         }
         Verb::SendKeys => {
             if positional.is_empty() {
-                return Err("usage: tuios send-keys <key> [key...] (e.g. \"ctrl+b\" \"c\", \"enter\")".into());
+                return Err(
+                    "usage: tuios send-keys <key> [key...] (e.g. \"ctrl+b\" \"c\", \"enter\")"
+                        .into(),
+                );
             }
             let mut data = Vec::new();
             for key in &positional {
@@ -581,7 +583,10 @@ fn cmd_agent_verb(args: &[String], verb: Verb) -> Result<(), Box<dyn std::error:
             })?;
             match recv_reply(&client)? {
                 Message::WaitResult { window, matched } => {
-                    println!("{session}:{window} {}", if matched { "matched" } else { "timeout" });
+                    println!(
+                        "{session}:{window} {}",
+                        if matched { "matched" } else { "timeout" }
+                    );
                     Ok(())
                 }
                 _ => Err("unexpected reply".into()),
@@ -996,7 +1001,11 @@ fn handle_pending_actions(
 
         if target == *current {
             // We killed the attached session; switch to another or quit.
-            if let Some(next) = sessions.iter().map(|s| s.name.clone()).find(|n| n != current) {
+            if let Some(next) = sessions
+                .iter()
+                .map(|s| s.name.clone())
+                .find(|n| n != current)
+            {
                 match switch_session(&next, msg_tx, events) {
                     Ok(windows) => {
                         outputs.lock().unwrap().clear();
@@ -1044,9 +1053,7 @@ fn wait_for_attached(events: &Receiver<RemoteEvent>) -> Result<Vec<WindowInfo>, 
             Ok(RemoteEvent::Attached { windows }) => return Ok(windows),
             Ok(RemoteEvent::Error(msg)) => return Err(msg),
             Ok(_) => continue,
-            Err(RecvTimeoutError::Timeout) => {
-                return Err("timed out waiting for the daemon".into())
-            }
+            Err(RecvTimeoutError::Timeout) => return Err("timed out waiting for the daemon".into()),
             Err(RecvTimeoutError::Disconnected) => return Err("event channel closed".into()),
         }
     }
@@ -1064,9 +1071,7 @@ fn wait_for_list(events: &Receiver<RemoteEvent>) -> Result<Vec<SessionInfo>, Str
             Ok(RemoteEvent::ListResult { sessions }) => return Ok(sessions),
             Ok(RemoteEvent::Error(msg)) => return Err(msg),
             Ok(_) => continue,
-            Err(RecvTimeoutError::Timeout) => {
-                return Err("timed out waiting for the daemon".into())
-            }
+            Err(RecvTimeoutError::Timeout) => return Err("timed out waiting for the daemon".into()),
             Err(RecvTimeoutError::Disconnected) => return Err("event channel closed".into()),
         }
     }
@@ -1213,7 +1218,8 @@ mod tests {
         ))
         .expect("read skills/tuios/SKILL.md");
         assert_eq!(
-            super::SKILL_DOC, on_disk,
+            super::SKILL_DOC,
+            on_disk,
             "the embedded skill differs from skills/tuios/SKILL.md"
         );
     }

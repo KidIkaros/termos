@@ -77,11 +77,7 @@ impl PlacementStore {
     /// Map a guest image id to a host image id for a window, allocating one
     /// on first sight.
     pub fn map_id(&mut self, window_id: u32, guest_id: u32) -> u32 {
-        if let Some(&id) = self
-            .id_map
-            .get(&window_id)
-            .and_then(|m| m.get(&guest_id))
-        {
+        if let Some(&id) = self.id_map.get(&window_id).and_then(|m| m.get(&guest_id)) {
             return id;
         }
         let id = self.next_host_id;

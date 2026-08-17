@@ -36,15 +36,13 @@ pub struct Cursor {
 
 /// The scroll region (margins) in cell coordinates. `min` is top-left,
 /// `max` is bottom-right exclusive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ScrollRegion {
     pub top: i32,
     pub bottom: i32,
     pub left: i32,
     pub right: i32,
 }
-
 
 impl ScrollRegion {
     pub fn full(width: i32, height: i32) -> Self {
@@ -384,8 +382,7 @@ impl ScreenBuffer {
         let n = n.min(self.scroll.bottom - y);
         let blank = new_line(self.width as usize);
         for _ in 0..n {
-            self.lines
-                .insert(y as usize, blank.clone());
+            self.lines.insert(y as usize, blank.clone());
             self.lines.remove(self.scroll.bottom as usize);
         }
         for yy in self.scroll.top..self.scroll.bottom {
@@ -406,7 +403,8 @@ impl ScreenBuffer {
         let blank = new_line(self.width as usize);
         for _ in 0..n {
             self.lines.remove(y as usize);
-            self.lines.insert(self.scroll.bottom as usize - 1, blank.clone());
+            self.lines
+                .insert(self.scroll.bottom as usize - 1, blank.clone());
         }
         for yy in self.scroll.top..self.scroll.bottom {
             self.touch_line(yy);

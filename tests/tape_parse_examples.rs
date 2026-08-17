@@ -15,7 +15,12 @@ fn example_tapes_parse() {
                 "{} produced no commands",
                 path.display()
             );
-            eprintln!("{}: {} commands, {} errors", path.display(), commands.len(), errors.len());
+            eprintln!(
+                "{}: {} commands, {} errors",
+                path.display(),
+                commands.len(),
+                errors.len()
+            );
             parsed_any = true;
         }
     }

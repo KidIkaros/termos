@@ -239,8 +239,12 @@ pub fn spawn_pty(
                 );
                 // Caller-supplied environment (e.g. TUIOS_ENV).
                 for (k, v) in extra_env {
-                    let Ok(kc) = CString::new(k.as_str()) else { continue };
-                    let Ok(vc) = CString::new(v.as_str()) else { continue };
+                    let Ok(kc) = CString::new(k.as_str()) else {
+                        continue;
+                    };
+                    let Ok(vc) = CString::new(v.as_str()) else {
+                        continue;
+                    };
                     libc::setenv(kc.as_ptr(), vc.as_ptr(), 1);
                 }
             }
@@ -306,7 +310,8 @@ fn reader_thread(
 
         match poll_result {
             n if n > 0 => {
-                let n = unsafe { libc::read(raw_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+                let n =
+                    unsafe { libc::read(raw_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
                 match n {
                     n if n > 0 => {
                         let chunk = buf[..n as usize].to_vec();
@@ -364,12 +369,17 @@ mod tests {
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
-            if output.windows(b"pty-stage1".len()).any(|w| w == b"pty-stage1") {
+            if output
+                .windows(b"pty-stage1".len())
+                .any(|w| w == b"pty-stage1")
+            {
                 break;
             }
         }
 
-        assert!(output.windows(b"pty-stage1".len()).any(|w| w == b"pty-stage1"));
+        assert!(output
+            .windows(b"pty-stage1".len())
+            .any(|w| w == b"pty-stage1"));
         drop(writer);
         drop(handle);
     }

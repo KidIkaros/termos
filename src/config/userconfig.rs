@@ -318,7 +318,10 @@ mod tests {
     fn default_config_has_leader_and_bindings() {
         let cfg = UserConfig::default_config();
         assert_eq!(cfg.keybindings.leader_key, "ctrl+b");
-        assert!(cfg.keybindings.prefix_mode.contains_key("prefix_new_window"));
+        assert!(cfg
+            .keybindings
+            .prefix_mode
+            .contains_key("prefix_new_window"));
         assert!(cfg.keybindings.window_management.contains_key("new_window"));
         assert_eq!(cfg.appearance.border_style, "rounded");
         assert_eq!(cfg.appearance.scrollback_lines, 10_000);

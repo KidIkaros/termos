@@ -82,12 +82,10 @@ impl Capabilities {
             host,
             HostTerminal::Kitty | HostTerminal::Ghostty | HostTerminal::WezTerm
         );
-        let sixel = matches!(
-            host,
-            HostTerminal::WezTerm | HostTerminal::Alacritty
-        ) || getenv("TERM")
-            .map(|t| t.contains("vt340") || t.contains("mlterm") || t.contains("foot"))
-            .unwrap_or(false);
+        let sixel = matches!(host, HostTerminal::WezTerm | HostTerminal::Alacritty)
+            || getenv("TERM")
+                .map(|t| t.contains("vt340") || t.contains("mlterm") || t.contains("foot"))
+                .unwrap_or(false);
         Capabilities {
             kitty,
             sixel,
@@ -186,10 +184,8 @@ mod tests {
 
     #[test]
     fn detects_kitty_via_window_id() {
-        let caps = Capabilities::probe_with(env(&[
-            ("KITTY_WINDOW_ID", "1"),
-            ("TERM", "xterm-kitty"),
-        ]));
+        let caps =
+            Capabilities::probe_with(env(&[("KITTY_WINDOW_ID", "1"), ("TERM", "xterm-kitty")]));
         assert_eq!(caps.host, HostTerminal::Kitty);
         assert!(caps.kitty);
     }

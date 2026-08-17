@@ -152,8 +152,7 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
             "h" => num * 3600.0 * 1_000_000_000.0,
             _ => return None,
         };
-        total = total
-            .checked_add(Duration::from_nanos(nanos.round().max(0.0) as u64))?;
+        total = total.checked_add(Duration::from_nanos(nanos.round().max(0.0) as u64))?;
         any = true;
     }
     if any {

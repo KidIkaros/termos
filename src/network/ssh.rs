@@ -14,8 +14,8 @@ use std::sync::Arc;
 use russh::server::{Auth, Handle, Handler, Msg, Server, Session};
 use russh::{Channel, ChannelId, Pty};
 use russh_keys::key::PublicKey;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::app::Os;
 use crate::config::UserConfig;
@@ -132,19 +132,11 @@ impl Server for TuiosSshServer {
 impl Handler for TuiosSshServer {
     type Error = Box<dyn std::error::Error + Send + Sync>;
 
-    async fn auth_publickey(
-        &mut self,
-        _user: &str,
-        _key: &PublicKey,
-    ) -> Result<Auth, Self::Error> {
+    async fn auth_publickey(&mut self, _user: &str, _key: &PublicKey) -> Result<Auth, Self::Error> {
         Ok(Auth::Accept)
     }
 
-    async fn auth_password(
-        &mut self,
-        _user: &str,
-        _password: &str,
-    ) -> Result<Auth, Self::Error> {
+    async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
         Ok(Auth::Accept)
     }
 
@@ -221,9 +213,7 @@ impl Handler for TuiosSshServer {
 
 impl Drop for TuiosSshServer {
     fn drop(&mut self) {
-        let id = self
-            .next_id
-            .load(std::sync::atomic::Ordering::SeqCst);
+        let id = self.next_id.load(std::sync::atomic::Ordering::SeqCst);
         let clients = self.clients.clone();
         tokio::spawn(async move {
             let mut clients = clients.lock().await;

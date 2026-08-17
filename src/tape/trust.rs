@@ -170,8 +170,8 @@ impl Store {
     /// single pass, returning its trust status. Denial is evaluated first and
     /// by canonical path alone, so a denied tape never causes a read.
     pub fn check(&self, tape_path: &str) -> std::result::Result<CheckResult, String> {
-        let real = std::fs::canonicalize(tape_path)
-            .map_err(|e| format!("resolving tape path: {e}"))?;
+        let real =
+            std::fs::canonicalize(tape_path).map_err(|e| format!("resolving tape path: {e}"))?;
         let real_str = real.to_string_lossy().into_owned();
 
         let denied = self.denied.contains_key(&real_str);
@@ -189,8 +189,7 @@ impl Store {
 
         // Open once and stat the descriptor: hygiene on the fd ties the checks
         // to the same inode the bytes come from.
-        let f = std::fs::File::open(&real)
-            .map_err(|e| format!("opening tape: {e}"))?;
+        let f = std::fs::File::open(&real).map_err(|e| format!("opening tape: {e}"))?;
         let info = f.metadata().map_err(|e| format!("stat tape: {e}"))?;
         if let Some(reason) = hygiene_reason(&info) {
             return Ok(CheckResult {
@@ -293,10 +292,7 @@ impl Store {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("creating tape trust store directory: {e}"))?;
 
-        let tmp = dir.join(format!(
-            ".tape-trust-{}.tmp",
-            uuid::Uuid::new_v4()
-        ));
+        let tmp = dir.join(format!(".tape-trust-{}.tmp", uuid::Uuid::new_v4()));
         let result = (|| -> std::result::Result<(), String> {
             let mut f = std::fs::OpenOptions::new()
                 .write(true)

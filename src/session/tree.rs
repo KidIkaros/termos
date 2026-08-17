@@ -209,7 +209,10 @@ mod tests {
             window_count: 0,
             restored: false,
             current_workspace: 1,
-            windows: vec![win("w0", "Terminal", "working"), win("w1", "Editor", "errored")],
+            windows: vec![
+                win("w0", "Terminal", "working"),
+                win("w1", "Editor", "errored"),
+            ],
         });
         assert_eq!(node.agent_state, "errored");
         assert_eq!(node.window_count, 2);

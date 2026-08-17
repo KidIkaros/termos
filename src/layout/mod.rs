@@ -12,8 +12,8 @@ pub mod tiling;
 pub use bsp::{
     AutoScheme, BSPTree, PreselectionDir, Rect, ResizeEdge, SplitLine, SplitType, TileNode,
 };
-pub use tiling::{calculate_tiling_layout, TileLayout};
 pub use scrolling::ScrollingLayout;
+pub use tiling::{calculate_tiling_layout, TileLayout};
 
 /// Minimum window width in cells (mirrors `config.DefaultWindowWidth`).
 pub const DEFAULT_WINDOW_WIDTH: i32 = 20;

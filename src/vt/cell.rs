@@ -7,8 +7,7 @@
 use std::sync::Arc;
 
 /// A color for a cell's foreground, background, or underline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Color {
     /// Default terminal color (theme foreground/background).
     #[default]
@@ -18,7 +17,6 @@ pub enum Color {
     /// One of the 256-color palette slots (0-255).
     Rgb(u8, u8, u8),
 }
-
 
 impl Color {
     pub fn indexed(i: u8) -> Self {

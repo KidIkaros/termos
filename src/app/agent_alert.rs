@@ -10,12 +10,11 @@
 
 use std::time::{Duration, Instant};
 
-use crate::config::userconfig::{AgentAlertSounds, AgentAlertsConfig, AgentAlertStates};
+use crate::config::userconfig::{AgentAlertSounds, AgentAlertStates, AgentAlertsConfig};
 
 /// Accepted agent-state wire values, in a stable order (the protocol surface).
-pub const AGENT_STATE_NAMES: [&str; 6] = [
-    "none", "working", "needs_input", "idle", "done", "errored",
-];
+pub const AGENT_STATE_NAMES: [&str; 6] =
+    ["none", "working", "needs_input", "idle", "done", "errored"];
 
 /// Validate an agent-state wire value (empty input is not accepted: the verb
 /// requires a state, and "none" is the spelling that clears it).
@@ -120,7 +119,10 @@ pub fn resolve_agent_alerts(c: &AgentAlertsConfig) -> AgentAlertPolicy {
         idle,
         working,
     } = &c.states;
-    p.set_state("needs_input", bool_or(*needs_input, p.alerts("needs_input")));
+    p.set_state(
+        "needs_input",
+        bool_or(*needs_input, p.alerts("needs_input")),
+    );
     p.set_state("errored", bool_or(*errored, p.alerts("errored")));
     p.set_state("done", bool_or(*done, p.alerts("done")));
     p.set_state("idle", bool_or(*idle, p.alerts("idle")));
@@ -169,14 +171,12 @@ impl AgentAlertPolicy {
 
     /// Whether an alert should play a cue through an audio player.
     pub fn plays_audio(&self) -> bool {
-        self.sound
-            && (self.sound_mode == SoundMode::Audio || self.sound_mode == SoundMode::Both)
+        self.sound && (self.sound_mode == SoundMode::Audio || self.sound_mode == SoundMode::Both)
     }
 
     /// Whether an alert should write a BEL to the terminal.
     pub fn plays_bell(&self) -> bool {
-        self.sound
-            && (self.sound_mode == SoundMode::Bell || self.sound_mode == SoundMode::Both)
+        self.sound && (self.sound_mode == SoundMode::Bell || self.sound_mode == SoundMode::Both)
     }
 
     /// Whether a transition into `state` uses the cue that asks for a human
@@ -217,9 +217,9 @@ pub fn parse_quiet_hours(s: &str) -> Result<(i32, i32), String> {
     if s.is_empty() {
         return Ok((0, 0));
     }
-    let (start, end) = s.split_once('-').ok_or_else(|| {
-        format!("want HH:MM-HH:MM, got {s:?}")
-    })?;
+    let (start, end) = s
+        .split_once('-')
+        .ok_or_else(|| format!("want HH:MM-HH:MM, got {s:?}"))?;
     let from = parse_clock(start)?;
     let to = parse_clock(end)?;
     Ok((from, to))
@@ -311,7 +311,7 @@ fn play_cue(file: &str) {
                 c
             }
             None => return,
-        }
+        },
         (None, _) => {
             log::debug!("agent alert: no audio player found (paplay/aplay/afplay/play)");
             return;
@@ -325,9 +325,7 @@ fn play_cue(file: &str) {
 
 fn which(name: &str) -> bool {
     std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|dir| dir.join(name).is_file())
-        })
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
         .unwrap_or(false)
 }
 
@@ -448,7 +446,10 @@ mod tests {
 
     #[test]
     fn parse_agent_state_validates() {
-        assert_eq!(parse_agent_state("needs_input").as_deref(), Some("needs_input"));
+        assert_eq!(
+            parse_agent_state("needs_input").as_deref(),
+            Some("needs_input")
+        );
         assert_eq!(parse_agent_state("none").as_deref(), Some("none"));
         assert_eq!(parse_agent_state(""), None);
         assert_eq!(parse_agent_state("bogus"), None);

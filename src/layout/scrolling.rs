@@ -60,16 +60,15 @@ impl ScrollingLayout {
             ..Default::default()
         };
 
-        let insert_idx: usize = if !self.columns.is_empty()
-            && (self.focused_col as usize) < self.columns.len() - 1
-        {
-            let idx = self.focused_col as usize + 1;
-            self.columns.insert(idx, col);
-            idx
-        } else {
-            self.columns.push(col);
-            self.columns.len() - 1
-        };
+        let insert_idx: usize =
+            if !self.columns.is_empty() && (self.focused_col as usize) < self.columns.len() - 1 {
+                let idx = self.focused_col as usize + 1;
+                self.columns.insert(idx, col);
+                idx
+            } else {
+                self.columns.push(col);
+                self.columns.len() - 1
+            };
 
         self.focused_col = insert_idx as i32;
     }
@@ -78,7 +77,11 @@ impl ScrollingLayout {
     /// removed and focus shifts LEFT.
     pub fn remove_window(&mut self, window_id: i32) {
         for i in 0..self.columns.len() {
-            if let Some(j) = self.columns[i].window_ids.iter().position(|&id| id == window_id) {
+            if let Some(j) = self.columns[i]
+                .window_ids
+                .iter()
+                .position(|&id| id == window_id)
+            {
                 self.columns[i].window_ids.remove(j);
                 if self.columns[i].window_ids.is_empty() {
                     let removed_idx = i;
@@ -245,7 +248,8 @@ impl ScrollingLayout {
         let col_x = self.column_x(self.focused_col, screen_width);
         let col_w = self.resolve_width(&self.columns[self.focused_col as usize], screen_width);
 
-        let fully_visible = col_x >= self.viewport_x && col_x + col_w <= self.viewport_x + screen_width;
+        let fully_visible =
+            col_x >= self.viewport_x && col_x + col_w <= self.viewport_x + screen_width;
         if fully_visible {
             return;
         }

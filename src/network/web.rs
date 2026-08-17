@@ -81,9 +81,7 @@ async fn handle_ws(socket: WebSocket, state: WebServerState) {
                     "type": "output",
                     "data": text,
                 });
-                let _ = socket
-                    .send(Message::Text(response.to_string()))
-                    .await;
+                let _ = socket.send(Message::Text(response.to_string())).await;
             }
             Ok(Message::Binary(_)) => {}
             Ok(Message::Close(_)) | Err(_) => break,

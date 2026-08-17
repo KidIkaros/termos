@@ -61,7 +61,10 @@ fn daemon_create_attach_input_output_kill() {
         match client.recv() {
             Ok(Message::PtyOutput { data, .. }) => {
                 buf.extend_from_slice(&data);
-                if buf.windows(b"daemon-stage1".len()).any(|w| w == b"daemon-stage1") {
+                if buf
+                    .windows(b"daemon-stage1".len())
+                    .any(|w| w == b"daemon-stage1")
+                {
                     found = true;
                     break;
                 }
@@ -71,7 +74,11 @@ fn daemon_create_attach_input_output_kill() {
             Err(_) => break,
         }
     }
-    assert!(found, "daemon did not echo the marker back; got: {:?}", String::from_utf8_lossy(&buf));
+    assert!(
+        found,
+        "daemon did not echo the marker back; got: {:?}",
+        String::from_utf8_lossy(&buf)
+    );
 
     // The session shows as attached while we are on it.
     let list = client.list().unwrap();
@@ -109,14 +116,20 @@ fn daemon_rejects_duplicate_session_and_broadcasts_to_two_clients() {
     for _ in 0..60 {
         if !got_first {
             if let Ok(Message::PtyOutput { data, .. }) = first.recv() {
-                if data.windows(b"broadcast-stage1".len()).any(|w| w == b"broadcast-stage1") {
+                if data
+                    .windows(b"broadcast-stage1".len())
+                    .any(|w| w == b"broadcast-stage1")
+                {
                     got_first = true;
                 }
             }
         }
         if !got_second {
             if let Ok(Message::PtyOutput { data, .. }) = second.recv() {
-                if data.windows(b"broadcast-stage1".len()).any(|w| w == b"broadcast-stage1") {
+                if data
+                    .windows(b"broadcast-stage1".len())
+                    .any(|w| w == b"broadcast-stage1")
+                {
                     got_second = true;
                 }
             }
@@ -171,7 +184,10 @@ fn daemon_fires_window_lifecycle_hooks() {
     let seen2 = Arc::clone(&seen);
     daemon.set_hook_runner(move |_, ctx| {
         if let Some(ev) = ctx.event {
-            seen2.lock().unwrap().push((ev, ctx.session_id.clone(), ctx.window_id.clone()));
+            seen2
+                .lock()
+                .unwrap()
+                .push((ev, ctx.session_id.clone(), ctx.window_id.clone()));
         }
     });
     let path = socket.clone();

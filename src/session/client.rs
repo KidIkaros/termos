@@ -36,7 +36,9 @@ impl DaemonClient {
         match client.recv()? {
             Message::Welcome { .. } => Ok(client),
             Message::Error { message } => Err(io::Error::other(message)),
-            other => Err(io::Error::other(format!("unexpected handshake reply: {other:?}"))),
+            other => Err(io::Error::other(format!(
+                "unexpected handshake reply: {other:?}"
+            ))),
         }
     }
 

@@ -136,15 +136,11 @@ impl Parser {
             TokenType::Set => self.parse_set_command(),
             TokenType::Output => self.parse_output_command(),
             TokenType::Source => self.parse_source_command(),
-            TokenType::EnableAnimations => {
-                self.parse_basic_command(CommandType::EnableAnimations)
-            }
+            TokenType::EnableAnimations => self.parse_basic_command(CommandType::EnableAnimations),
             TokenType::DisableAnimations => {
                 self.parse_basic_command(CommandType::DisableAnimations)
             }
-            TokenType::ToggleAnimations => {
-                self.parse_basic_command(CommandType::ToggleAnimations)
-            }
+            TokenType::ToggleAnimations => self.parse_basic_command(CommandType::ToggleAnimations),
             _ => {
                 self.add_error(format!("unexpected token: {:?}", self.cur.type_));
                 self.skip_to_next_line();
@@ -226,7 +222,7 @@ impl Parser {
                 self.cur.type_
             ));
             self.failed = true;
-self.skip_to_next_line();
+            self.skip_to_next_line();
             return cmd;
         }
 
@@ -256,7 +252,7 @@ self.skip_to_next_line();
                 self.cur.type_
             ));
             self.failed = true;
-self.skip_to_next_line();
+            self.skip_to_next_line();
             return cmd;
         }
 
@@ -289,7 +285,8 @@ self.skip_to_next_line();
             || self.cur.type_ == TokenType::Enter
             || self.cur.type_ == TokenType::Space
             || self.cur.type_ == TokenType::Number
-            || (!self.cur.literal.is_empty() && self.cur.literal.chars().next().unwrap().is_ascii_digit());
+            || (!self.cur.literal.is_empty()
+                && self.cur.literal.chars().next().unwrap().is_ascii_digit());
         if valid_key {
             combo_parts.push(self.cur.literal.clone());
             self.next_token();
@@ -299,7 +296,7 @@ self.skip_to_next_line();
                 self.cur.type_
             ));
             self.failed = true;
-self.skip_to_next_line();
+            self.skip_to_next_line();
             return cmd;
         }
 
@@ -325,7 +322,7 @@ self.skip_to_next_line();
         } else {
             self.add_error("Focus command expects an identifier or number".into());
             self.failed = true;
-self.skip_to_next_line();
+            self.skip_to_next_line();
             return cmd;
         }
 
@@ -344,7 +341,10 @@ self.skip_to_next_line();
     }
 
     fn parse_move_and_follow_workspace_command(&mut self) -> Command {
-        self.parse_number_command(CommandType::MoveAndFollowWorkspace, "MoveAndFollowWorkspace")
+        self.parse_number_command(
+            CommandType::MoveAndFollowWorkspace,
+            "MoveAndFollowWorkspace",
+        )
     }
 
     fn parse_number_command(&mut self, cmd_type: CommandType, name: &str) -> Command {
@@ -356,12 +356,9 @@ self.skip_to_next_line();
             cmd.raw = format!("{name} {}", self.cur.literal);
             self.next_token();
         } else {
-            self.add_error(format!(
-                "{name} expects a number, got {:?}",
-                self.cur.type_
-            ));
+            self.add_error(format!("{name} expects a number, got {:?}", self.cur.type_));
             self.failed = true;
-self.skip_to_next_line();
+            self.skip_to_next_line();
             return cmd;
         }
 
@@ -386,7 +383,7 @@ self.skip_to_next_line();
                 self.cur.type_
             ));
             self.failed = true;
-self.skip_to_next_line();
+            self.skip_to_next_line();
             return cmd;
         }
 
@@ -410,7 +407,7 @@ self.skip_to_next_line();
             _ => {
                 self.add_error("RenameWindow expects a window name".into());
                 self.failed = true;
-self.skip_to_next_line();
+                self.skip_to_next_line();
                 return cmd;
             }
         }
@@ -441,7 +438,7 @@ self.skip_to_next_line();
                 self.cur.type_
             ));
             self.failed = true;
-self.skip_to_next_line();
+            self.skip_to_next_line();
             return cmd;
         }
 
@@ -471,7 +468,7 @@ self.skip_to_next_line();
         } else {
             self.add_error("WaitUntilRegex expects a regex pattern string".into());
             self.failed = true;
-self.skip_to_next_line();
+            self.skip_to_next_line();
             return cmd;
         }
 
@@ -492,10 +489,7 @@ self.skip_to_next_line();
 
             if matches!(
                 self.cur.type_,
-                TokenType::Identifier
-                    | TokenType::String
-                    | TokenType::Number
-                    | TokenType::Duration
+                TokenType::Identifier | TokenType::String | TokenType::Number | TokenType::Duration
             ) {
                 let value = self.cur.literal.clone();
                 cmd.args = vec![key.clone(), value.clone()];
@@ -504,13 +498,13 @@ self.skip_to_next_line();
             } else {
                 self.add_error("Set command expects a value".into());
                 self.failed = true;
-self.skip_to_next_line();
+                self.skip_to_next_line();
                 return cmd;
             }
         } else {
             self.add_error("Set command expects a key".into());
             self.failed = true;
-self.skip_to_next_line();
+            self.skip_to_next_line();
             return cmd;
         }
 
@@ -531,7 +525,7 @@ self.skip_to_next_line();
         } else {
             self.add_error(format!("{name} command expects a filename"));
             self.failed = true;
-self.skip_to_next_line();
+            self.skip_to_next_line();
             return cmd;
         }
 

@@ -45,7 +45,10 @@ impl Window {
         };
 
         let (writer, handle, reader) = spawn_pty(size, &argv, wake, extra_env)?;
-        let emulator = Arc::new(Mutex::new(Emulator::new(size.cols as i32, size.rows as i32)));
+        let emulator = Arc::new(Mutex::new(Emulator::new(
+            size.cols as i32,
+            size.rows as i32,
+        )));
 
         let emu_clone = Arc::clone(&emulator);
         std::thread::spawn(move || drain_thread(reader.rx, emu_clone));
@@ -75,7 +78,10 @@ impl Window {
         sink: Box<dyn PtySink>,
         output: crossbeam_channel::Receiver<Vec<u8>>,
     ) -> Self {
-        let emulator = Arc::new(Mutex::new(Emulator::new(size.cols as i32, size.rows as i32)));
+        let emulator = Arc::new(Mutex::new(Emulator::new(
+            size.cols as i32,
+            size.rows as i32,
+        )));
         let emu_clone = Arc::clone(&emulator);
         std::thread::spawn(move || drain_thread(output, emu_clone));
         Self {
@@ -98,7 +104,10 @@ impl Window {
         Self {
             id: id.into(),
             title: title.into(),
-            emulator: Arc::new(Mutex::new(Emulator::new(size.cols as i32, size.rows as i32))),
+            emulator: Arc::new(Mutex::new(Emulator::new(
+                size.cols as i32,
+                size.rows as i32,
+            ))),
             writer: None,
             handle: None,
             reading: Arc::new(AtomicBool::new(true)),

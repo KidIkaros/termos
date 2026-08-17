@@ -131,7 +131,10 @@ pub enum Message {
 pub fn write_message<W: Write>(w: &mut W, msg: &Message) -> io::Result<()> {
     let bytes = serde_json::to_vec(msg).map_err(io::Error::other)?;
     if bytes.len() > MAX_FRAME {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
     }
     w.write_all(&(bytes.len() as u32).to_be_bytes())?;
     w.write_all(&bytes)?;
@@ -144,7 +147,10 @@ pub fn read_message<R: Read>(r: &mut R) -> io::Result<Message> {
     r.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
     if len > MAX_FRAME {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;

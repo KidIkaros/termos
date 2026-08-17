@@ -6,7 +6,10 @@ use crate::config::theme::Rgb;
 
 /// Convert a `vt::Color` into a ratatui color. Default colors resolve to the
 /// theme's foreground/background when provided.
-pub fn to_tui_color(color: crate::vt::Color, theme: Option<&crate::config::theme::Theme>) -> TuiColor {
+pub fn to_tui_color(
+    color: crate::vt::Color,
+    theme: Option<&crate::config::theme::Theme>,
+) -> TuiColor {
     match color {
         crate::vt::Color::Default => {
             if let Some(theme) = theme {
@@ -17,7 +20,11 @@ pub fn to_tui_color(color: crate::vt::Color, theme: Option<&crate::config::theme
         }
         crate::vt::Color::Indexed(i) => {
             if let Some(theme) = theme {
-                TuiColor::Rgb(theme.ansi[i as usize].0, theme.ansi[i as usize].1, theme.ansi[i as usize].2)
+                TuiColor::Rgb(
+                    theme.ansi[i as usize].0,
+                    theme.ansi[i as usize].1,
+                    theme.ansi[i as usize].2,
+                )
             } else {
                 // Fall back to the standard xterm 256 palette for 0-15.
                 xterm_256(i)

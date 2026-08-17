@@ -112,9 +112,7 @@ fn unquote(s: &str) -> String {
     let s = s.trim();
     if s.len() >= 2 {
         let b = s.as_bytes();
-        if (b[0] == b'"' && b[s.len() - 1] == b'"')
-            || (b[0] == b'\'' && b[s.len() - 1] == b'\'')
-        {
+        if (b[0] == b'"' && b[s.len() - 1] == b'"') || (b[0] == b'\'' && b[s.len() - 1] == b'\'') {
             return s[1..s.len() - 1].to_string();
         }
     }

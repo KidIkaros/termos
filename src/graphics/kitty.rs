@@ -17,37 +17,37 @@ use std::sync::Mutex;
 use super::capability::Capabilities;
 use super::placement::PlacementStore;
 
-    /// True if a graphics payload looks like an echoed kitty protocol response
-    /// rather than real image data. Matched against the RAW wire payload (the
-    /// base64 text between `;` and the APC terminator), NOT the decoded bytes.
-    ///
-    /// Shape: `^(OK|E[A-Z]{2,}(:.*)?)$` with a hard length cap so a legitimate
-    /// (necessarily longer, mixed-case) base64 payload cannot match. The
-    /// error name must be at least 3 chars (`E` + 2 uppercase) to avoid
-    /// colliding with 2-char base64 chunks like `EN`.
-    pub fn is_kitty_response(payload: &str) -> bool {
-        let bytes = payload.as_bytes();
-        if bytes.is_empty() || bytes.len() > 256 {
-            return false;
-        }
-        if payload == "OK" {
-            return true;
-        }
-        if bytes[0] != b'E' {
-            return false;
-        }
-        let mut i = 1;
-        while i < bytes.len() && bytes[i].is_ascii_uppercase() {
-            i += 1;
-        }
-        if i < 3 {
-            return false; // need at least E + 2 uppercase letters
-        }
-        if i == bytes.len() {
-            return true;
-        }
-        bytes[i] == b':'
+/// True if a graphics payload looks like an echoed kitty protocol response
+/// rather than real image data. Matched against the RAW wire payload (the
+/// base64 text between `;` and the APC terminator), NOT the decoded bytes.
+///
+/// Shape: `^(OK|E[A-Z]{2,}(:.*)?)$` with a hard length cap so a legitimate
+/// (necessarily longer, mixed-case) base64 payload cannot match. The
+/// error name must be at least 3 chars (`E` + 2 uppercase) to avoid
+/// colliding with 2-char base64 chunks like `EN`.
+pub fn is_kitty_response(payload: &str) -> bool {
+    let bytes = payload.as_bytes();
+    if bytes.is_empty() || bytes.len() > 256 {
+        return false;
     }
+    if payload == "OK" {
+        return true;
+    }
+    if bytes[0] != b'E' {
+        return false;
+    }
+    let mut i = 1;
+    while i < bytes.len() && bytes[i].is_ascii_uppercase() {
+        i += 1;
+    }
+    if i < 3 {
+        return false; // need at least E + 2 uppercase letters
+    }
+    if i == bytes.len() {
+        return true;
+    }
+    bytes[i] == b':'
+}
 
 /// Kitty graphics passthrough state.
 pub struct KittyPassthrough {
@@ -84,7 +84,13 @@ impl KittyPassthrough {
     /// placement coordinates for the given window. `apc` is the full APC
     /// payload (between `\x1b_G` and the ST terminator), e.g.
     /// `a=T,f=100,s=200;i=1;<base64>`.
-    pub fn forward(&self, window_id: u32, pane_x: u32, pane_y: u32, apc: &str) -> std::io::Result<()> {
+    pub fn forward(
+        &self,
+        window_id: u32,
+        pane_x: u32,
+        pane_y: u32,
+        apc: &str,
+    ) -> std::io::Result<()> {
         if !self.enabled {
             return Ok(());
         }
@@ -191,7 +197,12 @@ impl KittyPassthrough {
 
     /// Re-emit placement commands (`a=p`) for all of a window's images at
     /// their new absolute positions. Called after a pane move or resize.
-    pub fn refresh_placements(&self, window_id: u32, pane_x: u32, pane_y: u32) -> std::io::Result<()> {
+    pub fn refresh_placements(
+        &self,
+        window_id: u32,
+        pane_x: u32,
+        pane_y: u32,
+    ) -> std::io::Result<()> {
         if !self.enabled {
             return Ok(());
         }

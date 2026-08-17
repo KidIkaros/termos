@@ -109,7 +109,9 @@ impl Context {
         vec![
             (
                 "TUIOS_EVENT".to_string(),
-                self.event.map(|e| e.as_str().to_string()).unwrap_or_default(),
+                self.event
+                    .map(|e| e.as_str().to_string())
+                    .unwrap_or_default(),
             ),
             ("TUIOS_WINDOW_ID".to_string(), self.window_id.clone()),
             ("TUIOS_WINDOW_NAME".to_string(), self.window_name.clone()),
@@ -127,8 +129,14 @@ impl Context {
                 "TUIOS_AGENT_PREV_STATE".to_string(),
                 self.prev_agent_state.clone(),
             ),
-            ("TUIOS_AGENT_HARNESS".to_string(), self.agent_harness.clone()),
-            ("TUIOS_AGENT_MESSAGE".to_string(), self.agent_message.clone()),
+            (
+                "TUIOS_AGENT_HARNESS".to_string(),
+                self.agent_harness.clone(),
+            ),
+            (
+                "TUIOS_AGENT_MESSAGE".to_string(),
+                self.agent_message.clone(),
+            ),
         ]
     }
 }
@@ -360,7 +368,10 @@ mod tests {
         );
         m.wait();
 
-        assert!(marker.exists(), "hook did not fire: marker file not created");
+        assert!(
+            marker.exists(),
+            "hook did not fire: marker file not created"
+        );
         let _ = std::fs::remove_file(&marker);
     }
 
@@ -368,7 +379,10 @@ mod tests {
     fn load_from_config_accepts_string_and_array() {
         let m = Manager::new();
         let mut config = HashMap::new();
-        config.insert("after-new-window".to_string(), toml::Value::String("echo new".into()));
+        config.insert(
+            "after-new-window".to_string(),
+            toml::Value::String("echo new".into()),
+        );
         config.insert(
             "after-close-window".to_string(),
             toml::Value::Array(vec![
@@ -397,7 +411,10 @@ mod tests {
 
     #[test]
     fn parse_event_name_validates() {
-        assert_eq!(Event::parse("after-new-window"), Some(Event::AfterNewWindow));
+        assert_eq!(
+            Event::parse("after-new-window"),
+            Some(Event::AfterNewWindow)
+        );
         assert_eq!(Event::parse("  after-attach  "), Some(Event::AfterAttach));
         assert_eq!(Event::parse("invalid-event"), None);
         assert_eq!(Event::parse(""), None);

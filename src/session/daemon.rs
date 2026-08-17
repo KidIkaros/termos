@@ -110,13 +110,8 @@ impl SessionBroadcast {
     }
 
     fn send_to_all(&self, msg: &Message) {
-        let subs: Vec<Sender<Message>> = self
-            .subscribers
-            .lock()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect();
+        let subs: Vec<Sender<Message>> =
+            self.subscribers.lock().unwrap().values().cloned().collect();
         for tx in subs {
             let _ = tx.send(msg.clone());
         }
@@ -184,14 +179,16 @@ impl Daemon {
         self.manager
             .list()
             .into_iter()
-            .map(|s| super::manager::info_for(
-                &s,
-                windows.get(&s.name).map(|w| w.len()).unwrap_or(0),
-                broadcast
-                    .get(&s.name)
-                    .map(|b| b.is_attached())
-                    .unwrap_or(false),
-            ))
+            .map(|s| {
+                super::manager::info_for(
+                    &s,
+                    windows.get(&s.name).map(|w| w.len()).unwrap_or(0),
+                    broadcast
+                        .get(&s.name)
+                        .map(|b| b.is_attached())
+                        .unwrap_or(false),
+                )
+            })
             .collect()
     }
 
@@ -211,10 +208,7 @@ impl Daemon {
             shell: resolve_shell(shell),
             cwd: None,
         };
-        let session = self
-            .manager
-            .create(name, &cfg)
-            .map_err(|e| e.to_string())?;
+        let session = self.manager.create(name, &cfg).map_err(|e| e.to_string())?;
         let broadcast = self.broadcast_for(name);
         let window = self.spawn_window(name, "w0", "Terminal", 1, &cfg.shell, &broadcast)?;
         self.fire_hook(
@@ -236,7 +230,11 @@ impl Daemon {
     }
 
     /// Respawn a session's windows from saved state at daemon start.
-    fn restore_session(&self, name: &str, state: &super::model::SessionState) -> Result<(), String> {
+    fn restore_session(
+        &self,
+        name: &str,
+        state: &super::model::SessionState,
+    ) -> Result<(), String> {
         self.manager.restore(name).map_err(|e| e.to_string())?;
         let broadcast = self.broadcast_for(name);
         let mut wins = Vec::new();
@@ -276,9 +274,7 @@ impl Daemon {
         let pump_session = session.to_string();
         let pump_id = id.to_string();
         let rings = Arc::clone(&self.rings);
-        std::thread::spawn(move || {
-            pump(reader.rx, pump_broadcast, pump_session, pump_id, rings)
-        });
+        std::thread::spawn(move || pump(reader.rx, pump_broadcast, pump_session, pump_id, rings));
         Ok(LiveWindow {
             info: WindowInfo {
                 id: id.to_string(),
@@ -485,7 +481,14 @@ impl Daemon {
             .get(&(session.to_string(), target.clone()))
             .map(|r| r.as_lossy())
             .unwrap_or_default();
-        let content: String = content.chars().rev().take(CAPTURE_CAP).collect::<String>().chars().rev().collect();
+        let content: String = content
+            .chars()
+            .rev()
+            .take(CAPTURE_CAP)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
         Ok((target, content))
     }
 
@@ -499,8 +502,7 @@ impl Daemon {
         timeout_ms: u64,
     ) -> Result<(String, bool), String> {
         let target = self.resolve_window(session, window)?;
-        let re = regex::Regex::new(pattern)
-            .map_err(|e| format!("invalid pattern: {e}"))?;
+        let re = regex::Regex::new(pattern).map_err(|e| format!("invalid pattern: {e}"))?;
         let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
         loop {
             let hit = {
@@ -549,7 +551,12 @@ impl Daemon {
                 ..crate::hooks::Context::default()
             },
         );
-        self.broadcast_event(session, &Message::WindowAdded { window: info.clone() });
+        self.broadcast_event(
+            session,
+            &Message::WindowAdded {
+                window: info.clone(),
+            },
+        );
         Ok(info)
     }
 
@@ -581,7 +588,12 @@ impl Daemon {
                 },
             );
         }
-        self.broadcast_event(session, &Message::WindowClosed { window: window.to_string() });
+        self.broadcast_event(
+            session,
+            &Message::WindowClosed {
+                window: window.to_string(),
+            },
+        );
         Ok(())
     }
 
@@ -673,10 +685,13 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
         match msg {
             Message::Hello { .. } => {
                 let sessions = daemon.list_infos();
-                let _ = send(&writer, &Message::Welcome {
-                    version: VERSION.to_string(),
-                    sessions,
-                });
+                let _ = send(
+                    &writer,
+                    &Message::Welcome {
+                        version: VERSION.to_string(),
+                        sessions,
+                    },
+                );
             }
             Message::List => {
                 let sessions = daemon.list_infos();
@@ -764,9 +779,12 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                 data,
             } => {
                 let Some(target_session) = resolve_session(&attached, &session) else {
-                    let _ = send(&writer, &Message::Error {
-                        message: "no session targeted (attach to one or pass -s)".into(),
-                    });
+                    let _ = send(
+                        &writer,
+                        &Message::Error {
+                            message: "no session targeted (attach to one or pass -s)".into(),
+                        },
+                    );
                     continue;
                 };
                 match daemon.write_input_to(&target_session, window.as_deref(), &data) {
@@ -778,9 +796,12 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
             }
             Message::CapturePane { session, window } => {
                 let Some(target_session) = resolve_session(&attached, &session) else {
-                    let _ = send(&writer, &Message::Error {
-                        message: "no session targeted (attach to one or pass -s)".into(),
-                    });
+                    let _ = send(
+                        &writer,
+                        &Message::Error {
+                            message: "no session targeted (attach to one or pass -s)".into(),
+                        },
+                    );
                     continue;
                 };
                 match daemon.capture_pane(&target_session, window.as_deref()) {
@@ -799,9 +820,12 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                 timeout_ms,
             } => {
                 let Some(target_session) = resolve_session(&attached, &session) else {
-                    let _ = send(&writer, &Message::Error {
-                        message: "no session targeted (attach to one or pass -s)".into(),
-                    });
+                    let _ = send(
+                        &writer,
+                        &Message::Error {
+                            message: "no session targeted (attach to one or pass -s)".into(),
+                        },
+                    );
                     continue;
                 };
                 match daemon.wait_for(&target_session, window.as_deref(), &pattern, timeout_ms) {
@@ -819,13 +843,16 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                 // (Go's RemoteTapeCommandMsg flow).
                 let (commands, errors) = crate::tape::parser::parse_file(&script);
                 if !errors.is_empty() || commands.is_empty() {
-                    let _ = send(&writer, &Message::Error {
-                        message: if commands.is_empty() {
-                            "tape script has no commands or contains errors".into()
-                        } else {
-                            "tape script has parsing errors".into()
+                    let _ = send(
+                        &writer,
+                        &Message::Error {
+                            message: if commands.is_empty() {
+                                "tape script has no commands or contains errors".into()
+                            } else {
+                                "tape script has parsing errors".into()
+                            },
                         },
-                    });
+                    );
                     continue;
                 }
                 let total = commands.len();
@@ -846,9 +873,12 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
             }
             Message::GetAgentState { session, window } => {
                 let Some(target_session) = resolve_session(&attached, &session) else {
-                    let _ = send(&writer, &Message::Error {
-                        message: "no session targeted (attach to one or pass -s)".into(),
-                    });
+                    let _ = send(
+                        &writer,
+                        &Message::Error {
+                            message: "no session targeted (attach to one or pass -s)".into(),
+                        },
+                    );
                     continue;
                 };
                 match daemon.get_agent_state(&target_session, window.as_deref()) {
@@ -868,11 +898,7 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                     }
                 }
             }
-            Message::Resize {
-                window,
-                cols,
-                rows,
-            } => {
+            Message::Resize { window, cols, rows } => {
                 if let Some((session, _, _)) = &attached {
                     daemon.resize(session, &window, cols, rows);
                 }
@@ -887,23 +913,35 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                 // Resolve the target session: named, else the session this
                 // connection is attached to.
                 match resolve_session(&attached, &session) {
-                    Some(s) => match daemon.set_agent_state(&s, window.as_deref(), &state, &message, &harness) {
+                    Some(s) => match daemon.set_agent_state(
+                        &s,
+                        window.as_deref(),
+                        &state,
+                        &message,
+                        &harness,
+                    ) {
                         Ok(window) => {
-                            let _ = send(&writer, &Message::AgentStateChanged {
-                                window,
-                                state,
-                                message,
-                                harness,
-                            });
+                            let _ = send(
+                                &writer,
+                                &Message::AgentStateChanged {
+                                    window,
+                                    state,
+                                    message,
+                                    harness,
+                                },
+                            );
                         }
                         Err(e) => {
                             let _ = send(&writer, &Message::Error { message: e });
                         }
                     },
                     None => {
-                        let _ = send(&writer, &Message::Error {
-                            message: "no session targeted (attach to one or pass -s)".into(),
-                        });
+                        let _ = send(
+                            &writer,
+                            &Message::Error {
+                                message: "no session targeted (attach to one or pass -s)".into(),
+                            },
+                        );
                     }
                 }
             }

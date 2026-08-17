@@ -12,7 +12,6 @@ pub mod remote;
 pub mod tree;
 
 pub use client::DaemonClient;
-pub use remote::RemoteSink;
 pub use daemon::{default_socket_path, ensure_daemon_running, Daemon};
 pub use manager::{Manager, ManagerError};
 pub use model::{
@@ -20,3 +19,4 @@ pub use model::{
     WindowState,
 };
 pub use protocol::Message;
+pub use remote::RemoteSink;

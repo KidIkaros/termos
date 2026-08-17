@@ -4,7 +4,12 @@
 use tuios::layout::{AutoScheme, BSPTree, Rect, SplitType};
 
 fn bounds() -> Rect {
-    Rect { x: 0, y: 0, w: 120, h: 40 }
+    Rect {
+        x: 0,
+        y: 0,
+        w: 120,
+        h: 40,
+    }
 }
 
 #[test]

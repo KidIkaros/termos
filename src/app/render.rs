@@ -66,7 +66,10 @@ pub fn render(os: &Os, buf: &mut Buffer) {
 
         let tui_rect = rect_to_tui(*rect, content_area);
         let is_focused = focused == Some(window_id as usize);
-        let selection = os.selection.as_ref().filter(|s| s.window == window_id as usize);
+        let selection = os
+            .selection
+            .as_ref()
+            .filter(|s| s.window == window_id as usize);
 
         // Paint the pane content, selection highlight, and scrollbar.
         if let Ok(emu) = window.emulator.lock() {
@@ -93,7 +96,10 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         let mut lines = Vec::new();
         lines.push("A .tuios.tape was found in this directory.".into());
         lines.push(format!("  {}", pending.path));
-        lines.push(format!("  sha256 {}", &pending.hash[..pending.hash.len().min(16)]));
+        lines.push(format!(
+            "  sha256 {}",
+            &pending.hash[..pending.hash.len().min(16)]
+        ));
         lines.push(String::new());
         lines.push("Trust and run it?  (y/n)".into());
         render_overlay(buf, content_area, &lines, "Project tape");
@@ -107,12 +113,7 @@ pub fn render(os: &Os, buf: &mut Buffer) {
             "Quit",
         );
     } else if os.scrollback_mode {
-        render_overlay(
-            buf,
-            content_area,
-            &scrollback_help_lines(),
-            "Scrollback",
-        );
+        render_overlay(buf, content_area, &scrollback_help_lines(), "Scrollback");
     } else if os.palette_open {
         render_palette(os, buf, content_area);
     } else if os.switcher_open {
@@ -139,11 +140,15 @@ fn scrollback_help_lines() -> Vec<String> {
 /// commands, the selected one highlighted.
 pub fn render_palette(os: &Os, buf: &mut Buffer, area: TuiRect) {
     let items = os.palette_items();
-    let rows: Vec<(String, String)> = items
-        .iter()
-        .map(|c| (c.label(), String::new()))
-        .collect();
-    render_list_overlay(buf, area, "Commands", &os.palette_query, &rows, os.palette_selected);
+    let rows: Vec<(String, String)> = items.iter().map(|c| (c.label(), String::new())).collect();
+    render_list_overlay(
+        buf,
+        area,
+        "Commands",
+        &os.palette_query,
+        &rows,
+        os.palette_selected,
+    );
 }
 
 /// Render the workspace/window switcher overlay.
@@ -158,7 +163,14 @@ pub fn render_switcher(os: &Os, buf: &mut Buffer, area: TuiRect) {
         .iter()
         .map(|e| (e.label.clone(), e.detail.clone()))
         .collect();
-    render_list_overlay(buf, area, title, &os.switcher_query, &rows, os.switcher_selected);
+    render_list_overlay(
+        buf,
+        area,
+        title,
+        &os.switcher_query,
+        &rows,
+        os.switcher_selected,
+    );
 }
 
 /// A centered, bordered list overlay: a query line at the top, rows below, and
@@ -174,7 +186,14 @@ pub fn render_list_overlay(
 ) {
     let max_row = rows
         .iter()
-        .map(|(l, d)| l.chars().count() + if d.is_empty() { 0 } else { 2 + d.chars().count() })
+        .map(|(l, d)| {
+            l.chars().count()
+                + if d.is_empty() {
+                    0
+                } else {
+                    2 + d.chars().count()
+                }
+        })
         .max()
         .unwrap_or(0);
     let query_w = query.chars().count() + 2;
@@ -183,7 +202,12 @@ pub fn render_list_overlay(
     let height = (rows.len() + 4).clamp(3, area.height.saturating_sub(2) as usize) as u16;
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let rect = TuiRect { x, y, width, height };
+    let rect = TuiRect {
+        x,
+        y,
+        width,
+        height,
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -358,7 +382,9 @@ pub fn paint_scrollbar(
     // Thumb height is the viewport's share of the whole buffer; travel is the
     // rows the thumb can move within.
     let total = sb_len + content_h;
-    let thumb_h = (content_h * content_h).div_ceil(total).clamp(1, content_h - 1);
+    let thumb_h = (content_h * content_h)
+        .div_ceil(total)
+        .clamp(1, content_h - 1);
     let travel = content_h - thumb_h;
     let offset = emu.viewport();
     let thumb_top = if travel > 0 {
@@ -424,9 +450,11 @@ fn draw_pane_border(
         .border_style(TuiStyle::default().fg(color))
         .title(Span::styled(
             title,
-            TuiStyle::default()
-                .fg(color)
-                .add_modifier(if focused { Modifier::BOLD } else { Modifier::empty() }),
+            TuiStyle::default().fg(color).add_modifier(if focused {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
         ));
     let inner = rect;
     // Draw the block manually so we can reuse `rect` without moving it. Only
@@ -474,7 +502,12 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
         }
     };
 
-    let mut text = format!(" {} {}:{} ", mode_name, os.current_workspace, sorted_ids.len());
+    let mut text = format!(
+        " {} {}:{} ",
+        mode_name,
+        os.current_workspace,
+        sorted_ids.len()
+    );
     if os.prefix != Prefix::None {
         text.push_str("⌨ ");
     }
@@ -524,7 +557,11 @@ fn render_tape_manager(os: &Os, buf: &mut Buffer, area: TuiRect) {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let marker = if i == os.tape_manager_selected { "▶ " } else { "  " };
+        let marker = if i == os.tape_manager_selected {
+            "▶ "
+        } else {
+            "  "
+        };
         lines.push(format!("{marker}{name}"));
     }
     lines.push(String::new());
@@ -554,12 +591,17 @@ pub fn build_which_key_lines(os: &Os) -> Vec<String> {
 /// The rect is clamped to the area so a long help list cannot overflow the
 /// screen (and indexing beyond the buffer panics).
 pub fn render_overlay(buf: &mut Buffer, area: TuiRect, lines: &[String], title: &str) {
-    let width = (lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4)
-        .min(area.width);
+    let width =
+        (lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4).min(area.width);
     let height = (lines.len() as u16 + 4).min(area.height);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
-    let rect = TuiRect { x, y, width, height };
+    let rect = TuiRect {
+        x,
+        y,
+        width,
+        height,
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)

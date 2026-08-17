@@ -591,7 +591,12 @@ impl Os {
         }
         if policy.suppress_focused {
             if let Some(focused) = self.focused_window {
-                if self.windows.get(focused).map(|w| w.id == window_id).unwrap_or(false) {
+                if self
+                    .windows
+                    .get(focused)
+                    .map(|w| w.id == window_id)
+                    .unwrap_or(false)
+                {
                     return;
                 }
             }
@@ -641,7 +646,12 @@ impl Os {
             }
             if policy.suppress_focused {
                 if let Some(focused) = self.focused_window {
-                    if self.windows.get(focused).map(|w| w.id == p.window_id).unwrap_or(false) {
+                    if self
+                        .windows
+                        .get(focused)
+                        .map(|w| w.id == p.window_id)
+                        .unwrap_or(false)
+                    {
                         continue;
                     }
                 }
@@ -863,8 +873,10 @@ impl Os {
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|&ms| ms > 0)
             .unwrap_or(5000);
-        self.script_wait_regex =
-            Some((re, std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms)));
+        self.script_wait_regex = Some((
+            re,
+            std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms),
+        ));
     }
 
     /// Whether a pending WaitUntilRegex condition is satisfied (match against
@@ -906,7 +918,11 @@ impl Os {
     /// remote `tape exec`).
     pub fn script_progress(&self) -> Option<usize> {
         if let Some((index, total)) = self.remote_tape {
-            return Some(if total == 0 { 100 } else { index.saturating_mul(100).checked_div(total).unwrap_or(100) });
+            return Some(if total == 0 {
+                100
+            } else {
+                index.saturating_mul(100).checked_div(total).unwrap_or(100)
+            });
         }
         self.script_player.as_ref().map(|p| p.progress())
     }
@@ -1067,7 +1083,10 @@ impl Os {
         let name = format!("recording-{}", crate::tape::tapes::timestamp_stamp());
         match crate::tape::tapes::save_tape(&name, &content) {
             Ok(path) => {
-                self.notify(format!("saved {count} commands to {}", path.display()), "info");
+                self.notify(
+                    format!("saved {count} commands to {}", path.display()),
+                    "info",
+                );
                 self.recorder = None;
                 Some(path)
             }
@@ -1245,7 +1264,10 @@ impl Os {
                 self.notify("project tape is denied", "warning");
             }
             Status::Ineligible => {
-                self.notify(format!("project tape is ineligible: {}", result.reason), "error");
+                self.notify(
+                    format!("project tape is ineligible: {}", result.reason),
+                    "error",
+                );
             }
         }
     }
@@ -1280,7 +1302,9 @@ impl Os {
     // -----------------------------------------------------------------------
 
     fn workspace_mut(&mut self, number: i32) -> &mut Workspace {
-        self.workspaces.entry(number).or_insert_with(|| Workspace::new(number))
+        self.workspaces
+            .entry(number)
+            .or_insert_with(|| Workspace::new(number))
     }
 
     fn workspace(&self, number: i32) -> &Workspace {
@@ -1305,13 +1329,14 @@ impl Os {
 
     /// Spawn a new shell window on the current workspace. If there is a
     /// focused window, it splits (BSP); otherwise the window becomes the root.
-    pub fn spawn_window(&mut self, shell: &str, wake: Box<dyn Fn() + Send + 'static>) -> Result<usize, String> {
+    pub fn spawn_window(
+        &mut self,
+        shell: &str,
+        wake: Box<dyn Fn() + Send + 'static>,
+    ) -> Result<usize, String> {
         let index = self.windows.len();
         let id = format!("win-{index}");
-        let size = WinSize {
-            cols: 80,
-            rows: 24,
-        };
+        let size = WinSize { cols: 80, rows: 24 };
         let env = vec![("TUIOS_ENV".to_string(), "1".to_string())];
         let window = Window::spawn(id, "Terminal", size, shell, None, wake, &env)
             .map_err(|e| e.to_string())?;
@@ -1325,14 +1350,7 @@ impl Os {
         let tree = &mut self.workspace_mut(ws).tree;
         match focused {
             Some(f) => {
-                tree.insert_window(
-                    index as i32,
-                    f as i32,
-                    SplitType::None,
-                    0.5,
-                    bounds,
-                    gap,
-                );
+                tree.insert_window(index as i32, f as i32, SplitType::None, 0.5, bounds, gap);
             }
             None => {
                 tree.insert_window(index as i32, -1, SplitType::None, 0.5, bounds, gap);
@@ -1400,7 +1418,11 @@ impl Os {
                 if old_id == index as i32 {
                     continue;
                 }
-                let new_id = if old_id > index as i32 { old_id - 1 } else { old_id };
+                let new_id = if old_id > index as i32 {
+                    old_id - 1
+                } else {
+                    old_id
+                };
                 new_tree.insert_window(new_id, -1, SplitType::None, 0.5, bounds, self.gap);
             }
             self.workspace_mut(ws_num).tree = new_tree;
@@ -1561,9 +1583,7 @@ impl Os {
     /// Focus the window at the given index (if on the current workspace).
     pub fn focus_window(&mut self, index: usize) {
         let ws = self.current_workspace;
-        if self.workspace(ws).tree.has_window(index as i32)
-            && self.focused_window != Some(index)
-        {
+        if self.workspace(ws).tree.has_window(index as i32) && self.focused_window != Some(index) {
             self.focused_window = Some(index);
             self.workspace_mut(ws).focused = Some(index);
             let ctx = self.window_hook_ctx(index);
@@ -1644,7 +1664,12 @@ impl Os {
     // -----------------------------------------------------------------------
 
     /// Split the focused window in a given direction (creating a new shell).
-    pub fn split(&mut self, direction: SplitType, shell: &str, wake: Box<dyn Fn() + Send + 'static>) -> Result<usize, String> {
+    pub fn split(
+        &mut self,
+        direction: SplitType,
+        shell: &str,
+        wake: Box<dyn Fn() + Send + 'static>,
+    ) -> Result<usize, String> {
         let index = self.windows.len();
         let id = format!("win-{index}");
         let size = WinSize { cols: 40, rows: 12 };
@@ -2159,7 +2184,12 @@ impl Os {
             let Ok(emu) = w.emulator.lock() else {
                 return;
             };
-            emu.selection_text(sel.anchor_line, sel.anchor_col, sel.cursor_line, sel.cursor_col)
+            emu.selection_text(
+                sel.anchor_line,
+                sel.anchor_col,
+                sel.cursor_line,
+                sel.cursor_col,
+            )
         };
         self.selection = None;
         self.copy_visual = false;
@@ -2173,8 +2203,8 @@ impl Os {
 
     /// Emit an OSC 52 clipboard-write to the host terminal.
     fn emit_osc52(text: &str) {
-        use std::io::Write;
         use base64::Engine;
+        use std::io::Write;
         let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
         let seq = format!("\x1b]52;c;{b64}\x07");
         let mut out = std::io::stdout();
@@ -2184,7 +2214,12 @@ impl Os {
 
     /// The content position (line, column) under a screen cell coordinate for
     /// a window.
-    pub fn content_position_at(&self, window: usize, column: i32, row: i32) -> Option<(usize, i32)> {
+    pub fn content_position_at(
+        &self,
+        window: usize,
+        column: i32,
+        row: i32,
+    ) -> Option<(usize, i32)> {
         let layout = self.current_layout();
         let rect = layout.get(&(window as i32))?;
         // The pane border consumes the outer ring; content starts one cell in.
@@ -2304,7 +2339,9 @@ impl crate::tape::executor::TapeExecutor for Os {
 
     fn create_new_window(&mut self) -> Result<(), String> {
         let shell = self.default_shell();
-        let idx = self.spawn_window(&shell, Box::new(|| {})).map_err(|e| e.to_string())?;
+        let idx = self
+            .spawn_window(&shell, Box::new(|| {}))
+            .map_err(|e| e.to_string())?;
         self.await_new_window();
         let _ = idx;
         Ok(())
@@ -2680,7 +2717,8 @@ mod tests {
     #[test]
     fn hooks_fire_on_window_lifecycle_events() {
         let mut os = test_os();
-        let seen: Arc<Mutex<Vec<(hooks::Event, hooks::Context)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen: Arc<Mutex<Vec<(hooks::Event, hooks::Context)>>> =
+            Arc::new(Mutex::new(Vec::new()));
         let seen2 = seen.clone();
         os.hook_manager.set_runner(move |_, ctx| {
             if let Some(ev) = ctx.event {
@@ -2716,12 +2754,20 @@ mod tests {
         os.hook_manager.wait();
         os.focus_next();
         os.hook_manager.wait();
-        assert!(seen.lock().unwrap().iter().any(|(e, _)| *e == hooks::Event::AfterFocusChange));
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(e, _)| *e == hooks::Event::AfterFocusChange));
 
         // Closing the focused window fires after-close-window.
         os.close_focused_window();
         os.hook_manager.wait();
-        assert!(seen.lock().unwrap().iter().any(|(e, _)| *e == hooks::Event::AfterCloseWindow));
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(e, _)| *e == hooks::Event::AfterCloseWindow));
 
         // Workspace switch fires after-workspace-switch with the previous
         // workspace; switching to the same workspace does not fire.
@@ -2866,8 +2912,7 @@ mod tests {
 
         // Force the sleep deadline into the past; the next tick clears it and
         // executes the Enter command.
-        os.script_sleep_until =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        os.script_sleep_until = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
         os.tick_script();
         assert!(os.script_player.as_ref().unwrap().is_finished());
     }
@@ -2984,7 +3029,8 @@ mod tests {
     }
 
     #[test]
-    fn render_overlay_does_not_panic_on_offset_rects() {        // Regression: overlays narrower than the screen (which-key, switcher,
+    fn render_overlay_does_not_panic_on_offset_rects() {
+        // Regression: overlays narrower than the screen (which-key, switcher,
         // tape manager) used absolute indexing into an offset block buffer.
         use crate::app::render::render;
         use ratatui::backend::TestBackend;
@@ -3070,11 +3116,7 @@ mod tests {
         os.spawn_window("/bin/sh", Box::new(|| {})).unwrap();
 
         let recorder = os.recorder.as_ref().unwrap();
-        let types: Vec<_> = recorder
-            .commands()
-            .iter()
-            .map(|c| c.type_)
-            .collect();
+        let types: Vec<_> = recorder.commands().iter().map(|c| c.type_).collect();
         assert!(types.contains(&crate::tape::command::CommandType::Type));
         assert!(types.contains(&crate::tape::command::CommandType::Enter));
         assert!(types.contains(&crate::tape::command::CommandType::TerminalMode));
@@ -3156,7 +3198,8 @@ mod tests {
         let mut os = os_with_window();
         os.config.notifications.agent.suppress_focused = Some(false);
         os.config.notifications.agent.settle_seconds = Some(0);
-        os.hook_manager.register(hooks::Event::AfterAgentState, "dummy");
+        os.hook_manager
+            .register(hooks::Event::AfterAgentState, "dummy");
         let seen: Arc<Mutex<Vec<hooks::Context>>> = Arc::new(Mutex::new(Vec::new()));
         let seen2 = seen.clone();
         os.hook_manager.set_runner(move |_, ctx| {
@@ -3195,7 +3238,10 @@ mod tests {
 
         os.handle_agent_state_changed("w0", "needs_input", "", "");
         os.tick_agent_alerts();
-        assert!(os.notifications.is_empty(), "focused pane must be suppressed");
+        assert!(
+            os.notifications.is_empty(),
+            "focused pane must be suppressed"
+        );
         assert!(os.take_host_sequence().is_empty());
     }
 
@@ -3203,7 +3249,8 @@ mod tests {
     fn agent_alert_settle_window_parks_then_fires() {
         let mut os = os_with_window();
         os.focused_window = None; // nothing focused → nothing suppressed
-        os.hook_manager.register(hooks::Event::AfterAgentState, "dummy");
+        os.hook_manager
+            .register(hooks::Event::AfterAgentState, "dummy");
         let fired = Arc::new(Mutex::new(0usize));
         let fired2 = fired.clone();
         os.hook_manager.set_runner(move |_, _| {

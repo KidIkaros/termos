@@ -50,7 +50,9 @@ pub enum State {
     Utf8,
     /// Inside a string sequence (OSC/DCS/APC/PM/SOS), we saw ESC and are
     /// waiting for the `\` that completes the two-byte String Terminator.
-    StringTerminator { kind: StringKind },
+    StringTerminator {
+        kind: StringKind,
+    },
 }
 
 /// A parsed CSI sequence.
@@ -491,7 +493,9 @@ impl Parser {
             0x1b => {
                 // Might be ST (ESC \) or an escape into something else.
                 self.string_raw.push(byte);
-                State::StringTerminator { kind: StringKind::Osc }
+                State::StringTerminator {
+                    kind: StringKind::Osc,
+                }
             }
             0x07 => {
                 // BEL terminates OSC.
@@ -633,7 +637,9 @@ impl Parser {
             0x1b => {
                 // Possible ST (ESC \) or other escape.
                 self.string_raw.push(byte);
-                State::StringTerminator { kind: StringKind::Dcs }
+                State::StringTerminator {
+                    kind: StringKind::Dcs,
+                }
             }
             0x9c => {
                 // ST (C1).

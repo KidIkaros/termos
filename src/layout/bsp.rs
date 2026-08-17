@@ -19,8 +19,7 @@ pub struct Rect {
 }
 
 /// How an internal node divides its space.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SplitType {
     /// Leaf node (contains a window).
     #[default]
@@ -45,8 +44,7 @@ impl SplitType {
 }
 
 /// How new windows are automatically inserted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AutoScheme {
     /// Split along the longest dimension of the target area.
     LongestSide,
@@ -140,8 +138,6 @@ pub struct BSPTree {
     /// Next node ID.
     next_id: u64,
 }
-
-
 
 impl BSPTree {
     pub fn new() -> Self {
@@ -329,7 +325,14 @@ impl BSPTree {
             PreselectionDir::Up => (SplitType::Horizontal, true),
             PreselectionDir::Down => (SplitType::Horizontal, false),
             PreselectionDir::None => {
-                self.insert_window(window_id, focused_window_id, SplitType::None, self.default_ratio, bounds, gap);
+                self.insert_window(
+                    window_id,
+                    focused_window_id,
+                    SplitType::None,
+                    self.default_ratio,
+                    bounds,
+                    gap,
+                );
                 return;
             }
         };
@@ -481,8 +484,12 @@ impl BSPTree {
         self.apply_layout_recursive(root, bounds, result, gap);
         // Safety net: keep every laid-out rectangle inside the root bounds.
         for r in result.values_mut() {
-            r.x = bounds.x.max(bounds.x.min(r.x).max(bounds.x + bounds.w - r.w));
-            r.y = bounds.y.max(bounds.y.min(r.y).max(bounds.y + bounds.h - r.h));
+            r.x = bounds
+                .x
+                .max(bounds.x.min(r.x).max(bounds.x + bounds.w - r.w));
+            r.y = bounds
+                .y
+                .max(bounds.y.min(r.y).max(bounds.y + bounds.h - r.h));
         }
     }
 
@@ -520,7 +527,14 @@ impl BSPTree {
 
     /// Move the divider that owns one edge of a window to `pos`, given in the
     /// same coordinate space as bounds. Reports whether a divider was found.
-    pub fn resize_split(&mut self, window_id: i32, edge: ResizeEdge, pos: i32, bounds: Rect, gap: i32) -> bool {
+    pub fn resize_split(
+        &mut self,
+        window_id: i32,
+        edge: ResizeEdge,
+        pos: i32,
+        bounds: Rect,
+        gap: i32,
+    ) -> bool {
         let Some(leaf) = self.window_to_node.get(&window_id).copied() else {
             return false;
         };
@@ -575,7 +589,8 @@ impl BSPTree {
         }
 
         let lo = origin + self.min_extent(self.nodes[node].left, edge.vertical(), gap);
-        let hi = origin + extent - gap - self.min_extent(self.nodes[node].right, edge.vertical(), gap);
+        let hi =
+            origin + extent - gap - self.min_extent(self.nodes[node].right, edge.vertical(), gap);
         if lo > hi {
             return false;
         }
@@ -726,8 +741,14 @@ impl BSPTree {
         if n.is_leaf() {
             return depth;
         }
-        let l = n.left.map(|l| self.max_leaf_depth(l, depth + 1)).unwrap_or(0);
-        let r = n.right.map(|r| self.max_leaf_depth(r, depth + 1)).unwrap_or(0);
+        let l = n
+            .left
+            .map(|l| self.max_leaf_depth(l, depth + 1))
+            .unwrap_or(0);
+        let r = n
+            .right
+            .map(|r| self.max_leaf_depth(r, depth + 1))
+            .unwrap_or(0);
         l.max(r)
     }
 
@@ -747,8 +768,7 @@ impl BSPTree {
             .left
             .map(|l| self.count_internal_nodes_recursive(l))
             .unwrap_or(0)
-            + n
-                .right
+            + n.right
                 .map(|r| self.count_internal_nodes_recursive(r))
                 .unwrap_or(0)
     }
@@ -889,7 +909,12 @@ impl BSPTree {
     }
 
     /// Re-derive split ratios from actual window geometry (after mouse resize).
-    pub fn sync_ratios_from_geometry(&mut self, windows: &HashMap<i32, Rect>, bounds: Rect, gap: i32) {
+    pub fn sync_ratios_from_geometry(
+        &mut self,
+        windows: &HashMap<i32, Rect>,
+        bounds: Rect,
+        gap: i32,
+    ) {
         let Some(root) = self.root else {
             return;
         };
@@ -1351,4 +1376,3 @@ fn auto_scheme_from_int(i: i32) -> AutoScheme {
         _ => AutoScheme::LongestSide,
     }
 }
-

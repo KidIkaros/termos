@@ -155,7 +155,13 @@ fn view_line_text(emu: &Emulator, row: usize) -> String {
     let lines = emu.render_view_lines();
     lines
         .get(row)
-        .map(|r| r.iter().map(|(s, _)| s.as_str()).collect::<String>().trim_end().to_string())
+        .map(|r| {
+            r.iter()
+                .map(|(s, _)| s.as_str())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
         .unwrap_or_default()
 }
 

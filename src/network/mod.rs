@@ -17,7 +17,7 @@
 
 #[cfg(feature = "network")]
 pub mod ssh;
-#[cfg(feature = "network")]
-pub mod web;
 #[cfg(feature = "tls")]
 pub mod tls;
+#[cfg(feature = "network")]
+pub mod web;

@@ -26,90 +26,276 @@ pub const DEFAULT_LEADER_KEY: &str = "ctrl+b";
 pub fn get_prefix_keybindings(prefix_type: &str, is_daemon_session: bool) -> Vec<Keybinding> {
     match prefix_type {
         "workspace" => vec![
-            Keybinding { key: "1-9".into(), description: "Switch to workspace".into() },
-            Keybinding { key: "Shift+1-9".into(), description: "Move window to workspace".into() },
-            Keybinding { key: "r".into(), description: "Rename workspace".into() },
-            Keybinding { key: "Esc".into(), description: "Cancel".into() },
+            Keybinding {
+                key: "1-9".into(),
+                description: "Switch to workspace".into(),
+            },
+            Keybinding {
+                key: "Shift+1-9".into(),
+                description: "Move window to workspace".into(),
+            },
+            Keybinding {
+                key: "r".into(),
+                description: "Rename workspace".into(),
+            },
+            Keybinding {
+                key: "Esc".into(),
+                description: "Cancel".into(),
+            },
         ],
         "minimize" => vec![
-            Keybinding { key: "m".into(), description: "Minimize focused window".into() },
-            Keybinding { key: "1-9".into(), description: "Restore window".into() },
-            Keybinding { key: "Shift+M".into(), description: "Restore all".into() },
-            Keybinding { key: "Esc".into(), description: "Cancel".into() },
+            Keybinding {
+                key: "m".into(),
+                description: "Minimize focused window".into(),
+            },
+            Keybinding {
+                key: "1-9".into(),
+                description: "Restore window".into(),
+            },
+            Keybinding {
+                key: "Shift+M".into(),
+                description: "Restore all".into(),
+            },
+            Keybinding {
+                key: "Esc".into(),
+                description: "Cancel".into(),
+            },
         ],
         "window" => vec![
-            Keybinding { key: "n".into(), description: "New window".into() },
-            Keybinding { key: "x".into(), description: "Close window".into() },
-            Keybinding { key: "r".into(), description: "Rename window".into() },
-            Keybinding { key: "Tab".into(), description: "Next window".into() },
-            Keybinding { key: "Shift+Tab".into(), description: "Previous window".into() },
-            Keybinding { key: "t".into(), description: "Toggle tiling mode".into() },
-            Keybinding { key: "Esc".into(), description: "Cancel".into() },
+            Keybinding {
+                key: "n".into(),
+                description: "New window".into(),
+            },
+            Keybinding {
+                key: "x".into(),
+                description: "Close window".into(),
+            },
+            Keybinding {
+                key: "r".into(),
+                description: "Rename window".into(),
+            },
+            Keybinding {
+                key: "Tab".into(),
+                description: "Next window".into(),
+            },
+            Keybinding {
+                key: "Shift+Tab".into(),
+                description: "Previous window".into(),
+            },
+            Keybinding {
+                key: "t".into(),
+                description: "Toggle tiling mode".into(),
+            },
+            Keybinding {
+                key: "Esc".into(),
+                description: "Cancel".into(),
+            },
         ],
         "debug" => vec![
-            Keybinding { key: "l".into(), description: "Toggle log viewer".into() },
-            Keybinding { key: "c".into(), description: "Toggle cache statistics".into() },
-            Keybinding { key: "k".into(), description: "Toggle showkeys overlay".into() },
-            Keybinding { key: "a".into(), description: "Toggle animations".into() },
-            Keybinding { key: "Esc".into(), description: "Cancel".into() },
+            Keybinding {
+                key: "l".into(),
+                description: "Toggle log viewer".into(),
+            },
+            Keybinding {
+                key: "c".into(),
+                description: "Toggle cache statistics".into(),
+            },
+            Keybinding {
+                key: "k".into(),
+                description: "Toggle showkeys overlay".into(),
+            },
+            Keybinding {
+                key: "a".into(),
+                description: "Toggle animations".into(),
+            },
+            Keybinding {
+                key: "Esc".into(),
+                description: "Cancel".into(),
+            },
         ],
         "tape" => vec![
-            Keybinding { key: "m".into(), description: "Open tape manager".into() },
-            Keybinding { key: "t".into(), description: "Review project tape".into() },
-            Keybinding { key: "r".into(), description: "Start recording".into() },
-            Keybinding { key: "s".into(), description: "Stop recording".into() },
-            Keybinding { key: "Esc".into(), description: "Cancel".into() },
+            Keybinding {
+                key: "m".into(),
+                description: "Open tape manager".into(),
+            },
+            Keybinding {
+                key: "t".into(),
+                description: "Review project tape".into(),
+            },
+            Keybinding {
+                key: "r".into(),
+                description: "Start recording".into(),
+            },
+            Keybinding {
+                key: "s".into(),
+                description: "Stop recording".into(),
+            },
+            Keybinding {
+                key: "Esc".into(),
+                description: "Cancel".into(),
+            },
         ],
         "layout" => vec![
-            Keybinding { key: "l".into(), description: "Load layout".into() },
-            Keybinding { key: "s".into(), description: "Save layout".into() },
-            Keybinding { key: "Esc".into(), description: "Cancel".into() },
+            Keybinding {
+                key: "l".into(),
+                description: "Load layout".into(),
+            },
+            Keybinding {
+                key: "s".into(),
+                description: "Save layout".into(),
+            },
+            Keybinding {
+                key: "Esc".into(),
+                description: "Cancel".into(),
+            },
         ],
         _ => {
             let mut bindings = vec![
-                Keybinding { key: "c".into(), description: "Create window".into() },
-                Keybinding { key: "x".into(), description: "Close window".into() },
-                Keybinding { key: "r".into(), description: "Rename window".into() },
-                Keybinding { key: ",".into(), description: "Settings".into() },
-                Keybinding { key: "n".into(), description: "Next window".into() },
-                Keybinding { key: "p".into(), description: "Previous window".into() },
-                Keybinding { key: "0-9".into(), description: "Jump to window".into() },
-                Keybinding { key: "z".into(), description: "Toggle zoom".into() },
-                Keybinding { key: "space".into(), description: "Toggle tiling".into() },
-                Keybinding { key: "-".into(), description: "Split horizontal".into() },
-                Keybinding { key: "|/\\".into(), description: "Split vertical".into() },
-                Keybinding { key: "R".into(), description: "Rotate split".into() },
-                Keybinding { key: "=".into(), description: "Equalize splits".into() },
-                Keybinding { key: "w".into(), description: "Workspace commands...".into() },
-                Keybinding { key: "m".into(), description: "Minimize commands...".into() },
-                Keybinding { key: "t".into(), description: "Window commands...".into() },
-                Keybinding { key: "D".into(), description: "Debug commands...".into() },
-                Keybinding { key: "T".into(), description: "Tape manager...".into() },
-                Keybinding { key: "P".into(), description: "Command palette".into() },
-                Keybinding { key: "S".into(), description: "Session switcher".into() },
-                Keybinding { key: "W".into(), description: "Workspace switcher".into() },
-                Keybinding { key: "L".into(), description: "Layout commands...".into() },
-                Keybinding { key: "b".into(), description: "Toggle sidebar".into() },
-                Keybinding { key: "e".into(), description: "Focus/leave sidebar".into() },
-                Keybinding { key: "j".into(), description: "Jump to newest message".into() },
-                Keybinding { key: "X".into(), description: "Close session".into() },
+                Keybinding {
+                    key: "c".into(),
+                    description: "Create window".into(),
+                },
+                Keybinding {
+                    key: "x".into(),
+                    description: "Close window".into(),
+                },
+                Keybinding {
+                    key: "r".into(),
+                    description: "Rename window".into(),
+                },
+                Keybinding {
+                    key: ",".into(),
+                    description: "Settings".into(),
+                },
+                Keybinding {
+                    key: "n".into(),
+                    description: "Next window".into(),
+                },
+                Keybinding {
+                    key: "p".into(),
+                    description: "Previous window".into(),
+                },
+                Keybinding {
+                    key: "0-9".into(),
+                    description: "Jump to window".into(),
+                },
+                Keybinding {
+                    key: "z".into(),
+                    description: "Toggle zoom".into(),
+                },
+                Keybinding {
+                    key: "space".into(),
+                    description: "Toggle tiling".into(),
+                },
+                Keybinding {
+                    key: "-".into(),
+                    description: "Split horizontal".into(),
+                },
+                Keybinding {
+                    key: "|/\\".into(),
+                    description: "Split vertical".into(),
+                },
+                Keybinding {
+                    key: "R".into(),
+                    description: "Rotate split".into(),
+                },
+                Keybinding {
+                    key: "=".into(),
+                    description: "Equalize splits".into(),
+                },
+                Keybinding {
+                    key: "w".into(),
+                    description: "Workspace commands...".into(),
+                },
+                Keybinding {
+                    key: "m".into(),
+                    description: "Minimize commands...".into(),
+                },
+                Keybinding {
+                    key: "t".into(),
+                    description: "Window commands...".into(),
+                },
+                Keybinding {
+                    key: "D".into(),
+                    description: "Debug commands...".into(),
+                },
+                Keybinding {
+                    key: "T".into(),
+                    description: "Tape manager...".into(),
+                },
+                Keybinding {
+                    key: "P".into(),
+                    description: "Command palette".into(),
+                },
+                Keybinding {
+                    key: "S".into(),
+                    description: "Session switcher".into(),
+                },
+                Keybinding {
+                    key: "W".into(),
+                    description: "Workspace switcher".into(),
+                },
+                Keybinding {
+                    key: "L".into(),
+                    description: "Layout commands...".into(),
+                },
+                Keybinding {
+                    key: "b".into(),
+                    description: "Toggle sidebar".into(),
+                },
+                Keybinding {
+                    key: "e".into(),
+                    description: "Focus/leave sidebar".into(),
+                },
+                Keybinding {
+                    key: "j".into(),
+                    description: "Jump to newest message".into(),
+                },
+                Keybinding {
+                    key: "X".into(),
+                    description: "Close session".into(),
+                },
             ];
 
             if is_daemon_session {
-                bindings.push(Keybinding { key: "d".into(), description: "Detach session".into() });
-                bindings.push(Keybinding { key: "Esc".into(), description: "Window mode".into() });
+                bindings.push(Keybinding {
+                    key: "d".into(),
+                    description: "Detach session".into(),
+                });
+                bindings.push(Keybinding {
+                    key: "Esc".into(),
+                    description: "Window mode".into(),
+                });
             } else {
-                bindings.push(Keybinding { key: "d/Esc".into(), description: "Window mode".into() });
+                bindings.push(Keybinding {
+                    key: "d/Esc".into(),
+                    description: "Window mode".into(),
+                });
             }
 
-            bindings.push(Keybinding { key: "[".into(), description: "Scrollback mode".into() });
-            bindings.push(Keybinding { key: "s".into(), description: "Scrollback browser".into() });
-            bindings.push(Keybinding { key: "?".into(), description: "Toggle help".into() });
+            bindings.push(Keybinding {
+                key: "[".into(),
+                description: "Scrollback mode".into(),
+            });
+            bindings.push(Keybinding {
+                key: "s".into(),
+                description: "Scrollback browser".into(),
+            });
+            bindings.push(Keybinding {
+                key: "?".into(),
+                description: "Toggle help".into(),
+            });
 
             if is_daemon_session {
-                bindings.push(Keybinding { key: "q".into(), description: "Quit menu".into() });
+                bindings.push(Keybinding {
+                    key: "q".into(),
+                    description: "Quit menu".into(),
+                });
             } else {
-                bindings.push(Keybinding { key: "q".into(), description: "Quit".into() });
+                bindings.push(Keybinding {
+                    key: "q".into(),
+                    description: "Quit".into(),
+                });
             }
 
             bindings
@@ -144,7 +330,10 @@ pub fn default_prefix_mode() -> HashMap<String, Vec<String>> {
     m.insert("prefix_rename_window".into(), vec!["r".into()]);
     m.insert("prefix_settings".into(), vec![",".into()]);
     m.insert("prefix_next_window".into(), vec!["n".into(), "tab".into()]);
-    m.insert("prefix_prev_window".into(), vec!["p".into(), "shift+tab".into()]);
+    m.insert(
+        "prefix_prev_window".into(),
+        vec!["p".into(), "shift+tab".into()],
+    );
     for i in 0..=9 {
         m.insert(format!("prefix_select_{i}"), vec![i.to_string()]);
     }
@@ -162,7 +351,10 @@ pub fn default_prefix_mode() -> HashMap<String, Vec<String>> {
     m.insert("prefix_quit".into(), vec!["q".into()]);
     m.insert("prefix_fullscreen".into(), vec!["z".into()]);
     m.insert("prefix_split_horizontal".into(), vec!["-".into()]);
-    m.insert("prefix_split_vertical".into(), vec!["|".into(), "\\".into()]);
+    m.insert(
+        "prefix_split_vertical".into(),
+        vec!["|".into(), "\\".into()],
+    );
     m.insert("prefix_rotate_split".into(), vec!["R".into()]);
     m.insert("prefix_equalize_splits".into(), vec!["=".into()]);
     m.insert("prefix_scrollback".into(), vec!["s".into()]);
@@ -213,7 +405,10 @@ pub fn default_layout() -> HashMap<String, Vec<String>> {
 /// The default mode-control keybindings (vim-like mode entry/exit).
 pub fn default_mode_control() -> HashMap<String, Vec<String>> {
     let mut m = HashMap::new();
-    m.insert("enter_terminal_mode".into(), vec!["i".into(), "enter".into()]);
+    m.insert(
+        "enter_terminal_mode".into(),
+        vec!["i".into(), "enter".into()],
+    );
     m.insert("enter_window_mode".into(), vec!["esc".into()]);
     m.insert("toggle_help".into(), vec!["?".into()]);
     m.insert("quit".into(), vec!["q".into()]);

@@ -15,7 +15,7 @@ pub mod kitty;
 pub mod placement;
 pub mod sixel;
 
-pub use capability::{Capabilities, HostTerminal, detect_host_terminal, inside_multiplexer};
-pub use kitty::{KittyPassthrough, is_kitty_response};
+pub use capability::{detect_host_terminal, inside_multiplexer, Capabilities, HostTerminal};
+pub use kitty::{is_kitty_response, KittyPassthrough};
 pub use placement::{Placement, PlacementStore};
 pub use sixel::SixelPassthrough;

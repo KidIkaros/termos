@@ -20,11 +20,13 @@ pub fn load_tls_config(
     Ok(Arc::new(config))
 }
 
-fn load_certs(path: &str) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, Box<dyn std::error::Error>> {
+fn load_certs(
+    path: &str,
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, Box<dyn std::error::Error>> {
     let file = std::fs::File::open(path)?;
     let mut reader = std::io::BufReader::new(file);
-    let certs: Vec<rustls::pki_types::CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
-        .collect::<Result<_, _>>()?;
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut reader).collect::<Result<_, _>>()?;
     Ok(certs)
 }
 
@@ -37,5 +39,7 @@ fn load_private_key(
         rustls_pemfile::private_key(&mut reader)?
             .into_iter()
             .collect();
-    keys.into_iter().next().ok_or("no private key found in file")
+    keys.into_iter()
+        .next()
+        .ok_or("no private key found in file")
 }

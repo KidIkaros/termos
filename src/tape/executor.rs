@@ -46,8 +46,11 @@ pub trait TapeExecutor {
 
     /// Workspaces.
     fn switch_workspace(&mut self, workspace: i32) -> Result<(), String>;
-    fn move_window_to_workspace_by_id(&mut self, window_id: &str, workspace: i32)
-        -> Result<(), String>;
+    fn move_window_to_workspace_by_id(
+        &mut self,
+        window_id: &str,
+        workspace: i32,
+    ) -> Result<(), String>;
     fn move_and_follow_workspace_by_id(
         &mut self,
         window_id: &str,
@@ -101,7 +104,10 @@ impl<'a> CommandExecutor<'a> {
 
         match cmd.type_ {
             CommandType::Type => {
-                let text = cmd.args.first().ok_or_else(|| missing_arg("Type", "the text to type"))?;
+                let text = cmd
+                    .args
+                    .first()
+                    .ok_or_else(|| missing_arg("Type", "the text to type"))?;
                 let id = executor_focused_id(executor);
                 executor.send_to_window(&id, text.as_bytes())
             }
@@ -330,9 +336,7 @@ impl<'a> CommandExecutor<'a> {
 
 /// The focused window id, or an empty string when none (sends go nowhere).
 fn executor_focused_id(executor: &dyn TapeExecutor) -> String {
-    executor
-        .focused_window_id()
-        .unwrap_or_default()
+    executor.focused_window_id().unwrap_or_default()
 }
 
 /// Reports a tape command that was given no argument to act on.
@@ -450,50 +454,142 @@ mod tests {
                     Some("w1".to_string())
                 }
                 fn send_to_window(&mut self, id: &str, data: &[u8]) -> Result<(), String> {
-                    self.sends.borrow_mut().push((id.to_string(), data.to_vec()));
+                    self.sends
+                        .borrow_mut()
+                        .push((id.to_string(), data.to_vec()));
                     Ok(())
                 }
-                fn set_mode(&mut self, _m: &str) -> Result<(), String> { Ok(()) }
-                fn create_new_window(&mut self) -> Result<(), String> { Ok(()) }
-                fn create_new_window_with_name(&mut self, _n: &str) -> Result<(), String> { Ok(()) }
-                fn close_window(&mut self, _w: &str) -> Result<(), String> { Ok(()) }
-                fn close_window_by_name(&mut self, _n: &str) -> Result<(), String> { Ok(()) }
-                fn next_window(&mut self) -> Result<(), String> { Ok(()) }
-                fn prev_window(&mut self) -> Result<(), String> { Ok(()) }
-                fn focus_window_by_id(&mut self, _w: &str) -> Result<(), String> { Ok(()) }
-                fn focus_window_by_name(&mut self, _n: &str) -> Result<(), String> { Ok(()) }
-                fn rename_window_by_id(&mut self, _w: &str, _n: &str) -> Result<(), String> { Ok(()) }
-                fn rename_window_by_name(&mut self, _o: &str, _n: &str) -> Result<(), String> { Ok(()) }
-                fn minimize_window_by_id(&mut self, _w: &str) -> Result<(), String> { Ok(()) }
-                fn minimize_window_by_name(&mut self, _n: &str) -> Result<(), String> { Ok(()) }
-                fn restore_window_by_id(&mut self, _w: &str) -> Result<(), String> { Ok(()) }
-                fn restore_window_by_name(&mut self, _n: &str) -> Result<(), String> { Ok(()) }
-                fn toggle_tiling(&mut self) -> Result<(), String> { Ok(()) }
-                fn enable_tiling(&mut self) -> Result<(), String> { Ok(()) }
-                fn disable_tiling(&mut self) -> Result<(), String> { Ok(()) }
-                fn snap_by_direction(&mut self, _d: &str) -> Result<(), String> { Ok(()) }
-                fn split_horizontal(&mut self) -> Result<(), String> { Ok(()) }
-                fn split_vertical(&mut self) -> Result<(), String> { Ok(()) }
-                fn rotate_split(&mut self) -> Result<(), String> { Ok(()) }
-                fn equalize_splits(&mut self) -> Result<(), String> { Ok(()) }
-                fn preselect(&mut self, _d: &str) -> Result<(), String> { Ok(()) }
-                fn switch_workspace(&mut self, _w: i32) -> Result<(), String> { Ok(()) }
-                fn move_window_to_workspace_by_id(&mut self, _w: &str, _x: i32) -> Result<(), String> { Ok(()) }
-                fn move_and_follow_workspace_by_id(&mut self, _w: &str, _x: i32) -> Result<(), String> { Ok(()) }
-                fn enable_animations(&mut self) -> Result<(), String> { Ok(()) }
-                fn disable_animations(&mut self) -> Result<(), String> { Ok(()) }
-                fn toggle_animations(&mut self) -> Result<(), String> { Ok(()) }
-                fn toggle_zoom(&mut self) -> Result<(), String> { Ok(()) }
-                fn smart_split_focused(&mut self) -> Result<(), String> { Ok(()) }
-                fn show_command_palette(&mut self) -> Result<(), String> { Ok(()) }
-                fn save_layout(&mut self, _n: &str) -> Result<(), String> { Ok(()) }
-                fn load_layout(&mut self, _n: &str) -> Result<(), String> { Ok(()) }
-                fn set_config(&mut self, _p: &str, _v: &str) -> Result<(), String> { Ok(()) }
-                fn set_theme(&mut self, _n: &str) -> Result<(), String> { Ok(()) }
-                fn set_dockbar_position(&mut self, _p: &str) -> Result<(), String> { Ok(()) }
-                fn set_border_style(&mut self, _s: &str) -> Result<(), String> { Ok(()) }
-                fn show_notification(&mut self, _m: &str, _t: &str) -> Result<(), String> { Ok(()) }
-                fn focus_direction(&mut self, _d: &str) -> Result<(), String> { Ok(()) }
+                fn set_mode(&mut self, _m: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn create_new_window(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn create_new_window_with_name(&mut self, _n: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn close_window(&mut self, _w: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn close_window_by_name(&mut self, _n: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn next_window(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn prev_window(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn focus_window_by_id(&mut self, _w: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn focus_window_by_name(&mut self, _n: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn rename_window_by_id(&mut self, _w: &str, _n: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn rename_window_by_name(&mut self, _o: &str, _n: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn minimize_window_by_id(&mut self, _w: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn minimize_window_by_name(&mut self, _n: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn restore_window_by_id(&mut self, _w: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn restore_window_by_name(&mut self, _n: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn toggle_tiling(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn enable_tiling(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn disable_tiling(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn snap_by_direction(&mut self, _d: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn split_horizontal(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn split_vertical(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn rotate_split(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn equalize_splits(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn preselect(&mut self, _d: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn switch_workspace(&mut self, _w: i32) -> Result<(), String> {
+                    Ok(())
+                }
+                fn move_window_to_workspace_by_id(
+                    &mut self,
+                    _w: &str,
+                    _x: i32,
+                ) -> Result<(), String> {
+                    Ok(())
+                }
+                fn move_and_follow_workspace_by_id(
+                    &mut self,
+                    _w: &str,
+                    _x: i32,
+                ) -> Result<(), String> {
+                    Ok(())
+                }
+                fn enable_animations(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn disable_animations(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn toggle_animations(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn toggle_zoom(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn smart_split_focused(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn show_command_palette(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+                fn save_layout(&mut self, _n: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn load_layout(&mut self, _n: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn set_config(&mut self, _p: &str, _v: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn set_theme(&mut self, _n: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn set_dockbar_position(&mut self, _p: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn set_border_style(&mut self, _s: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn show_notification(&mut self, _m: &str, _t: &str) -> Result<(), String> {
+                    Ok(())
+                }
+                fn focus_direction(&mut self, _d: &str) -> Result<(), String> {
+                    Ok(())
+                }
             }
         };
     }
@@ -503,7 +599,12 @@ mod tests {
     impl Recording {
         fn new() -> (Self, RecordedSends) {
             let sends = Rc::new(RefCell::new(Vec::new()));
-            (Self { sends: sends.clone() }, sends)
+            (
+                Self {
+                    sends: sends.clone(),
+                },
+                sends,
+            )
         }
     }
 
@@ -557,15 +658,24 @@ mod tests {
                 cmd(CommandType::Split, &["sideways"]),
             ),
             ("Focus with no target", cmd(CommandType::FocusWindow, &[])),
-            ("Preselect with no direction", cmd(CommandType::Preselect, &[])),
-            ("RenameWindow with no name", cmd(CommandType::RenameWindow, &[])),
-            ("SaveLayout with no name", cmd(CommandType::SaveLayout, &[])),
             (
-                "Set with no value",
-                cmd(CommandType::SetConfig, &["a.b"]),
+                "Preselect with no direction",
+                cmd(CommandType::Preselect, &[]),
             ),
-            ("Notify with no message", cmd(CommandType::ShowNotification, &[])),
-            ("Switch with no workspace", cmd(CommandType::SwitchWorkspace, &[])),
+            (
+                "RenameWindow with no name",
+                cmd(CommandType::RenameWindow, &[]),
+            ),
+            ("SaveLayout with no name", cmd(CommandType::SaveLayout, &[])),
+            ("Set with no value", cmd(CommandType::SetConfig, &["a.b"])),
+            (
+                "Notify with no message",
+                cmd(CommandType::ShowNotification, &[]),
+            ),
+            (
+                "Switch with no workspace",
+                cmd(CommandType::SwitchWorkspace, &[]),
+            ),
             (
                 "Switch with a non-numeric workspace",
                 cmd(CommandType::SwitchWorkspace, &["main"]),

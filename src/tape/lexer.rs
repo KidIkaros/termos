@@ -7,11 +7,11 @@ use super::token::{lookup_keyword, Token, TokenType};
 #[derive(Debug)]
 pub struct Lexer {
     input: Vec<u8>,
-    pos: usize,     // current position
+    pos: usize,      // current position
     next_pos: usize, // next position
-    ch: u8,         // current character (0 = EOF)
-    line: usize,    // current line (1-based)
-    column: usize,  // current column (1-based)
+    ch: u8,          // current character (0 = EOF)
+    line: usize,     // current line (1-based)
+    column: usize,   // current column (1-based)
 }
 
 impl Lexer {
@@ -300,7 +300,11 @@ mod tests {
 
     #[test]
     fn strings() {
-        for input in [r#"Type "hello world""#, "Type 'hello world'", "Type `hello world`"] {
+        for input in [
+            r#"Type "hello world""#,
+            "Type 'hello world'",
+            "Type `hello world`",
+        ] {
             let toks = tokenize(input);
             let s = toks
                 .iter()
@@ -384,10 +388,7 @@ mod tests {
     #[test]
     fn at_modifier() {
         let input = "Type@100ms \"hello\"\nSleep@2s 500ms";
-        let at_count = tokenize(input)
-            .iter()
-            .filter(|t| t.type_ == T::At)
-            .count();
+        let at_count = tokenize(input).iter().filter(|t| t.type_ == T::At).count();
         assert_eq!(at_count, 2);
     }
 

@@ -125,7 +125,11 @@ mod tests {
         save_tape("unit-list-1", "Enter\n").unwrap();
         let files = list_tapes().unwrap();
         assert!(
-            files.iter().any(|p| p.file_name().unwrap().to_string_lossy().ends_with("unit-list-1.tape")),
+            files.iter().any(|p| p
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("unit-list-1.tape")),
             "expected unit-list-1.tape in {files:?}"
         );
         delete_tape("unit-list-1").unwrap();

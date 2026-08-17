@@ -191,22 +191,56 @@ impl Recorder {
 
         let str_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let (cmd_type, raw, args) = match action {
-            "new_window" => (CommandType::NewWindow, "NewWindow".to_string(), str_args.clone()),
-            "close_window" => (CommandType::CloseWindow, "CloseWindow".to_string(), str_args.clone()),
-            "next_window" => (CommandType::NextWindow, "NextWindow".to_string(), str_args.clone()),
-            "prev_window" => (CommandType::PrevWindow, "PrevWindow".to_string(), str_args.clone()),
-            "minimize_window" => {
-                (CommandType::MinimizeWindow, "MinimizeWindow".to_string(), str_args.clone())
-            }
-            "restore_all" => {
-                (CommandType::RestoreWindow, "RestoreWindow".to_string(), str_args.clone())
-            }
-            "toggle_tiling" => (CommandType::ToggleTiling, "ToggleTiling".to_string(), str_args.clone()),
-            "snap_left" => (CommandType::SnapLeft, "SnapLeft".to_string(), str_args.clone()),
-            "snap_right" => (CommandType::SnapRight, "SnapRight".to_string(), str_args.clone()),
-            "snap_fullscreen" => {
-                (CommandType::SnapFullscreen, "SnapFullscreen".to_string(), str_args.clone())
-            }
+            "new_window" => (
+                CommandType::NewWindow,
+                "NewWindow".to_string(),
+                str_args.clone(),
+            ),
+            "close_window" => (
+                CommandType::CloseWindow,
+                "CloseWindow".to_string(),
+                str_args.clone(),
+            ),
+            "next_window" => (
+                CommandType::NextWindow,
+                "NextWindow".to_string(),
+                str_args.clone(),
+            ),
+            "prev_window" => (
+                CommandType::PrevWindow,
+                "PrevWindow".to_string(),
+                str_args.clone(),
+            ),
+            "minimize_window" => (
+                CommandType::MinimizeWindow,
+                "MinimizeWindow".to_string(),
+                str_args.clone(),
+            ),
+            "restore_all" => (
+                CommandType::RestoreWindow,
+                "RestoreWindow".to_string(),
+                str_args.clone(),
+            ),
+            "toggle_tiling" => (
+                CommandType::ToggleTiling,
+                "ToggleTiling".to_string(),
+                str_args.clone(),
+            ),
+            "snap_left" => (
+                CommandType::SnapLeft,
+                "SnapLeft".to_string(),
+                str_args.clone(),
+            ),
+            "snap_right" => (
+                CommandType::SnapRight,
+                "SnapRight".to_string(),
+                str_args.clone(),
+            ),
+            "snap_fullscreen" => (
+                CommandType::SnapFullscreen,
+                "SnapFullscreen".to_string(),
+                str_args.clone(),
+            ),
             _ if action.starts_with("switch_workspace_") => {
                 let ws = &action["switch_workspace_".len()..];
                 (
@@ -330,7 +364,11 @@ fn key_to_command(key: &str, line: usize) -> Option<Command> {
         "right" => (CommandType::Right, "Right".to_string(), vec![]),
         "home" => (CommandType::Home, "Home".to_string(), vec![]),
         "end" => (CommandType::End, "End".to_string(), vec![]),
-        _ if is_modifier_combo(key) => (CommandType::KeyCombo, key.to_string(), vec![key.to_string()]),
+        _ if is_modifier_combo(key) => (
+            CommandType::KeyCombo,
+            key.to_string(),
+            vec![key.to_string()],
+        ),
         _ if key.chars().count() == 1 && key.is_ascii() => {
             // Single printable character — record as a Type command.
             return Some(Command {
@@ -460,7 +498,10 @@ mod tests {
         r.record_key("?");
         r.stop();
         let types: Vec<CommandType> = r.commands().iter().map(|c| c.type_).collect();
-        assert_eq!(types, vec![CommandType::Up, CommandType::KeyCombo, CommandType::Type]);
+        assert_eq!(
+            types,
+            vec![CommandType::Up, CommandType::KeyCombo, CommandType::Type]
+        );
         assert_eq!(r.commands()[1].raw, "ctrl+b");
     }
 

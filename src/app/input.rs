@@ -6,9 +6,7 @@
 //! 2. Window-management mode routes keys to window/workspace actions.
 //! 3. Terminal mode passes keys through to the focused PTY.
 
-use crossterm::event::{
-    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use super::{Mode, Os, Prefix, SwitcherKind};
 use crate::layout::{PreselectionDir, SplitType};
@@ -105,12 +103,10 @@ pub fn encode_key(key: &KeyEvent) -> Vec<u8> {
 fn is_leader_key(key: &KeyEvent, leader: &str) -> bool {
     match leader {
         "ctrl+b" => {
-            key.modifiers.contains(KeyModifiers::CONTROL)
-                && matches!(key.code, KeyCode::Char('b'))
+            key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('b'))
         }
         "ctrl+a" => {
-            key.modifiers.contains(KeyModifiers::CONTROL)
-                && matches!(key.code, KeyCode::Char('a'))
+            key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('a'))
         }
         _ => {
             // Fall back: compare against the encoded form.
@@ -604,8 +600,7 @@ fn handle_tape_manager(os: &mut Os, key: &KeyEvent) -> KeyResult {
         KeyCode::Up | KeyCode::Char('k') => {
             let items = os.tape_manager_items().len();
             if items > 0 {
-                os.tape_manager_selected =
-                    (os.tape_manager_selected + items - 1) % items;
+                os.tape_manager_selected = (os.tape_manager_selected + items - 1) % items;
             }
             KeyResult::Consumed
         }
@@ -870,12 +865,7 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
 /// In terminal mode, if the hovered pane's application has mouse tracking
 /// enabled, encode and forward the wheel event to it. Returns true when the
 /// event was forwarded (so the caller does not also scroll scrollback).
-fn forward_wheel_to_app(
-    os: &Os,
-    index: usize,
-    mouse: &MouseEvent,
-    direction: i32,
-) -> bool {
+fn forward_wheel_to_app(os: &Os, index: usize, mouse: &MouseEvent, direction: i32) -> bool {
     if os.mode != Mode::Terminal {
         return false;
     }
@@ -979,10 +969,7 @@ mod tests {
     fn alt_esc_leaves_terminal_mode() {
         let mut os = test_os();
         os.enter_terminal_mode();
-        let result = handle_key(
-            &mut os,
-            &KeyEvent::new(KeyCode::Esc, KeyModifiers::ALT),
-        );
+        let result = handle_key(&mut os, &KeyEvent::new(KeyCode::Esc, KeyModifiers::ALT));
         assert_eq!(result, KeyResult::Consumed);
         assert_eq!(os.mode, Mode::WindowManagement);
     }

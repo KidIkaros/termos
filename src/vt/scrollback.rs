@@ -18,7 +18,11 @@ impl Scrollback {
     pub fn new(max_lines: usize) -> Self {
         Self {
             lines: Vec::new(),
-            max_lines: if max_lines == 0 { DEFAULT_MAX_LINES } else { max_lines },
+            max_lines: if max_lines == 0 {
+                DEFAULT_MAX_LINES
+            } else {
+                max_lines
+            },
         }
     }
 

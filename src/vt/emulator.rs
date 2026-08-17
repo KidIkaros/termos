@@ -76,7 +76,10 @@ impl Emulator {
     pub fn new(width: i32, height: i32) -> Self {
         let mut emu = Self {
             parser: Parser::new(),
-            screens: [ScreenBuffer::new(width, height), ScreenBuffer::new(width, height)],
+            screens: [
+                ScreenBuffer::new(width, height),
+                ScreenBuffer::new(width, height),
+            ],
             active: 0,
             modes: std::collections::HashMap::new(),
             charsets: [CharSet::Ascii; 4],
@@ -149,10 +152,9 @@ impl Emulator {
                 }
             }
             MODE_CURSOR_VISIBLE => self.screen_mut().cursor.hidden = !enabled,
-            MODE_ORIGIN
-                if enabled => {
-                    self.screen_mut().set_cursor(0, 0, false);
-                }
+            MODE_ORIGIN if enabled => {
+                self.screen_mut().set_cursor(0, 0, false);
+            }
             _ => {}
         }
     }
@@ -577,21 +579,29 @@ impl Emulator {
             let style = screen.pen();
 
             // Write the cell (and continuation cells for wide runes).
-            screen.set_cell(x, y, crate::vt::cell::Cell {
-                content: c.to_string(),
-                width: width as u8,
-                style,
-                link: Default::default(),
-                dirty: true,
-            });
-            for k in 1..width {
-                screen.set_cell(x + k, y, crate::vt::cell::Cell {
-                    content: String::new(),
-                    width: 0,
+            screen.set_cell(
+                x,
+                y,
+                crate::vt::cell::Cell {
+                    content: c.to_string(),
+                    width: width as u8,
                     style,
                     link: Default::default(),
                     dirty: true,
-                });
+                },
+            );
+            for k in 1..width {
+                screen.set_cell(
+                    x + k,
+                    y,
+                    crate::vt::cell::Cell {
+                        content: String::new(),
+                        width: 0,
+                        style,
+                        link: Default::default(),
+                        dirty: true,
+                    },
+                );
             }
 
             // Advance the cursor.
@@ -647,7 +657,11 @@ fn parse_extended_color(params: &[i64]) -> Option<Color> {
     match params.first() {
         Some(2) => {
             if params.len() >= 4 {
-                Some(Color::Rgb(params[1] as u8, params[2] as u8, params[3] as u8))
+                Some(Color::Rgb(
+                    params[1] as u8,
+                    params[2] as u8,
+                    params[3] as u8,
+                ))
             } else {
                 None
             }
@@ -751,20 +765,14 @@ impl Handler for Emulator {
 
     fn csi(&mut self, seq: &CsiSequence) {
         let final_byte = seq.final_byte;
-        let params: Vec<i64> = seq
-            .params
-            .iter()
-            .map(|p| p.or(0))
-            .collect();
+        let params: Vec<i64> = seq.params.iter().map(|p| p.or(0)).collect();
         let p = |i: usize, default: i32| -> i32 {
             seq.params
                 .get(i)
                 .map(|p| p.or(default as i64) as i32)
                 .unwrap_or(default)
         };
-        let p_or1 = |i: usize| -> i32 {
-            seq.params.get(i).map(|p| p.or(1) as i32).unwrap_or(1)
-        };
+        let p_or1 = |i: usize| -> i32 { seq.params.get(i).map(|p| p.or(1) as i32).unwrap_or(1) };
 
         // Private (DEC) sequences.
         if seq.private {
@@ -805,14 +813,12 @@ impl Handler for Emulator {
             // Cursor up (with origin).
             b'I' => self.screen_mut().move_cursor(0, -p_or1(0)),
             // Cursor down (with origin).
-            b'J' => {
-                match p(0, 0) {
-                    0 => self.screen_mut().clear_to_end_of_screen(),
-                    1 => self.screen_mut().clear_from_start_of_screen(),
-                    2 | 3 => self.screen_mut().clear_screen(),
-                    _ => {}
-                }
-            }
+            b'J' => match p(0, 0) {
+                0 => self.screen_mut().clear_to_end_of_screen(),
+                1 => self.screen_mut().clear_from_start_of_screen(),
+                2 | 3 => self.screen_mut().clear_screen(),
+                _ => {}
+            },
             // Erase line.
             b'K' => match p(0, 0) {
                 0 => self.screen_mut().clear_to_end_of_line(),
@@ -841,18 +847,16 @@ impl Handler for Emulator {
             // Cursor restore.
             b'u' => self.screen_mut().restore_cursor(),
             // Device status report.
-            b'n' => {
-                match p(0, 0) {
-                    5 => self.queue_response(b"\x1b[0n"),
-                    6 => {
-                        let x = self.screen().cursor.pos.x + 1;
-                        let y = self.screen().cursor.pos.y + 1;
-                        let seq = format!("\x1b[{};{}R", y, x);
-                        self.queue_response(seq.as_bytes());
-                    }
-                    _ => {}
+            b'n' => match p(0, 0) {
+                5 => self.queue_response(b"\x1b[0n"),
+                6 => {
+                    let x = self.screen().cursor.pos.x + 1;
+                    let y = self.screen().cursor.pos.y + 1;
+                    let seq = format!("\x1b[{};{}R", y, x);
+                    self.queue_response(seq.as_bytes());
                 }
-            }
+                _ => {}
+            },
             // Device attributes.
             b'c' => {
                 let seq = b"\x1b[?1;2c".to_vec();
@@ -964,7 +968,8 @@ impl Handler for Emulator {
                 let text = String::from_utf8_lossy(payload);
                 if let Some((_, b64)) = text.split_once(';') {
                     use base64::Engine;
-                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) {
+                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.trim())
+                    {
                         let text = String::from_utf8_lossy(&bytes).into_owned();
                         // Exposed to the app via a callback; stored in a slot.
                         self.clipboard = Some(text);
@@ -1010,13 +1015,8 @@ impl Emulator {
 }
 
 impl Emulator {
-    fn private_csi<F1, F2>(
-        &mut self,
-        final_byte: u8,
-        params: &[i64],
-        p: F1,
-        _p_or1: F2,
-    ) where
+    fn private_csi<F1, F2>(&mut self, final_byte: u8, params: &[i64], p: F1, _p_or1: F2)
+    where
         F1: Fn(usize, i32) -> i32,
         F2: Fn(usize) -> i32,
     {
