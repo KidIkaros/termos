@@ -50,6 +50,35 @@ struct LiveWindow {
     shell: String,
 }
 
+/// A cap-limited ring of a window's raw output. Kept daemon-side so the
+/// `capture-pane` and `wait-for` verbs work headlessly, without a client
+/// emulator attached.
+struct OutputRing {
+    buf: Vec<u8>,
+    cap: usize,
+}
+
+impl OutputRing {
+    fn new(cap: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            cap,
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        self.buf.extend_from_slice(chunk);
+        if self.buf.len() > self.cap {
+            let drop = self.buf.len() - self.cap;
+            self.buf.drain(..drop);
+        }
+    }
+
+    fn as_lossy(&self) -> String {
+        String::from_utf8_lossy(&self.buf).into_owned()
+    }
+}
+
 /// One session's fan-out point. Each attached client registers a `Sender`;
 /// window pumps and window-lifecycle events write to every registered sender.
 struct SessionBroadcast {
@@ -107,7 +136,14 @@ pub struct Daemon {
     /// `Input`/`Resize`). The `set-agent-state` verb targets it when no
     /// window is named — the port's approximation of "focused".
     last_active: Mutex<HashMap<String, String>>,
+    /// Per-window raw-output rings keyed by (session, window), for the
+    /// `capture-pane` / `wait-for` verbs.
+    rings: Arc<Mutex<HashMap<(String, String), OutputRing>>>,
 }
+
+/// Ring capacity (256 KiB) and the capture size cap (64 KiB).
+const RING_CAP: usize = 256 * 1024;
+const CAPTURE_CAP: usize = 64 * 1024;
 
 impl Daemon {
     pub fn new() -> Self {
@@ -117,6 +153,7 @@ impl Daemon {
             broadcast: Mutex::new(HashMap::new()),
             hook_manager: crate::hooks::Manager::new(),
             last_active: Mutex::new(HashMap::new()),
+            rings: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -179,7 +216,7 @@ impl Daemon {
             .create(name, &cfg)
             .map_err(|e| e.to_string())?;
         let broadcast = self.broadcast_for(name);
-        let window = self.spawn_window("w0", "Terminal", 1, &cfg.shell, &broadcast)?;
+        let window = self.spawn_window(name, "w0", "Terminal", 1, &cfg.shell, &broadcast)?;
         self.fire_hook(
             crate::hooks::Event::AfterNewWindow,
             name,
@@ -205,7 +242,7 @@ impl Daemon {
         let mut wins = Vec::new();
         for (i, w) in state.windows.iter().enumerate() {
             let id = format!("w{i}");
-            match self.spawn_window(&id, &w.title, w.workspace, &w.shell, &broadcast) {
+            match self.spawn_window(name, &id, &w.title, w.workspace, &w.shell, &broadcast) {
                 Ok(live) => wins.push(live),
                 Err(e) => log::warn!("failed to respawn window '{id}' in session '{name}': {e}"),
             }
@@ -216,6 +253,7 @@ impl Daemon {
 
     fn spawn_window(
         &self,
+        session: &str,
         id: &str,
         title: &str,
         workspace: i32,
@@ -224,12 +262,23 @@ impl Daemon {
     ) -> Result<LiveWindow, String> {
         let size = WinSize { cols: 80, rows: 24 };
         let argv = vec![shell.to_string()];
+        // Advertise TUIOS to the pane so agents can detect the environment.
+        let env = vec![
+            ("TUIOS_ENV".to_string(), "1".to_string()),
+            ("TUIOS_SESSION_ID".to_string(), session.to_string()),
+            ("TUIOS_WINDOW_ID".to_string(), id.to_string()),
+        ];
         let (writer, handle, reader) =
-            spawn_pty(size, &argv, Box::new(|| {})).map_err(|e| e.to_string())?;
-        // Pump this window's PTY output into the session's broadcast hub.
+            spawn_pty(size, &argv, Box::new(|| {}), &env).map_err(|e| e.to_string())?;
+        // Pump this window's PTY output into the session's broadcast hub and
+        // its output ring (keyed by (session, window) for the verbs).
         let pump_broadcast = Arc::clone(broadcast);
+        let pump_session = session.to_string();
         let pump_id = id.to_string();
-        std::thread::spawn(move || pump(reader.rx, pump_broadcast, pump_id));
+        let rings = Arc::clone(&self.rings);
+        std::thread::spawn(move || {
+            pump(reader.rx, pump_broadcast, pump_session, pump_id, rings)
+        });
         Ok(LiveWindow {
             info: WindowInfo {
                 id: id.to_string(),
@@ -310,20 +359,13 @@ impl Daemon {
         }
     }
 
-    /// Report a window's agent state (`set-agent-state`). `window: None`
-    /// targets the session's most recently active window, falling back to its
-    /// first. Broadcasts `AgentStateChanged` to attached clients.
-    fn set_agent_state(
-        &self,
-        session: &str,
-        window: Option<&str>,
-        state: &str,
-        message: &str,
-        harness: &str,
-    ) -> Result<String, String> {
-        let mut windows = self.windows.lock().unwrap();
+    /// Resolve a window target within a session: an explicit id or title
+    /// (exact, then prefix), else the session's most recently active window,
+    /// else its first. `session` must exist.
+    fn resolve_window(&self, session: &str, window: Option<&str>) -> Result<String, String> {
+        let windows = self.windows.lock().unwrap();
         let wins = windows
-            .get_mut(session)
+            .get(session)
             .ok_or_else(|| format!("session '{session}' not found"))?;
         let target = match window {
             Some(w) => {
@@ -342,9 +384,28 @@ impl Daemon {
                 .cloned()
                 .or_else(|| wins.first().map(|w| w.info.id.clone())),
         };
-        let Some(target) = target else {
-            return Err(format!("session '{session}' has no windows"));
-        };
+        match target {
+            Some(t) => Ok(t),
+            None => Err(format!("session '{session}' has no windows")),
+        }
+    }
+
+    /// Report a window's agent state (`set-agent-state`). `window: None`
+    /// targets the session's most recently active window, falling back to its
+    /// first. Broadcasts `AgentStateChanged` to attached clients.
+    fn set_agent_state(
+        &self,
+        session: &str,
+        window: Option<&str>,
+        state: &str,
+        message: &str,
+        harness: &str,
+    ) -> Result<String, String> {
+        let target = self.resolve_window(session, window)?;
+        let mut windows = self.windows.lock().unwrap();
+        let wins = windows
+            .get_mut(session)
+            .ok_or_else(|| format!("session '{session}' not found"))?;
         let Some(live) = wins.iter_mut().find(|w| w.info.id == target) else {
             return Err(format!("window '{target}' not found"));
         };
@@ -365,6 +426,100 @@ impl Daemon {
         Ok(info.id)
     }
 
+    /// Read a window's agent state (`get-agent-state`).
+    fn get_agent_state(
+        &self,
+        session: &str,
+        window: Option<&str>,
+    ) -> Result<(String, String, String, String), String> {
+        let target = self.resolve_window(session, window)?;
+        let windows = self.windows.lock().unwrap();
+        let wins = windows
+            .get(session)
+            .ok_or_else(|| format!("session '{session}' not found"))?;
+        let Some(live) = wins.iter().find(|w| w.info.id == target) else {
+            return Err(format!("window '{target}' not found"));
+        };
+        Ok((
+            live.info.id.clone(),
+            live.info.agent_state.clone(),
+            live.info.agent_message.clone(),
+            live.info.agent_harness.clone(),
+        ))
+    }
+
+    /// Write raw bytes to a window's PTY (`send-keys` / `send-text`).
+    fn write_input_to(
+        &self,
+        session: &str,
+        window: Option<&str>,
+        data: &[u8],
+    ) -> Result<String, String> {
+        let target = self.resolve_window(session, window)?;
+        let windows = self.windows.lock().unwrap();
+        let wins = windows
+            .get(session)
+            .ok_or_else(|| format!("session '{session}' not found"))?;
+        let Some(w) = wins.iter().find(|w| w.info.id == target) else {
+            return Err(format!("window '{target}' not found"));
+        };
+        w.writer.write(data);
+        drop(windows);
+        self.last_active
+            .lock()
+            .unwrap()
+            .insert(session.to_string(), target.clone());
+        Ok(target)
+    }
+
+    /// Capture a window's recent output (`capture-pane`), the last
+    /// [`CAPTURE_CAP`] bytes of its ring.
+    fn capture_pane(
+        &self,
+        session: &str,
+        window: Option<&str>,
+    ) -> Result<(String, String), String> {
+        let target = self.resolve_window(session, window)?;
+        let rings = self.rings.lock().unwrap();
+        let content = rings
+            .get(&(session.to_string(), target.clone()))
+            .map(|r| r.as_lossy())
+            .unwrap_or_default();
+        let content: String = content.chars().rev().take(CAPTURE_CAP).collect::<String>().chars().rev().collect();
+        Ok((target, content))
+    }
+
+    /// Wait until a window's output matches `pattern` or the deadline passes
+    /// (`wait-for`). Polls the output ring; an invalid pattern is an error.
+    fn wait_for(
+        &self,
+        session: &str,
+        window: Option<&str>,
+        pattern: &str,
+        timeout_ms: u64,
+    ) -> Result<(String, bool), String> {
+        let target = self.resolve_window(session, window)?;
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| format!("invalid pattern: {e}"))?;
+        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let hit = {
+                let rings = self.rings.lock().unwrap();
+                rings
+                    .get(&(session.to_string(), target.clone()))
+                    .map(|r| re.is_match(&r.as_lossy()))
+                    .unwrap_or(false)
+            };
+            if hit {
+                return Ok((target, true));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok((target, false));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     fn add_window(&self, session: &str, shell: &str, workspace: i32) -> Result<WindowInfo, String> {
         let mut windows = self.windows.lock().unwrap();
         let wins = windows
@@ -379,7 +534,7 @@ impl Daemon {
             .get(session)
             .cloned()
             .ok_or_else(|| format!("session '{session}' not found"))?;
-        let live = self.spawn_window(&id, "Terminal", workspace, &shell, &broadcast)?;
+        let live = self.spawn_window(session, &id, "Terminal", workspace, &shell, &broadcast)?;
         let info = live.info.clone();
         wins.push(live);
         drop(windows);
@@ -603,6 +758,85 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                     daemon.write_input(session, &window, &data);
                 }
             }
+            Message::WriteInput {
+                session,
+                window,
+                data,
+            } => {
+                let Some(target_session) = resolve_session(&attached, &session) else {
+                    let _ = send(&writer, &Message::Error {
+                        message: "no session targeted (attach to one or pass -s)".into(),
+                    });
+                    continue;
+                };
+                match daemon.write_input_to(&target_session, window.as_deref(), &data) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let _ = send(&writer, &Message::Error { message: e });
+                    }
+                }
+            }
+            Message::CapturePane { session, window } => {
+                let Some(target_session) = resolve_session(&attached, &session) else {
+                    let _ = send(&writer, &Message::Error {
+                        message: "no session targeted (attach to one or pass -s)".into(),
+                    });
+                    continue;
+                };
+                match daemon.capture_pane(&target_session, window.as_deref()) {
+                    Ok((window, content)) => {
+                        let _ = send(&writer, &Message::PaneCapture { window, content });
+                    }
+                    Err(e) => {
+                        let _ = send(&writer, &Message::Error { message: e });
+                    }
+                }
+            }
+            Message::WaitFor {
+                session,
+                window,
+                pattern,
+                timeout_ms,
+            } => {
+                let Some(target_session) = resolve_session(&attached, &session) else {
+                    let _ = send(&writer, &Message::Error {
+                        message: "no session targeted (attach to one or pass -s)".into(),
+                    });
+                    continue;
+                };
+                match daemon.wait_for(&target_session, window.as_deref(), &pattern, timeout_ms) {
+                    Ok((window, matched)) => {
+                        let _ = send(&writer, &Message::WaitResult { window, matched });
+                    }
+                    Err(e) => {
+                        let _ = send(&writer, &Message::Error { message: e });
+                    }
+                }
+            }
+            Message::GetAgentState { session, window } => {
+                let Some(target_session) = resolve_session(&attached, &session) else {
+                    let _ = send(&writer, &Message::Error {
+                        message: "no session targeted (attach to one or pass -s)".into(),
+                    });
+                    continue;
+                };
+                match daemon.get_agent_state(&target_session, window.as_deref()) {
+                    Ok((window, state, message, harness)) => {
+                        let _ = send(
+                            &writer,
+                            &Message::AgentStateResult {
+                                window,
+                                state,
+                                message,
+                                harness,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        let _ = send(&writer, &Message::Error { message: e });
+                    }
+                }
+            }
             Message::Resize {
                 window,
                 cols,
@@ -620,12 +854,8 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                 harness,
             } => {
                 // Resolve the target session: named, else the session this
-                // connection is attached to, else the first one.
-                let target_session = match &session {
-                    Some(s) => Some(s.clone()),
-                    None => attached.as_ref().map(|(s, _, _)| s.clone()),
-                };
-                match target_session {
+                // connection is attached to.
+                match resolve_session(&attached, &session) {
                     Some(s) => match daemon.set_agent_state(&s, window.as_deref(), &state, &message, &harness) {
                         Ok(window) => {
                             let _ = send(&writer, &Message::AgentStateChanged {
@@ -657,17 +887,41 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
     }
 }
 
-/// Drain a window's PTY output channel and fan each chunk out to every client
-/// attached to its session. When the shell exits (channel closes), announce
-/// the close.
-fn pump(rx: Receiver<Vec<u8>>, broadcast: Arc<SessionBroadcast>, window: String) {
+/// Drain a window's PTY output channel: fan each chunk out to every client
+/// attached to its session and append it to the window's output ring. When
+/// the shell exits (channel closes), announce the close.
+fn pump(
+    rx: Receiver<Vec<u8>>,
+    broadcast: Arc<SessionBroadcast>,
+    session: String,
+    window: String,
+    rings: Arc<Mutex<HashMap<(String, String), OutputRing>>>,
+) {
     while let Ok(chunk) = rx.recv() {
+        if let Ok(mut rings) = rings.lock() {
+            rings
+                .entry((session.clone(), window.clone()))
+                .or_insert_with(|| OutputRing::new(RING_CAP))
+                .push(&chunk);
+        }
         broadcast.send_to_all(&Message::PtyOutput {
             window: window.clone(),
             data: chunk,
         });
     }
     broadcast.send_to_all(&Message::PtyClosed { window });
+}
+
+/// Resolve the target session of a verb: the named one, else the session this
+/// connection is attached to, else `None`.
+fn resolve_session(
+    attached: &Option<(String, u64, Arc<AtomicBool>)>,
+    session: &Option<String>,
+) -> Option<String> {
+    match session {
+        Some(s) => Some(s.clone()),
+        None => attached.as_ref().map(|(s, _, _)| s.clone()),
+    }
 }
 
 fn send(stream: &Arc<Mutex<UnixStream>>, msg: &Message) -> io::Result<()> {

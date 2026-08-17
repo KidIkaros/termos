@@ -1040,6 +1040,7 @@ dependencies = [
  "log",
  "nix",
  "ratatui",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

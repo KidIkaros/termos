@@ -48,6 +48,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Route a subcommand to its handler.
 fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     match args[1].as_str() {
+        "--skill" => {
+            print!("{}", SKILL_DOC);
+            Ok(())
+        }
         "daemon" => {
             let daemon = Arc::new(Daemon::new());
             daemon.load_hooks(&UserConfig::load().hooks);
@@ -69,8 +73,43 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             cmd_run(name)
         }
         "set-agent-state" => cmd_set_agent_state(&args[2..]),
-        other => Err(format!("unknown command '{other}' (try: daemon, run, attach, list, kill, set-agent-state)").into()),
+        "get-agent-state" => cmd_agent_verb(&args[2..], Verb::GetAgentState),
+        "send-keys" => cmd_agent_verb(&args[2..], Verb::SendKeys),
+        "send-text" => cmd_agent_verb(&args[2..], Verb::SendText),
+        "capture-pane" => cmd_agent_verb(&args[2..], Verb::CapturePane),
+        "wait-for" => cmd_agent_verb(&args[2..], Verb::WaitFor),
+        "list-verbs" => {
+            for v in VERBS {
+                println!("{v}");
+            }
+            Ok(())
+        }
+        other => Err(format!("unknown command '{other}' (try: daemon, run, attach, list, kill, set-agent-state, get-agent-state, send-keys, send-text, capture-pane, wait-for, list-verbs)").into()),
     }
+}
+
+/// The embedded agent skill document (`tuios --skill`).
+const SKILL_DOC: &str = include_str!("../skills/tuios/SKILL.md");
+
+/// The verbs the embedded skill documents, in a stable order.
+const VERBS: [&str; 7] = [
+    "list-verbs",
+    "send-keys",
+    "send-text",
+    "capture-pane",
+    "wait-for",
+    "get-agent-state",
+    "set-agent-state",
+];
+
+/// Which agent verb to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verb {
+    GetAgentState,
+    SendKeys,
+    SendText,
+    CapturePane,
+    WaitFor,
 }
 
 fn cmd_list() -> Result<(), Box<dyn std::error::Error>> {
@@ -179,6 +218,151 @@ fn cmd_set_agent_state(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             }
             Ok(Message::Error { message }) => return Err(message.into()),
             Ok(_) => continue,
+            Err(e) => return Err(format!("no reply from daemon: {e}").into()),
+        }
+    }
+}
+
+/// Run one of the agent verbs: `[-s session] [-w window] [args...]`.
+fn cmd_agent_verb(args: &[String], verb: Verb) -> Result<(), Box<dyn std::error::Error>> {
+    let mut session: Option<String> = None;
+    let mut window: Option<String> = None;
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                session = args.get(i).cloned();
+            }
+            "-w" | "--window" => {
+                i += 1;
+                window = args.get(i).cloned();
+            }
+            a if a.starts_with('-') && a != "-" => {
+                return Err(format!("unknown flag '{a}'").into());
+            }
+            a => positional.push(a.to_string()),
+        }
+        i += 1;
+    }
+
+    let client = DaemonClient::connect()?;
+    // Resolve the target session: named, else the only one, else error.
+    let session = match session {
+        Some(s) => s,
+        None => {
+            let sessions = client.list()?;
+            match sessions.len() {
+                1 => sessions[0].name.clone(),
+                0 => return Err("no sessions; create one with `tuios run`".into()),
+                _ => return Err("multiple sessions; pass -s <session>".into()),
+            }
+        }
+    };
+
+    match verb {
+        Verb::GetAgentState => {
+            client.send(&Message::GetAgentState {
+                session: Some(session.clone()),
+                window,
+            })?;
+            match recv_reply(&client)? {
+                Message::AgentStateResult {
+                    window,
+                    state,
+                    message,
+                    harness,
+                } => {
+                    let state = if state.is_empty() { "none" } else { &state };
+                    println!("{session}:{window} {state}");
+                    if !message.is_empty() {
+                        println!("  message: {message}");
+                    }
+                    if !harness.is_empty() {
+                        println!("  harness: {harness}");
+                    }
+                    Ok(())
+                }
+                _ => Err("unexpected reply".into()),
+            }
+        }
+        Verb::SendKeys => {
+            if positional.is_empty() {
+                return Err("usage: tuios send-keys <key> [key...] (e.g. \"ctrl+b\" \"c\", \"enter\")".into());
+            }
+            let mut data = Vec::new();
+            for key in &positional {
+                match tuios::keys::encode_key_name(key) {
+                    Some(bytes) => data.extend_from_slice(&bytes),
+                    None => return Err(format!("unknown key '{key}'").into()),
+                }
+            }
+            client.send(&Message::WriteInput {
+                session: Some(session.clone()),
+                window,
+                data,
+            })?;
+            Ok(())
+        }
+        Verb::SendText => {
+            let text = positional.join(" ");
+            if text.is_empty() {
+                return Err("usage: tuios send-text <text>".into());
+            }
+            client.send(&Message::WriteInput {
+                session: Some(session.clone()),
+                window,
+                data: text.into_bytes(),
+            })?;
+            Ok(())
+        }
+        Verb::CapturePane => {
+            client.send(&Message::CapturePane {
+                session: Some(session.clone()),
+                window,
+            })?;
+            match recv_reply(&client)? {
+                Message::PaneCapture { content, .. } => {
+                    print!("{content}");
+                    Ok(())
+                }
+                _ => Err("unexpected reply".into()),
+            }
+        }
+        Verb::WaitFor => {
+            let pattern = positional
+                .first()
+                .ok_or("usage: tuios wait-for <regex> [timeout_ms]")?
+                .clone();
+            let timeout_ms = positional
+                .get(1)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(5000);
+            client.send(&Message::WaitFor {
+                session: Some(session.clone()),
+                window,
+                pattern,
+                timeout_ms,
+            })?;
+            match recv_reply(&client)? {
+                Message::WaitResult { window, matched } => {
+                    println!("{session}:{window} {}", if matched { "matched" } else { "timeout" });
+                    Ok(())
+                }
+                _ => Err("unexpected reply".into()),
+            }
+        }
+    }
+}
+
+/// Read messages until a non-echo reply (or an error) arrives.
+fn recv_reply(client: &DaemonClient) -> Result<Message, Box<dyn std::error::Error>> {
+    client.set_read_timeout(Duration::from_secs(10))?;
+    loop {
+        match client.recv() {
+            Ok(Message::Error { message }) => return Err(message.into()),
+            Ok(other) => return Ok(other),
             Err(e) => return Err(format!("no reply from daemon: {e}").into()),
         }
     }
@@ -743,4 +927,22 @@ fn run_event_loop(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// The embedded skill must match the on-disk file, so the printed copy
+    /// always matches the build (mirrors Go's `skill_test.go`).
+    #[test]
+    fn embedded_skill_matches_disk() {
+        let on_disk = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/skills/tuios/SKILL.md"
+        ))
+        .expect("read skills/tuios/SKILL.md");
+        assert_eq!(
+            super::SKILL_DOC, on_disk,
+            "the embedded skill differs from skills/tuios/SKILL.md"
+        );
+    }
 }

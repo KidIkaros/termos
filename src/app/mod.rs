@@ -661,7 +661,9 @@ impl Os {
             cols: 80,
             rows: 24,
         };
-        let window = Window::spawn(id, "Terminal", size, shell, None, wake).map_err(|e| e.to_string())?;
+        let env = vec![("TUIOS_ENV".to_string(), "1".to_string())];
+        let window = Window::spawn(id, "Terminal", size, shell, None, wake, &env)
+            .map_err(|e| e.to_string())?;
         self.windows.push(window);
 
         // Insert into the current workspace's BSP tree.
@@ -987,7 +989,9 @@ impl Os {
         let index = self.windows.len();
         let id = format!("win-{index}");
         let size = WinSize { cols: 40, rows: 12 };
-        let window = Window::spawn(id, "Terminal", size, shell, None, wake).map_err(|e| e.to_string())?;
+        let env = vec![("TUIOS_ENV".to_string(), "1".to_string())];
+        let window = Window::spawn(id, "Terminal", size, shell, None, wake, &env)
+            .map_err(|e| e.to_string())?;
         self.windows.push(window);
 
         let ws = self.current_workspace;

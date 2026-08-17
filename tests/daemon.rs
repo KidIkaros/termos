@@ -340,3 +340,113 @@ fn daemon_set_agent_state_broadcasts_to_clients() {
     }
     assert!(rejected, "unknown window should error");
 }
+
+/// The agent verbs (write-input, capture-pane, wait-for, get-agent-state)
+/// work headlessly against the daemon's output rings.
+#[test]
+fn daemon_agent_verbs_work_headlessly() {
+    isolate_state_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("tuios.sock");
+
+    let daemon = Arc::new(Daemon::new());
+    let path = socket.clone();
+    std::thread::spawn(move || {
+        let _ = daemon.run(&path);
+    });
+
+    let client = loop {
+        match DaemonClient::connect_to(&socket) {
+            Ok(c) => break c,
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    client.new_session("verbs", "/bin/sh").unwrap();
+
+    // send-text writes bytes to the PTY (the shell echoes them back into the
+    // ring).
+    client
+        .send(&Message::WriteInput {
+            session: Some("verbs".to_string()),
+            window: None,
+            data: b"echo verb-stage1\r".to_vec(),
+        })
+        .unwrap();
+    // Wait for the echo to land in the ring.
+    client
+        .send(&Message::WaitFor {
+            session: Some("verbs".to_string()),
+            window: None,
+            pattern: "verb-stage1".to_string(),
+            timeout_ms: 5000,
+        })
+        .unwrap();
+    client.set_read_timeout(Duration::from_secs(3)).unwrap();
+    let mut matched = false;
+    for _ in 0..40 {
+        if let Ok(Message::WaitResult { matched: m, .. }) = client.recv() {
+            matched = m;
+            break;
+        }
+    }
+    assert!(matched, "wait-for did not observe the echoed output");
+
+    // capture-pane returns the ring content.
+    client
+        .send(&Message::CapturePane {
+            session: Some("verbs".to_string()),
+            window: None,
+        })
+        .unwrap();
+    let mut content = String::new();
+    for _ in 0..40 {
+        if let Ok(Message::PaneCapture { content: c, .. }) = client.recv() {
+            content = c;
+            break;
+        }
+    }
+    assert!(
+        content.contains("verb-stage1"),
+        "capture-pane missing the echo; got: {content:?}"
+    );
+
+    // get-agent-state starts at none and reflects set-agent-state.
+    client
+        .send(&Message::GetAgentState {
+            session: Some("verbs".to_string()),
+            window: None,
+        })
+        .unwrap();
+    let mut state = String::new();
+    for _ in 0..40 {
+        if let Ok(Message::AgentStateResult { state: s, .. }) = client.recv() {
+            state = s;
+            break;
+        }
+    }
+    assert_eq!(state, "", "fresh window should report no agent state");
+
+    client
+        .send(&Message::SetAgentState {
+            session: Some("verbs".to_string()),
+            window: None,
+            state: "working".to_string(),
+            message: String::new(),
+            harness: String::new(),
+        })
+        .unwrap();
+    client
+        .send(&Message::GetAgentState {
+            session: Some("verbs".to_string()),
+            window: None,
+        })
+        .unwrap();
+    let mut state = String::new();
+    for _ in 0..40 {
+        if let Ok(Message::AgentStateResult { state: s, .. }) = client.recv() {
+            state = s;
+            break;
+        }
+    }
+    assert_eq!(state, "working");
+}

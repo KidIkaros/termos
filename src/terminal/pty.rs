@@ -171,11 +171,14 @@ pub struct PtyReader {
 }
 
 /// Open a PTY, fork a shell, and return the writer/handle plus an output
-/// channel that a reader thread feeds. `argv[0]` is the program to exec.
+/// channel that a reader thread feeds. `argv[0]` is the program to exec;
+/// `extra_env` is set in the child's environment before exec (after TERM /
+/// COLORTERM, which always win).
 pub fn spawn_pty(
     size: WinSize,
     argv: &[String],
     wake: WakeCallback,
+    extra_env: &[(String, String)],
 ) -> Result<(PtyWriter, PtyHandle, PtyReader), PtyError> {
     // 1. Open master.
     let master: PtyMaster = posix_openpt(OFlag::O_RDWR | OFlag::O_NOCTTY)?;
@@ -234,6 +237,12 @@ pub fn spawn_pty(
                     value.as_ptr(),
                     1,
                 );
+                // Caller-supplied environment (e.g. TUIOS_ENV).
+                for (k, v) in extra_env {
+                    let Ok(kc) = CString::new(k.as_str()) else { continue };
+                    let Ok(vc) = CString::new(v.as_str()) else { continue };
+                    libc::setenv(kc.as_ptr(), vc.as_ptr(), 1);
+                }
             }
 
             // exec the program — never returns.
@@ -346,7 +355,7 @@ mod tests {
             "printf pty-stage1".to_string(),
         ];
         let (writer, handle, reader) =
-            spawn_pty(size, &argv, Box::new(|| {})).expect("spawn PTY");
+            spawn_pty(size, &argv, Box::new(|| {}), &[]).expect("spawn PTY");
 
         let mut output = Vec::new();
         for _ in 0..4 {

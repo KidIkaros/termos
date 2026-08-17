@@ -8,10 +8,12 @@
 //! - [`app`] — the window manager (workspaces, modes, input)
 //! - [`ui`] — shared rendering helpers
 //! - [`hooks`] — shell-command lifecycle hooks
+//! - [`keys`] — key-name encoding for verbs and tape scripting
 
 pub mod app;
 pub mod config;
 pub mod hooks;
+pub mod keys;
 pub mod layout;
 pub mod session;
 pub mod terminal;

@@ -44,5 +44,8 @@ base64 = "0.22"
 # UUIDs for window/session IDs
 uuid = { version = "1", features = ["v4"] }
 
+# Regex for the wait-for verb
+regex = "1"
+
 [dev-dependencies]
 tempfile = "3"

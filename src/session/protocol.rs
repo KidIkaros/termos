@@ -76,6 +76,42 @@ pub enum Message {
         message: String,
         harness: String,
     },
+    /// Client → daemon: read a window's agent state (`get-agent-state`).
+    GetAgentState {
+        session: Option<String>,
+        window: Option<String>,
+    },
+    /// Daemon → client: the window's agent state.
+    AgentStateResult {
+        window: String,
+        state: String,
+        message: String,
+        harness: String,
+    },
+    /// Client → daemon: write raw bytes to a window's PTY (`send-keys` /
+    /// `send-text`; the client does key encoding).
+    WriteInput {
+        session: Option<String>,
+        window: Option<String>,
+        data: Vec<u8>,
+    },
+    /// Client → daemon: capture a window's recent output (`capture-pane`).
+    CapturePane {
+        session: Option<String>,
+        window: Option<String>,
+    },
+    /// Daemon → client: the captured output (raw bytes as lossy UTF-8).
+    PaneCapture { window: String, content: String },
+    /// Client → daemon: wait until a window's output matches a regex
+    /// (`wait-for`). The daemon polls its output ring until the deadline.
+    WaitFor {
+        session: Option<String>,
+        window: Option<String>,
+        pattern: String,
+        timeout_ms: u64,
+    },
+    /// Daemon → client: the wait outcome.
+    WaitResult { window: String, matched: bool },
     /// Daemon → client: an error reply.
     Error { message: String },
 }

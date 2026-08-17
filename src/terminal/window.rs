@@ -37,13 +37,14 @@ impl Window {
         shell: &str,
         command: Option<&str>,
         wake: Box<dyn Fn() + Send + 'static>,
+        extra_env: &[(String, String)],
     ) -> Result<Self, crate::terminal::pty::PtyError> {
         let argv: Vec<String> = match command {
             Some(cmd) => vec!["sh".to_string(), "-c".to_string(), cmd.to_string()],
             None => vec![shell.to_string()],
         };
 
-        let (writer, handle, reader) = spawn_pty(size, &argv, wake)?;
+        let (writer, handle, reader) = spawn_pty(size, &argv, wake, extra_env)?;
         let emulator = Arc::new(Mutex::new(Emulator::new(size.cols as i32, size.rows as i32)));
 
         let emu_clone = Arc::clone(&emulator);
