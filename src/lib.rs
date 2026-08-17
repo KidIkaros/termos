@@ -12,6 +12,8 @@
 //! - [`tape`] — the `.tape` scripting language (lexer, parser, executor)
 //! - [`graphics`] — Kitty/Sixel graphics passthrough and placement tracking
 
+#![deny(clippy::all)]
+
 pub mod app;
 pub mod config;
 pub mod graphics;

@@ -1,0 +1,42 @@
+[package]
+name = "tuios-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.tuios-rs]
+path = ".."
+
+[[bin]]
+name = "emulator_write"
+path = "fuzz_targets/emulator_write.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "emulator_chunked"
+path = "fuzz_targets/emulator_chunked.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "emulator_resize"
+path = "fuzz_targets/emulator_resize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tape_parser"
+path = "fuzz_targets/tape_parser.rs"
+test = false
+doc = false
+bench = false

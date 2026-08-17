@@ -889,7 +889,7 @@ impl Os {
             .focused_window
             .and_then(|i| self.windows.get(i))
             .and_then(|w| w.emulator.lock().ok())
-            .map(|emu| re.is_match(&emu.to_string()))
+            .map(|emu| re.is_match(&emu.render_text()))
             .unwrap_or(false);
         if matched {
             self.script_wait_regex = None;

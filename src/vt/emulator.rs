@@ -347,8 +347,8 @@ impl Emulator {
     }
 
     /// Render the active screen as plain text (tests).
-    pub fn to_string(&self) -> String {
-        self.screen().to_string()
+    pub fn render_text(&self) -> String {
+        self.screen().render_text()
     }
 
     /// Render a full snapshot of the active screen as styled text lines,
@@ -567,6 +567,17 @@ impl Emulator {
             }
         }
         self.at_phantom = false;
+
+        // If a wide character doesn't fit in the remaining columns, wrap
+        // before printing it (matching xterm/ghostty behaviour).
+        if auto_wrap && width > 1 {
+            let screen = self.screen();
+            if screen.cursor.pos.x + width > screen.width() {
+                let screen = self.screen_mut();
+                screen.cursor.pos.x = 0;
+                screen.line_feed();
+            }
+        }
 
         let phantom;
         {

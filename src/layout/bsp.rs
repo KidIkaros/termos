@@ -290,11 +290,7 @@ impl BSPTree {
 
         // Replace target in tree.
         let target_parent = self.nodes[target].parent;
-        if target_parent.is_none() {
-            self.root = Some(internal);
-            self.nodes[internal].parent = None;
-        } else {
-            let parent = target_parent.unwrap();
+        if let Some(parent) = target_parent {
             self.nodes[internal].parent = Some(parent);
             let is_left = self.nodes[parent].left == Some(target);
             if is_left {
@@ -302,6 +298,9 @@ impl BSPTree {
             } else {
                 self.nodes[parent].right = Some(internal);
             }
+        } else {
+            self.root = Some(internal);
+            self.nodes[internal].parent = None;
         }
 
         // Update window-to-node mapping.
@@ -406,11 +405,7 @@ impl BSPTree {
         self.nodes[new_leaf].parent = Some(internal);
 
         let target_parent = self.nodes[target].parent;
-        if target_parent.is_none() {
-            self.root = Some(internal);
-            self.nodes[internal].parent = None;
-        } else {
-            let parent = target_parent.unwrap();
+        if let Some(parent) = target_parent {
             self.nodes[internal].parent = Some(parent);
             let is_left = self.nodes[parent].left == Some(target);
             if is_left {
@@ -418,6 +413,9 @@ impl BSPTree {
             } else {
                 self.nodes[parent].right = Some(internal);
             }
+        } else {
+            self.root = Some(internal);
+            self.nodes[internal].parent = None;
         }
 
         let old_window = self.nodes[target].window_id;
@@ -543,10 +541,7 @@ impl BSPTree {
         // window's subtree on the near side of the divider.
         let mut node: Option<usize> = None;
         let mut cur = leaf;
-        loop {
-            let Some(p) = self.nodes[cur].parent else {
-                break;
-            };
+        while let Some(p) = self.nodes[cur].parent {
             let p_split = self.nodes[p].split_type;
             if p_split == SplitType::Stacked {
                 cur = p;
@@ -603,9 +598,7 @@ impl BSPTree {
 
     /// The rectangle apply_layout would hand to `target`.
     fn node_bounds(&self, target: usize, bounds: Rect, gap: i32) -> Option<Rect> {
-        let Some(root) = self.root else {
-            return None;
-        };
+        let root = self.root?;
 
         // Path from the root down to target, collected by walking parent links up.
         let mut path = Vec::new();

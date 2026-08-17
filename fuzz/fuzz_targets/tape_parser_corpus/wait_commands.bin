@@ -1,0 +1,2 @@
+Wait 5s
+WaitUntilRegex /foo.*bar/

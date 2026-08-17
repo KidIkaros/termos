@@ -23,12 +23,16 @@ jobs:
         run: cargo build --verbose
       - name: Build with network features
         run: cargo build --features network --verbose
-      - name: Test
+      - name: Test (default)
         run: cargo test --verbose
-      - name: Clippy
+      - name: Test (with network)
+        run: cargo test --features network --verbose
+      - name: Clippy (default, deny warnings)
         run: cargo clippy --all-targets -- -D warnings
-      - name: Clippy with network
+      - name: Clippy (with network, deny warnings)
         run: cargo clippy --all-targets --features network -- -D warnings
+      - name: Bench compile-check
+        run: cargo bench --no-run
       - name: Release build
         run: cargo build --release --verbose
       - name: Release build with network

@@ -33,13 +33,7 @@ pub fn calculate_tiling_layout(
     let mut layouts = Vec::with_capacity(n as usize);
 
     // Clamp master ratio to reasonable bounds (30%-70%).
-    let master_ratio = if master_ratio < 0.3 {
-        0.3
-    } else if master_ratio > 0.7 {
-        0.7
-    } else {
-        master_ratio
-    };
+    let master_ratio = master_ratio.clamp(0.3, 0.7);
 
     match n {
         1 => {

@@ -172,6 +172,16 @@ impl ScreenBuffer {
         for line in self.lines.iter_mut() {
             line.resize(width as usize, Cell::default());
         }
+        // If narrowing cut a wide rune in half, blank the dangling lead at
+        // the last column so no reader sees a 2-cell rune in a 1-cell space.
+        if width > 0 {
+            let last = width - 1;
+            for line in self.lines.iter_mut() {
+                if line[last as usize].width > 1 {
+                    line[last as usize] = Cell::default();
+                }
+            }
+        }
         self.scroll = ScrollRegion::full(width, height);
         self.cursor.pos.x = self.cursor.pos.x.clamp(0, width - 1);
         self.cursor.pos.y = self.cursor.pos.y.clamp(0, height - 1);
@@ -320,8 +330,8 @@ impl ScreenBuffer {
         for i in (x as usize + n as usize)..right as usize {
             new_row[i] = row[i - n as usize].clone();
         }
-        for i in x as usize..(x + n) as usize {
-            new_row[i] = blank.clone();
+        for cell in new_row.iter_mut().take((x + n) as usize).skip(x as usize) {
+            *cell = blank.clone();
         }
         self.lines[y as usize] = new_row;
         self.touch_line(y);
@@ -344,8 +354,12 @@ impl ScreenBuffer {
         for i in x as usize..(right - n) as usize {
             new_row[i] = row[i + n as usize].clone();
         }
-        for i in (right - n) as usize..right as usize {
-            new_row[i] = blank.clone();
+        for cell in new_row
+            .iter_mut()
+            .take(right as usize)
+            .skip((right - n) as usize)
+        {
+            *cell = blank.clone();
         }
         self.lines[y as usize] = new_row;
         self.touch_line(y);
@@ -500,7 +514,7 @@ impl ScreenBuffer {
     }
 
     /// Render the screen as plain text (for tests and copy).
-    pub fn to_string(&self) -> String {
+    pub fn render_text(&self) -> String {
         let mut out = String::new();
         for y in 0..self.height {
             let mut line = String::new();

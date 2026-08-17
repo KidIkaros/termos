@@ -42,6 +42,9 @@ pub struct TuiosSshServer {
 
 /// A connected client's terminal and Os state.
 struct ClientSession {
+    /// The SSH channel write handle. Will be used by the render loop when
+    /// the full SSH rendering bridge is wired (skeleton).
+    #[allow(dead_code)]
     terminal: TerminalHandle,
     os: Os,
 }

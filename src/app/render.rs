@@ -293,9 +293,8 @@ fn paint_emulator(
     let lines = emu.render_view_lines();
     for (row_idx, row) in lines.iter().take(inner_h as usize).enumerate() {
         let y = inner_y + row_idx as u16;
-        let mut col = 0u16;
-        for (content, style) in row.iter().take(inner_w as usize) {
-            let x = inner_x + col;
+        for (col, (content, style)) in row.iter().take(inner_w as usize).enumerate() {
+            let x = inner_x + col as u16;
             if x >= inner_x + inner_w {
                 break;
             }
@@ -303,7 +302,6 @@ fn paint_emulator(
             let c = content.chars().next().unwrap_or(' ');
             cell.set_char(c);
             cell.set_style(to_tui_style(*style, theme));
-            col += 1;
         }
     }
 
