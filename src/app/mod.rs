@@ -439,8 +439,61 @@ impl Os {
     // -----------------------------------------------------------------------
 
     /// The index of the window with `window_id`, if any.
-    fn window_index_by_id(&self, window_id: &str) -> Option<usize> {
+    pub fn window_index_by_id(&self, window_id: &str) -> Option<usize> {
         self.windows.iter().position(|w| w.id == window_id)
+    }
+
+    /// Rename a window by index (used by tape's RenameWindow).
+    pub fn rename_window(&mut self, index: usize, name: &str) {
+        if let Some(w) = self.windows.get_mut(index) {
+            w.title = name.to_string();
+        }
+    }
+
+    /// Move a window by index to another workspace, following it there (used
+    /// by tape's MoveAndFollowWorkspace).
+    pub fn move_window_to_workspace(&mut self, index: usize, number: i32) {
+        if !(1..=9).contains(&number) {
+            return;
+        }
+        // Find the source workspace (the one whose tree owns the window).
+        let mut from = self.current_workspace;
+        for ws_num in 1..=9 {
+            if self.workspace(ws_num).tree.has_window(index as i32) {
+                from = ws_num;
+                break;
+            }
+        }
+        if number == from {
+            return;
+        }
+        self.workspace_mut(from).tree.remove_window(index as i32);
+
+        let bounds = self.workspace_bounds(number);
+        let target_focused = self.workspace(number).focused;
+        let gap = self.gap;
+        let tree = &mut self.workspace_mut(number).tree;
+        tree.insert_window(
+            index as i32,
+            target_focused.map(|f| f as i32).unwrap_or(-1),
+            SplitType::None,
+            0.5,
+            bounds,
+            gap,
+        );
+
+        // Refocus the source workspace.
+        let remaining = self.workspace(from).tree.get_all_window_ids();
+        self.workspace_mut(from).focused = remaining.first().map(|&i| i as usize);
+        if from == self.current_workspace {
+            self.focused_window = remaining.first().map(|&i| i as usize);
+        }
+
+        // Switch to the target.
+        self.current_workspace = number;
+        self.workspace_mut(number).focused = Some(index);
+        self.focused_window = Some(index);
+        self.prefix = Prefix::None;
     }
 
     /// Handle a daemon `AgentStateChanged` broadcast: update the window and
@@ -1596,6 +1649,304 @@ impl Os {
     }
 }
 
+/// Tape playback drives the app through this executor (ported from the Go
+/// `os_tape_executor.go` interface implementation). Operations the port's
+/// `Os` does not implement (snap, zoom, layout save/load, config paths)
+/// report a clear error rather than silently doing nothing.
+impl crate::tape::executor::TapeExecutor for Os {
+    fn focused_window_id(&self) -> Option<String> {
+        self.focused_window
+            .and_then(|i| self.windows.get(i))
+            .map(|w| w.id.clone())
+    }
+
+    fn send_to_window(&mut self, window_id: &str, data: &[u8]) -> Result<(), String> {
+        match self.window_index_by_id(window_id) {
+            Some(i) => {
+                if let Some(w) = self.windows.get(i) {
+                    w.write(data);
+                    Ok(())
+                } else {
+                    Err(format!("window not found: {window_id}"))
+                }
+            }
+            None => Err(format!("window not found: {window_id}")),
+        }
+    }
+
+    fn set_mode(&mut self, mode: &str) -> Result<(), String> {
+        match mode {
+            "terminal" => {
+                self.enter_terminal_mode();
+                Ok(())
+            }
+            "window" => {
+                self.leave_terminal_mode();
+                Ok(())
+            }
+            other => Err(format!("unknown mode {other:?} (use terminal or window)")),
+        }
+    }
+
+    fn create_new_window(&mut self) -> Result<(), String> {
+        let shell = self.default_shell();
+        self.spawn_window(&shell, Box::new(|| {})).map(|_| ())
+    }
+
+    fn create_new_window_with_name(&mut self, name: &str) -> Result<(), String> {
+        let shell = self.default_shell();
+        let idx = self
+            .spawn_window(&shell, Box::new(|| {}))
+            .map_err(|e| e.to_string())?;
+        self.rename_window(idx, name);
+        Ok(())
+    }
+
+    fn close_window(&mut self, window_id: &str) -> Result<(), String> {
+        let idx = self
+            .window_index_by_id(window_id)
+            .ok_or_else(|| format!("window not found: {window_id}"))?;
+        self.remove_window(idx);
+        Ok(())
+    }
+
+    fn close_window_by_name(&mut self, name: &str) -> Result<(), String> {
+        let idx = self
+            .windows
+            .iter()
+            .position(|w| w.title == name)
+            .ok_or_else(|| format!("no window named {name:?}"))?;
+        self.remove_window(idx);
+        Ok(())
+    }
+
+    fn next_window(&mut self) -> Result<(), String> {
+        self.focus_next();
+        Ok(())
+    }
+
+    fn prev_window(&mut self) -> Result<(), String> {
+        self.focus_prev();
+        Ok(())
+    }
+
+    fn focus_window_by_id(&mut self, window_id: &str) -> Result<(), String> {
+        let idx = self
+            .window_index_by_id(window_id)
+            .ok_or_else(|| format!("window not found: {window_id}"))?;
+        self.focus_window(idx);
+        Ok(())
+    }
+
+    fn focus_window_by_name(&mut self, name: &str) -> Result<(), String> {
+        let matches: Vec<usize> = self
+            .windows
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.title == name)
+            .map(|(i, _)| i)
+            .collect();
+        match matches.len() {
+            1 => {
+                self.focus_window(matches[0]);
+                Ok(())
+            }
+            0 => Err(format!("no window named {name:?}")),
+            _ => Err(format!("multiple windows named {name:?}")),
+        }
+    }
+
+    fn rename_window_by_id(&mut self, window_id: &str, name: &str) -> Result<(), String> {
+        let idx = self
+            .window_index_by_id(window_id)
+            .ok_or_else(|| format!("window not found: {window_id}"))?;
+        self.rename_window(idx, name);
+        Ok(())
+    }
+
+    fn rename_window_by_name(&mut self, old_name: &str, new_name: &str) -> Result<(), String> {
+        let idx = self
+            .windows
+            .iter()
+            .position(|w| w.title == old_name)
+            .ok_or_else(|| format!("no window named {old_name:?}"))?;
+        self.rename_window(idx, new_name);
+        Ok(())
+    }
+
+    fn minimize_window_by_id(&mut self, _window_id: &str) -> Result<(), String> {
+        Err("minimize is not implemented in this port".into())
+    }
+
+    fn minimize_window_by_name(&mut self, _name: &str) -> Result<(), String> {
+        Err("minimize is not implemented in this port".into())
+    }
+
+    fn restore_window_by_id(&mut self, _window_id: &str) -> Result<(), String> {
+        Err("restore-minimized is not implemented in this port".into())
+    }
+
+    fn restore_window_by_name(&mut self, _name: &str) -> Result<(), String> {
+        Err("restore-minimized is not implemented in this port".into())
+    }
+
+    // BSP tiling is always on in this port; the toggles are accepted no-ops.
+    fn toggle_tiling(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn enable_tiling(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn disable_tiling(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn snap_by_direction(&mut self, _direction: &str) -> Result<(), String> {
+        Err("snap is not implemented in this port".into())
+    }
+
+    fn split_horizontal(&mut self) -> Result<(), String> {
+        let shell = self.default_shell();
+        self.split(SplitType::Horizontal, &shell, Box::new(|| {})).map(|_| ())
+    }
+
+    fn split_vertical(&mut self) -> Result<(), String> {
+        let shell = self.default_shell();
+        self.split(SplitType::Vertical, &shell, Box::new(|| {})).map(|_| ())
+    }
+
+    fn rotate_split(&mut self) -> Result<(), String> {
+        if let Some(focused) = self.focused_window {
+            let ws = self.current_workspace;
+            self.workspace_mut(ws).tree.rotate_split(focused as i32);
+        }
+        Ok(())
+    }
+
+    fn equalize_splits(&mut self) -> Result<(), String> {
+        let ws = self.current_workspace;
+        self.workspace_mut(ws).tree.equalize_ratios();
+        Ok(())
+    }
+
+    fn preselect(&mut self, direction: &str) -> Result<(), String> {
+        use crate::layout::PreselectionDir;
+        self.preselection = match direction {
+            "left" => PreselectionDir::Left,
+            "right" => PreselectionDir::Right,
+            "up" => PreselectionDir::Up,
+            "down" => PreselectionDir::Down,
+            other => return Err(format!("unknown preselect direction {other:?}")),
+        };
+        Ok(())
+    }
+
+    fn switch_workspace(&mut self, workspace: i32) -> Result<(), String> {
+        self.switch_workspace(workspace);
+        Ok(())
+    }
+
+    fn move_window_to_workspace_by_id(
+        &mut self,
+        window_id: &str,
+        workspace: i32,
+    ) -> Result<(), String> {
+        let idx = self
+            .window_index_by_id(window_id)
+            .ok_or_else(|| format!("window not found: {window_id}"))?;
+        if workspace == self.current_workspace {
+            return Ok(()); // already there
+        }
+        // Move without following: save the workspace we were on.
+        let from = self.current_workspace;
+        self.move_window_to_workspace(idx, workspace);
+        // Return to the source workspace (move-without-follow).
+        self.current_workspace = from;
+        self.focused_window = self.workspace(from).focused;
+        Ok(())
+    }
+
+    fn move_and_follow_workspace_by_id(
+        &mut self,
+        window_id: &str,
+        workspace: i32,
+    ) -> Result<(), String> {
+        let idx = self
+            .window_index_by_id(window_id)
+            .ok_or_else(|| format!("window not found: {window_id}"))?;
+        self.move_window_to_workspace(idx, workspace);
+        Ok(())
+    }
+
+    fn enable_animations(&mut self) -> Result<(), String> {
+        self.config.appearance.animations_enabled = true;
+        Ok(())
+    }
+
+    fn disable_animations(&mut self) -> Result<(), String> {
+        self.config.appearance.animations_enabled = false;
+        Ok(())
+    }
+
+    fn toggle_animations(&mut self) -> Result<(), String> {
+        self.config.appearance.animations_enabled = !self.config.appearance.animations_enabled;
+        Ok(())
+    }
+
+    fn toggle_zoom(&mut self) -> Result<(), String> {
+        Err("zoom is not implemented in this port".into())
+    }
+
+    fn smart_split_focused(&mut self) -> Result<(), String> {
+        let shell = self.default_shell();
+        self.split(SplitType::None, &shell, Box::new(|| {})).map(|_| ())
+    }
+
+    fn show_command_palette(&mut self) -> Result<(), String> {
+        self.open_palette();
+        Ok(())
+    }
+
+    fn save_layout(&mut self, _name: &str) -> Result<(), String> {
+        Err("SaveLayout is not implemented in this port".into())
+    }
+
+    fn load_layout(&mut self, _name: &str) -> Result<(), String> {
+        Err("LoadLayout is not implemented in this port".into())
+    }
+
+    fn set_config(&mut self, _path: &str, _value: &str) -> Result<(), String> {
+        Err("Set is not implemented in this port".into())
+    }
+
+    fn set_theme(&mut self, theme_name: &str) -> Result<(), String> {
+        self.config.appearance.theme = theme_name.to_string();
+        self.theme = Theme::built_in(theme_name);
+        Ok(())
+    }
+
+    fn set_dockbar_position(&mut self, position: &str) -> Result<(), String> {
+        self.config.appearance.dockbar_position = position.to_string();
+        Ok(())
+    }
+
+    fn set_border_style(&mut self, style: &str) -> Result<(), String> {
+        self.config.appearance.border_style = style.to_string();
+        Ok(())
+    }
+
+    fn show_notification(&mut self, message: &str, notification_type: &str) -> Result<(), String> {
+        self.notify(message, notification_type);
+        Ok(())
+    }
+
+    fn focus_direction(&mut self, _direction: &str) -> Result<(), String> {
+        Err("directional focus is not implemented in this port".into())
+    }
+}
+
 /// The human word for a transition into `state`, for the alert text. Empty
 /// means the state is not one that gets announced.
 fn agent_transition_notice(state: &str) -> String {
@@ -1848,6 +2199,66 @@ mod tests {
     impl PtySink for NullSink {
         fn write(&self, _data: &[u8]) {}
         fn resize(&self, _size: WinSize) {}
+    }
+
+    #[test]
+    fn tape_executor_drives_the_app() {
+        use crate::tape::command::{Command, CommandType};
+        use crate::tape::executor::{CommandExecutor, TapeExecutor};
+
+        let mut os = os_with_window();
+        assert_eq!(os.windows.len(), 1);
+
+        {
+            let mut ce = CommandExecutor::new(&mut os);
+            // Type into the focused window (a PTY-less window: write is a no-op
+            // through the missing writer, but the executor path must succeed).
+            let type_cmd = Command {
+                type_: CommandType::Type,
+                args: vec!["echo hi".into()],
+                delay: std::time::Duration::ZERO,
+                line: 1,
+                column: 1,
+                raw: "Type".into(),
+            };
+            ce.execute(&type_cmd).unwrap();
+            // NewWindow spawns a second shell window.
+            let new_cmd = Command {
+                type_: CommandType::NewWindow,
+                args: vec!["editor".into()],
+                delay: std::time::Duration::ZERO,
+                line: 1,
+                column: 1,
+                raw: "NewWindow".into(),
+            };
+            ce.execute(&new_cmd).unwrap();
+            // Rename the focused window.
+            let rename_cmd = Command {
+                type_: CommandType::RenameWindow,
+                args: vec!["renamed".into()],
+                delay: std::time::Duration::ZERO,
+                line: 1,
+                column: 1,
+                raw: "RenameWindow".into(),
+            };
+            ce.execute(&rename_cmd).unwrap();
+            // Unsupported ops report why.
+            let zoom_cmd = Command {
+                type_: CommandType::ToggleZoom,
+                args: vec![],
+                delay: std::time::Duration::ZERO,
+                line: 1,
+                column: 1,
+                raw: "ToggleZoom".into(),
+            };
+            assert!(ce.execute(&zoom_cmd).is_err());
+        }
+
+        assert_eq!(os.windows.len(), 2);
+        assert_eq!(os.focused_window_id(), os.windows[1].id.clone().into());
+        // The focused (newest) window was renamed.
+        let focused = os.focused_window.unwrap();
+        assert_eq!(os.windows[focused].title, "renamed");
     }
 
     #[test]
