@@ -18,6 +18,8 @@ pub mod graphics;
 pub mod hooks;
 pub mod keys;
 pub mod layout;
+#[cfg(feature = "network")]
+pub mod network;
 pub mod session;
 pub mod tape;
 pub mod terminal;

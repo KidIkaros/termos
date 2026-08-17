@@ -50,5 +50,25 @@ regex = "1"
 # SHA-256 for the tape trust store
 sha2 = "0.10"
 
+# Async runtime for network modes (SSH server, web server). Optional so the
+# local TUI binary doesn't pull in tokio when network features are disabled.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time"], optional = true }
+# SSH server (russh is a pure-Rust SSH implementation).
+russh = { version = "0.45", optional = true }
+russh-keys = { version = "0.45", optional = true }
+async-trait = { version = "0.1", optional = true }
+rand = { version = "0.8", optional = true }
+# Web server: HTTP + WebSocket.
+axum = { version = "0.7", features = ["ws"], optional = true }
+tokio-tungstenite = { version = "0.24", optional = true }
+# TLS for SSH/web.
+rustls = { version = "0.23", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+
+[features]
+default = []
+network = ["dep:tokio", "dep:russh", "dep:russh-keys", "dep:async-trait", "dep:rand", "dep:axum", "dep:tokio-tungstenite"]
+tls = ["network", "dep:rustls", "dep:rustls-pemfile"]
+
 [dev-dependencies]
 tempfile = "3"
