@@ -1026,6 +1026,21 @@ impl Os {
         }
     }
 
+    /// Re-emit placement commands for all windows at their current pane
+    /// positions. Called after a layout change (resize, move, workspace
+    /// switch) so images follow their panes.
+    pub fn refresh_all_placements(&self) {
+        if self.kitty_passthrough.is_none() {
+            return;
+        }
+        let origins = self.compute_pane_origins();
+        for (i, (px, py)) in origins.iter().enumerate() {
+            if let Some(kp) = &self.kitty_passthrough {
+                let _ = kp.refresh_placements(i as u32, *px, *py);
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Tape recording
     // -----------------------------------------------------------------------
@@ -1581,6 +1596,8 @@ impl Os {
                 ..ctx
             },
         );
+        // Re-place images on the new workspace's panes.
+        self.refresh_all_placements();
     }
 
     /// Move the focused window to another workspace and follow it.

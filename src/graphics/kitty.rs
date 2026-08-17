@@ -189,6 +189,33 @@ impl KittyPassthrough {
         self.placements.lock().unwrap().has_placements(window_id)
     }
 
+    /// Re-emit placement commands (`a=p`) for all of a window's images at
+    /// their new absolute positions. Called after a pane move or resize.
+    pub fn refresh_placements(&self, window_id: u32, pane_x: u32, pane_y: u32) -> std::io::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let store = self.placements.lock().unwrap();
+        let placements = store.placements_for(window_id);
+        if placements.is_empty() {
+            return Ok(());
+        }
+        let mut out = self.host_out.lock().unwrap();
+        for p in placements {
+            // Delete the old placement, then re-place at the new position.
+            // d=p deletes only the placement, not the image data.
+            write!(out, "\x1b_Ga=d,d=p,i={}\x1b\\", p.host_image_id)?;
+            // a=p places an already-transmitted image at the cursor position.
+            // Move the cursor to the pane-relative position first.
+            let abs_x = pane_x + p.x;
+            let abs_y = pane_y + p.y;
+            write!(out, "\x1b[{};{}H", abs_y + 1, abs_x + 1)?;
+            write!(out, "\x1b_Ga=p,i={}\x1b\\", p.host_image_id)?;
+        }
+        out.flush()?;
+        Ok(())
+    }
+
     /// Clear everything (host reset).
     pub fn clear_all(&self) -> std::io::Result<()> {
         self.placements.lock().unwrap().clear_all();
@@ -278,6 +305,43 @@ mod tests {
         kp.forward(1, 0, 0, "a=T,i=1;AAAA").unwrap();
         assert!(kp.has_placements(1));
         kp.clear_window(1);
+        assert!(!kp.has_placements(1));
+    }
+
+    #[test]
+    fn refresh_placements_re_emits_at_new_position() {
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+        let buf: Arc<StdMutex<Vec<u8>>> = Arc::new(StdMutex::new(Vec::new()));
+        struct SharedWriter(Arc<StdMutex<Vec<u8>>>);
+        impl Write for SharedWriter {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let kp = KittyPassthrough::new(test_caps(true), Box::new(SharedWriter(buf.clone())));
+        // Place an image at (0,0).
+        kp.forward(1, 0, 0, "a=T,i=1;AAAA").unwrap();
+        // Refresh at (10, 5).
+        kp.refresh_placements(1, 10, 5).unwrap();
+        let buf_inner = buf.lock().unwrap();
+        let s = String::from_utf8_lossy(&buf_inner);
+        // Should contain a delete-placement and a re-place at the new position.
+        assert!(s.contains("a=d,d=p,i=1"), "got: {s:?}");
+        assert!(s.contains("a=p,i=1"), "got: {s:?}");
+        // The CUP should target the new position (row 6, col 11 = 1-based).
+        assert!(s.contains("\x1b[6;11H"), "got: {s:?}");
+    }
+
+    #[test]
+    fn refresh_placements_noop_when_empty() {
+        let kp = KittyPassthrough::new(test_caps(true), Box::new(std::io::sink()));
+        // No placements — should be a no-op.
+        kp.refresh_placements(1, 10, 5).unwrap();
         assert!(!kp.has_placements(1));
     }
 }
