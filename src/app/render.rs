@@ -3,6 +3,7 @@
 //! pipeline.
 
 use ratatui::buffer::Buffer;
+use ratatui::layout::Position as TuiPosition;
 use ratatui::layout::Rect as TuiRect;
 use ratatui::style::{Color as TuiColor, Modifier, Style as TuiStyle};
 use ratatui::text::Span;
@@ -112,6 +113,27 @@ pub fn render(os: &Os, buf: &mut Buffer) {
             &["Quit TermOS?  (y/n)".to_string()],
             "Quit",
         );
+    } else if os.theme_picker_open {
+        let lines: Vec<String> = os
+            .theme_list
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                if i == os.theme_picker_selected {
+                    format!("> {}", name)
+                } else {
+                    format!("  {}", name)
+                }
+            })
+            .collect();
+        render_overlay(
+            buf,
+            content_area,
+            &lines,
+            "Theme  (j/k: select, Enter: apply, Esc: cancel)",
+        );
+    } else if os.help_open {
+        render_help_modal(os, buf, content_area);
     } else if os.scrollback_mode {
         render_overlay(buf, content_area, &scrollback_help_lines(), "Scrollback");
     } else if os.palette_open {
@@ -122,18 +144,94 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         let lines = build_which_key_lines(os);
         render_overlay(buf, content_area, &lines, "which-key");
     }
+
+    // Showkeys: always show the last pressed chord at the bottom.
+    if !os.last_key_chord.is_empty()
+        && !os.help_open
+        && !os.palette_open
+        && !os.switcher_open
+        && !os.scrollback_mode
+        && !os.theme_picker_open
+    {
+        render_showkeys(buf, content_area, &os.last_key_chord);
+    }
 }
 
 fn scrollback_help_lines() -> Vec<String> {
     vec![
-        "h / l    move cursor".to_string(),
-        "j / k    move cursor".to_string(),
-        "v        visual select".to_string(),
-        "y        yank (copy)".to_string(),
-        "PgUp/Dn  page".to_string(),
-        "g / G    oldest / live".to_string(),
-        "q / Esc  leave".to_string(),
+        "h / l / j / k    move cursor".to_string(),
+        "w / b / e        word motions".to_string(),
+        "0 / ^ / $        line start / first-non-blank / end".to_string(),
+        "f / F / t / T    char search (then target char)".to_string(),
+        "; / ,            repeat char search".to_string(),
+        "/ / ?            regex search (then Enter)".to_string(),
+        "n / N            next / prev search match".to_string(),
+        "v / V            visual select (char / line)".to_string(),
+        "y                yank (copy)".to_string(),
+        "H / M / L        top / mid / bottom of viewport".to_string(),
+        "{ / }            prev / next blank line".to_string(),
+        "Ctrl+U / Ctrl+D  half-page up / down".to_string(),
+        "g / G            oldest / live".to_string(),
+        "q / Esc          leave".to_string(),
     ]
+}
+
+/// Render the help modal with keybindings for the current mode.
+fn render_help_modal(os: &Os, buf: &mut Buffer, area: TuiRect) {
+    let lines = if os.mode == Mode::Terminal {
+        vec![
+            "Terminal Mode".to_string(),
+            String::new(),
+            "Esc           window management mode".to_string(),
+            "Alt+N         next window".to_string(),
+            "Alt+P         prev window".to_string(),
+            "Alt+1-9       switch workspace".to_string(),
+            "Ctrl+B        leader (then window commands)".to_string(),
+            String::new(),
+            "?  or Esc     close this help".to_string(),
+        ]
+    } else {
+        vec![
+            "Window Management Mode".to_string(),
+            String::new(),
+            "i / Enter     terminal mode".to_string(),
+            "h / j / k / l focus window".to_string(),
+            "n             new window".to_string(),
+            "x             close window".to_string(),
+            "z             toggle zoom".to_string(),
+            "Space         next window".to_string(),
+            "[             scrollback / copy mode".to_string(),
+            "p             command palette".to_string(),
+            "w             workspace switcher".to_string(),
+            "t             toggle tiling".to_string(),
+            "- / |         split horizontal / vertical".to_string(),
+            "H / J / K / L swap window".to_string(),
+            "1-9           switch workspace".to_string(),
+            "q             quit".to_string(),
+            String::new(),
+            "?  or Esc     close this help".to_string(),
+        ]
+    };
+    render_overlay(buf, area, &lines, "Help  (? to close)");
+}
+
+/// Render the showkeys overlay (last pressed chord) at the bottom-right.
+fn render_showkeys(buf: &mut Buffer, area: TuiRect, chord: &str) {
+    let y = area.y + area.height.saturating_sub(2);
+    let x = area.x + area.width.saturating_sub(chord.len() as u16 + 2);
+    let cell = buf.cell_mut(TuiPosition { x, y });
+    if let Some(cell) = cell {
+        cell.set_char(' ');
+    }
+    for (i, c) in chord.chars().enumerate() {
+        let cell = buf.cell_mut(TuiPosition {
+            x: x + 1 + i as u16,
+            y,
+        });
+        if let Some(cell) = cell {
+            cell.set_char(c);
+        }
+    }
 }
 
 /// Render the command palette overlay with a query line and fuzzy-filtered

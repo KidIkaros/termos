@@ -25,6 +25,41 @@ pub enum KeyResult {
     Quit,
 }
 
+/// Format a key event as a human-readable chord string for the showkeys overlay.
+fn format_key_chord(key: &KeyEvent) -> String {
+    let mut parts = Vec::new();
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        parts.push("Ctrl".to_string());
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        parts.push("Alt".to_string());
+    }
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        parts.push("Shift".to_string());
+    }
+    let key_str = match key.code {
+        KeyCode::Char(c) => c.to_string(),
+        KeyCode::Enter => "Enter".to_string(),
+        KeyCode::Esc => "Esc".to_string(),
+        KeyCode::Backspace => "Bksp".to_string(),
+        KeyCode::Tab => "Tab".to_string(),
+        KeyCode::Up => "Up".to_string(),
+        KeyCode::Down => "Down".to_string(),
+        KeyCode::Left => "Left".to_string(),
+        KeyCode::Right => "Right".to_string(),
+        KeyCode::PageUp => "PgUp".to_string(),
+        KeyCode::PageDown => "PgDn".to_string(),
+        KeyCode::Home => "Home".to_string(),
+        KeyCode::End => "End".to_string(),
+        KeyCode::F(n) => format!("F{}", n),
+        _ => String::new(),
+    };
+    if !key_str.is_empty() {
+        parts.push(key_str);
+    }
+    parts.join("+")
+}
+
 /// Encode a key event into the byte sequence a terminal would send, for
 /// passthrough to the PTY in terminal mode.
 pub fn encode_key(key: &KeyEvent) -> Vec<u8> {
@@ -118,6 +153,9 @@ fn is_leader_key(key: &KeyEvent, leader: &str) -> bool {
 
 /// Handle a key event, mutating the OS state and returning the result.
 pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    // Record the last key chord for the showkeys overlay.
+    os.last_key_chord = format_key_chord(key);
+
     // A quit confirmation dialog has its own keys.
     if os.show_quit_confirmation {
         return handle_quit_confirmation(os, key);
@@ -141,6 +179,12 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
     }
 
     // Modal overlays capture keys before the prefix and mode layers.
+    if os.theme_picker_open {
+        return handle_theme_picker(os, key);
+    }
+    if os.help_open {
+        return handle_help_modal(os, key);
+    }
     if os.scrollback_mode {
         return handle_scrollback_mode(os, key);
     }
@@ -436,6 +480,12 @@ fn handle_leader_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
             os.prefix = Prefix::None;
             KeyResult::Consumed
         }
+        // Help modal.
+        KeyCode::Char('?') => {
+            os.toggle_help();
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
         // Detach / exit mode.
         KeyCode::Char('d') => {
             os.prefix = Prefix::None;
@@ -632,6 +682,22 @@ fn handle_tape_manager(os: &mut Os, key: &KeyEvent) -> KeyResult {
 // ---------------------------------------------------------------------------
 
 fn handle_scrollback_mode(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    // If we're typing a search query, handle differently.
+    if os.copy_search_typing {
+        return handle_search_typing(os, key);
+    }
+
+    // If a char search is pending (f/F/t/T was pressed), the next key is the target.
+    if let Some((_, forward, till)) = os.copy_char_search {
+        os.copy_char_search = None;
+        if let KeyCode::Char(c) = key.code {
+            os.copy_char_search(c, forward, till);
+        }
+        return KeyResult::Consumed;
+    }
+
     match key.code {
         // q always leaves scrollback mode.
         KeyCode::Char('q') => {
@@ -641,22 +707,27 @@ fn handle_scrollback_mode(os: &mut Os, key: &KeyEvent) -> KeyResult {
         // Esc clears visual selection first, then leaves scrollback mode.
         KeyCode::Esc => {
             if os.copy_visual {
-                os.toggle_visual();
+                os.toggle_visual(false);
             } else {
                 os.exit_scrollback_mode();
             }
             KeyResult::Consumed
         }
-        // v toggles visual selection; y yanks the selection.
+        // Visual modes: v = char-wise, V = line-wise.
         KeyCode::Char('v') => {
-            os.toggle_visual();
+            os.toggle_visual(false);
             KeyResult::Consumed
         }
-        KeyCode::Char('y') => {
+        KeyCode::Char('V') => {
+            os.toggle_visual(true);
+            KeyResult::Consumed
+        }
+        // Yank selection.
+        KeyCode::Char('y') | KeyCode::Char('c') => {
             os.yank_selection();
             KeyResult::Consumed
         }
-        // Cursor movement (h/j/k/l, arrows).
+        // Basic cursor movement (h/j/k/l, arrows).
         KeyCode::Up | KeyCode::Char('k') => {
             os.copy_move_line(-1);
             KeyResult::Consumed
@@ -673,21 +744,203 @@ fn handle_scrollback_mode(os: &mut Os, key: &KeyEvent) -> KeyResult {
             os.copy_move_col(1);
             KeyResult::Consumed
         }
-        // Paging and jumps.
-        KeyCode::PageUp | KeyCode::Char('b') => {
+        // Word motions.
+        KeyCode::Char('w') => {
+            os.copy_word_forward(false);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('W') => {
+            os.copy_word_forward(true);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('b') if !ctrl => {
+            os.copy_word_backward(false);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('B') => {
+            os.copy_word_backward(true);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('e') => {
+            os.copy_word_end(false);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('E') => {
+            os.copy_word_end(true);
+            KeyResult::Consumed
+        }
+        // Line motions.
+        KeyCode::Char('0') => {
+            os.copy_col_zero();
+            KeyResult::Consumed
+        }
+        KeyCode::Char('^') => {
+            os.copy_first_non_blank();
+            KeyResult::Consumed
+        }
+        KeyCode::Char('$') => {
+            os.copy_last_non_blank();
+            KeyResult::Consumed
+        }
+        // Paging.
+        KeyCode::Char('u') if ctrl => {
             os.copy_move_line(-10);
             KeyResult::Consumed
         }
-        KeyCode::PageDown | KeyCode::Char('f') => {
+        KeyCode::Char('d') if ctrl => {
             os.copy_move_line(10);
             KeyResult::Consumed
         }
+        KeyCode::Char('b') if ctrl => {
+            os.copy_move_line(-20);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('f') if ctrl => {
+            os.copy_move_line(20);
+            KeyResult::Consumed
+        }
+        KeyCode::PageUp => {
+            os.copy_move_line(-10);
+            KeyResult::Consumed
+        }
+        KeyCode::PageDown => {
+            os.copy_move_line(10);
+            KeyResult::Consumed
+        }
+        // Jumps.
         KeyCode::Home | KeyCode::Char('g') => {
             os.copy_top();
             KeyResult::Consumed
         }
         KeyCode::End | KeyCode::Char('G') => {
             os.copy_bottom();
+            KeyResult::Consumed
+        }
+        // Viewport positioning.
+        KeyCode::Char('H') => {
+            os.copy_viewport_top();
+            KeyResult::Consumed
+        }
+        KeyCode::Char('M') => {
+            os.copy_viewport_middle();
+            KeyResult::Consumed
+        }
+        KeyCode::Char('L') => {
+            os.copy_viewport_bottom();
+            KeyResult::Consumed
+        }
+        // Blank line navigation.
+        KeyCode::Char('{') => {
+            os.copy_blank_line(false);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('}') => {
+            os.copy_blank_line(true);
+            KeyResult::Consumed
+        }
+        // Char search: f/F/t/T + target char.
+        KeyCode::Char('f') => {
+            os.copy_char_search = Some(('\0', true, false));
+            KeyResult::Consumed
+        }
+        KeyCode::Char('F') => {
+            os.copy_char_search = Some(('\0', false, false));
+            KeyResult::Consumed
+        }
+        KeyCode::Char('t') => {
+            os.copy_char_search = Some(('\0', true, true));
+            KeyResult::Consumed
+        }
+        KeyCode::Char('T') => {
+            os.copy_char_search = Some(('\0', false, true));
+            KeyResult::Consumed
+        }
+        // Repeat char search.
+        KeyCode::Char(';') => {
+            os.copy_char_search_repeat(false);
+            KeyResult::Consumed
+        }
+        KeyCode::Char(',') => {
+            os.copy_char_search_repeat(true);
+            KeyResult::Consumed
+        }
+        // Regex search.
+        KeyCode::Char('/') => {
+            os.copy_search_typing = true;
+            os.copy_search_forward = true;
+            os.copy_search_query.clear();
+            KeyResult::Consumed
+        }
+        KeyCode::Char('?') => {
+            os.copy_search_typing = true;
+            os.copy_search_forward = false;
+            os.copy_search_query.clear();
+            KeyResult::Consumed
+        }
+        KeyCode::Char('n') => {
+            os.copy_search_next_match(&os.copy_search_query.clone(), os.copy_search_forward, false);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('N') => {
+            os.copy_search_next_match(&os.copy_search_query.clone(), os.copy_search_forward, true);
+            KeyResult::Consumed
+        }
+        _ => KeyResult::Consumed,
+    }
+}
+
+/// Handle key input while typing a search query (`/` or `?` was pressed).
+fn handle_search_typing(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Enter => {
+            os.copy_execute_search();
+            KeyResult::Consumed
+        }
+        KeyCode::Esc => {
+            os.copy_search_typing = false;
+            os.copy_search_query.clear();
+            KeyResult::Consumed
+        }
+        KeyCode::Backspace => {
+            os.copy_search_query.pop();
+            KeyResult::Consumed
+        }
+        KeyCode::Char(c) => {
+            os.copy_search_query.push(c);
+            KeyResult::Consumed
+        }
+        _ => KeyResult::Consumed,
+    }
+}
+
+/// Handle key input while the theme picker is open.
+fn handle_theme_picker(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            os.close_theme_picker();
+            KeyResult::Consumed
+        }
+        KeyCode::Enter => {
+            os.apply_selected_theme();
+            KeyResult::Consumed
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            os.theme_picker_move(-1);
+            KeyResult::Consumed
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            os.theme_picker_move(1);
+            KeyResult::Consumed
+        }
+        _ => KeyResult::Consumed,
+    }
+}
+
+/// Handle key input while the help modal is open.
+fn handle_help_modal(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
+            os.toggle_help();
             KeyResult::Consumed
         }
         _ => KeyResult::Consumed,
@@ -841,21 +1094,73 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             true
         }
         MouseEventKind::Down(MouseButton::Left) => {
+            // Check for border-drag resize first.
+            if let Some((wid, edge)) = os.border_at(column, row) {
+                let pos = if edge.vertical() { column } else { row };
+                os.begin_border_drag(wid, edge, pos);
+                return true;
+            }
             if let Some(idx) = os.window_at(column, row) {
                 os.focus_window(idx);
                 os.prefix = Prefix::None;
-                os.begin_mouse_selection(idx, column, row);
+                // Multi-click detection.
+                let now = std::time::Instant::now();
+                let pos = (mouse.column, mouse.row);
+                let count = if let Some((last_time, last_pos, n)) = os.last_click {
+                    if last_pos == pos && now.duration_since(last_time).as_millis() < 500 {
+                        n + 1
+                    } else {
+                        1
+                    }
+                } else {
+                    1
+                };
+                os.last_click = Some((now, pos, count));
+                match count {
+                    2 => {
+                        os.select_word_at(idx, column, row);
+                    }
+                    3 => {
+                        os.select_line_at(idx, column, row);
+                    }
+                    _ => {
+                        os.begin_mouse_selection(idx, column, row);
+                    }
+                }
             }
             true
         }
         MouseEventKind::Drag(MouseButton::Left) => {
+            // Handle border-drag resize.
+            if os.drag_resize.is_some() {
+                let pos = if matches!(
+                    os.drag_resize.map(|(_, e, _)| e),
+                    Some(crate::layout::ResizeEdge::Right | crate::layout::ResizeEdge::Left)
+                ) {
+                    column
+                } else {
+                    row
+                };
+                os.apply_border_drag(pos);
+                return true;
+            }
             if let Some(idx) = os.window_at(column, row) {
                 os.extend_mouse_selection(idx, column, row);
             }
             true
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            // End border-drag resize.
+            if os.drag_resize.is_some() {
+                os.end_border_drag();
+                return true;
+            }
+            // Auto-copy on mouse release if there's a selection.
+            let has_selection = os.selection.is_some();
             os.end_mouse_selection();
+            if has_selection {
+                os.yank_selection();
+            }
             true
         }
         _ => false,

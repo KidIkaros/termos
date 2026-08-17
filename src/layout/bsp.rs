@@ -1128,7 +1128,7 @@ pub enum ResizeEdge {
 }
 
 impl ResizeEdge {
-    fn vertical(self) -> bool {
+    pub fn vertical(self) -> bool {
         matches!(self, ResizeEdge::Right | ResizeEdge::Left)
     }
 

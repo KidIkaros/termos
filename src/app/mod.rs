@@ -64,6 +64,7 @@ pub enum Command {
     Scrollback,
     SwitchWorkspace(i32),
     Quit,
+    Theme,
 }
 
 impl Command {
@@ -84,6 +85,7 @@ impl Command {
             cmds.push(Command::SwitchWorkspace(i));
         }
         cmds.push(Command::Quit);
+        cmds.push(Command::Theme);
         cmds
     }
 
@@ -101,6 +103,7 @@ impl Command {
             Command::Scrollback => "Scrollback mode".into(),
             Command::SwitchWorkspace(i) => format!("Switch to workspace {i}"),
             Command::Quit => "Quit".into(),
+            Command::Theme => "Theme picker".into(),
         }
     }
 }
@@ -279,12 +282,43 @@ pub struct Os {
     pub copy_cursor_col: i32,
     /// Whether vim visual selection is active in copy mode.
     pub copy_visual: bool,
+    /// Whether visual selection is line-wise (`V`) vs char-wise (`v`).
+    pub copy_visual_line: bool,
+    /// Pending char-search state: (char, forward, till, pending).
+    /// When `pending` is true, the next key is the target char.
+    pub copy_char_search: Option<(char, bool, bool)>,
+    /// The last completed char search for `;`/`,` repeat.
+    pub copy_last_char_search: Option<(char, bool, bool)>,
+    /// The current regex search query (empty = no search).
+    pub copy_search_query: String,
+    /// Whether the search is forward (`true`) or backward (`false`).
+    pub copy_search_forward: bool,
+    /// Whether we're typing a search query (`/` or `?` was pressed).
+    pub copy_search_typing: bool,
     /// The active selection (keyboard visual or mouse drag), if any.
     pub selection: Option<Selection>,
     /// Whether a mouse drag selection is in progress.
     pub mouse_selecting: bool,
     /// The last yanked text (internal clipboard).
     pub clipboard: String,
+    /// Mouse border-drag resize state: (window_id, edge, start_pos).
+    pub drag_resize: Option<(i32, crate::layout::ResizeEdge, i32)>,
+    /// Multi-click tracking: (last click time, last position, click count).
+    pub last_click: Option<(std::time::Instant, (u16, u16), u8)>,
+    /// Whether the help modal overlay is open.
+    pub help_open: bool,
+    /// The last key chord pressed, for the showkeys overlay.
+    pub last_key_chord: String,
+    /// Whether the theme picker overlay is open.
+    pub theme_picker_open: bool,
+    /// The selected index in the theme picker.
+    pub theme_picker_selected: usize,
+    /// Cached list of available theme names.
+    pub theme_list: Vec<String>,
+    /// Mouse border-drag resize state: (window_id being resized, edge, start_pos).
+    /// Multi-click tracking: (last click time, last position, click count).
+    /// Whether the help modal overlay is open.
+    /// The last key chord pressed, for the showkeys overlay.
     /// The current daemon session name (Some = daemon/attach mode).
     pub remote_session: Option<String>,
     /// Cached session list for the session switcher.
@@ -339,6 +373,10 @@ pub struct Os {
     pub sixel_passthrough: Option<crate::graphics::sixel::SixelPassthrough>,
     /// Host terminal capabilities (probed at startup).
     pub graphics_caps: crate::graphics::capability::Capabilities,
+    /// The last time an alert sound was played (for cooldown).
+    pub last_sound_played: Option<std::time::Instant>,
+    /// Cached audio player command (None = not probed yet, Some(None) = none found).
+    pub sound_player: Option<Option<&'static str>>,
 }
 
 /// A discovered `.tuios.tape` waiting on the trust review.
@@ -405,9 +443,24 @@ impl Os {
             copy_cursor_line: 0,
             copy_cursor_col: 0,
             copy_visual: false,
+            copy_visual_line: false,
+            copy_char_search: None,
+            copy_last_char_search: None,
+            copy_search_query: String::new(),
+            copy_search_forward: true,
+            copy_search_typing: false,
             selection: None,
             mouse_selecting: false,
             clipboard: String::new(),
+            drag_resize: None,
+            last_click: None,
+            help_open: false,
+            last_key_chord: String::new(),
+            theme_picker_open: false,
+            theme_picker_selected: 0,
+            theme_list: Vec::new(),
+            last_sound_played: None,
+            sound_player: None,
             remote_session: None,
             remote_sessions: Vec::new(),
             pending_switch: None,
@@ -697,6 +750,16 @@ impl Os {
             self.sound_cue.play(file, policy.sound_cooldown);
         }
 
+        // Built-in alert sound cue (independent of user-supplied cue files).
+        if policy.sound {
+            let cue = if policy.attention_cue(to) {
+                "needs-input"
+            } else {
+                "done"
+            };
+            self.play_alert_sound(cue);
+        }
+
         self.fire_hook(
             hooks::Event::AfterAgentState,
             hooks::Context {
@@ -956,6 +1019,14 @@ impl Os {
     pub fn init_graphics(&mut self) {
         let caps = crate::graphics::capability::Capabilities::probe();
         self.graphics_caps = caps;
+        // Export TERM_PROGRAM for guest processes based on graphics capabilities.
+        let term_program = match caps.host {
+            crate::graphics::capability::HostTerminal::Kitty
+            | crate::graphics::capability::HostTerminal::Ghostty => "ghostty",
+            crate::graphics::capability::HostTerminal::WezTerm => "WezTerm",
+            _ => "TermOS",
+        };
+        std::env::set_var("TERMOS_TERM_PROGRAM", term_program);
         if caps.kitty {
             self.kitty_passthrough = Some(crate::graphics::kitty::KittyPassthrough::new(
                 caps,
@@ -1773,6 +1844,72 @@ impl Os {
         }
     }
 
+    /// Play an agent alert sound cue if enabled and not on cooldown.
+    fn play_alert_sound(&mut self, cue: &str) {
+        if !self.config.notifications.agent.sound.unwrap_or(false) {
+            return;
+        }
+        // Cooldown check.
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_sound_played {
+            let cooldown = std::time::Duration::from_secs(
+                self.config
+                    .notifications
+                    .agent
+                    .sound_cooldown_seconds
+                    .unwrap_or(5) as u64,
+            );
+            if now.duration_since(last) < cooldown {
+                return;
+            }
+        }
+        self.last_sound_played = Some(now);
+
+        // Detect available player (cached after first probe).
+        let player = self.sound_player.unwrap_or_else(|| {
+            let p = ["paplay", "pw-play", "aplay", "afplay"]
+                .iter()
+                .find(|cmd| {
+                    std::process::Command::new(cmd)
+                        .arg("--help")
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .is_ok()
+                })
+                .copied();
+            self.sound_player = Some(p);
+            p
+        });
+
+        let Some(player) = player else {
+            return;
+        };
+
+        // Build the WAV data for the cue.
+        let wav: &[u8] = match cue {
+            "done" => include_bytes!("../../assets/done.wav"),
+            "needs-input" => include_bytes!("../../assets/needs-input.wav"),
+            _ => return,
+        };
+
+        // Write WAV to a temp file and spawn the player.
+        let Ok(temp_dir) = std::env::temp_dir().canonicalize() else {
+            return;
+        };
+        let wav_path = temp_dir.join(format!("termos-alert-{cue}.wav"));
+        if std::fs::write(&wav_path, wav).is_err() {
+            return;
+        }
+
+        std::process::Command::new(player)
+            .arg(&wav_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok();
+    }
+
     /// The leader key from config.
     pub fn leader_key(&self) -> &str {
         &self.config.keybindings.leader_key
@@ -1858,6 +1995,7 @@ impl Os {
             Command::Quit => {
                 self.show_quit_confirmation = true;
             }
+            Command::Theme => self.open_theme_picker(),
         }
     }
 
@@ -2018,6 +2156,10 @@ impl Os {
     pub fn exit_scrollback_mode(&mut self) {
         self.scrollback_mode = false;
         self.copy_visual = false;
+        self.copy_visual_line = false;
+        self.copy_char_search = None;
+        self.copy_search_typing = false;
+        self.copy_search_query.clear();
         self.selection = None;
         self.mouse_selecting = false;
         if let Some(i) = self.focused_window {
@@ -2152,15 +2294,18 @@ impl Os {
     }
 
     /// Toggle vim visual selection anchored at the copy-mode cursor.
-    pub fn toggle_visual(&mut self) {
+    /// `line_wise` true for `V` (line-wise), false for `v` (char-wise).
+    pub fn toggle_visual(&mut self, line_wise: bool) {
         let Some(i) = self.focused_window else {
             return;
         };
         if self.copy_visual {
             self.copy_visual = false;
+            self.copy_visual_line = false;
             self.selection = None;
         } else {
             self.copy_visual = true;
+            self.copy_visual_line = line_wise;
             self.selection = Some(Selection {
                 window: i,
                 anchor_line: self.copy_cursor_line,
@@ -2210,6 +2355,340 @@ impl Os {
         let mut out = std::io::stdout();
         let _ = out.write_all(seq.as_bytes());
         let _ = out.flush();
+    }
+
+    // -- Copy-mode word/char/line motions -----------------------------------
+
+    /// Get the text of the content line at `line` (or empty if out of range).
+    fn copy_line_text(&self, line: usize) -> String {
+        let Some(i) = self.focused_window else {
+            return String::new();
+        };
+        let Some(w) = self.windows.get(i) else {
+            return String::new();
+        };
+        let Ok(emu) = w.emulator.lock() else {
+            return String::new();
+        };
+        emu.content_line_text(line)
+    }
+
+    /// Move cursor to the first non-blank column of the current line.
+    pub fn copy_first_non_blank(&mut self) {
+        let text = self.copy_line_text(self.copy_cursor_line);
+        let col = text
+            .char_indices()
+            .skip_while(|(_, c)| c.is_whitespace())
+            .map(|(i, _)| i as i32)
+            .next()
+            .unwrap_or(0);
+        self.copy_cursor_col = col;
+        self.sync_selection_cursor();
+    }
+
+    /// Move cursor to the last non-blank column of the current line.
+    pub fn copy_last_non_blank(&mut self) {
+        let text = self.copy_line_text(self.copy_cursor_line);
+        let trimmed = text.trim_end();
+        let col = trimmed.chars().count() as i32;
+        self.copy_cursor_col = col;
+        self.sync_selection_cursor();
+    }
+
+    /// Move cursor to column 0.
+    pub fn copy_col_zero(&mut self) {
+        self.copy_cursor_col = 0;
+        self.sync_selection_cursor();
+    }
+
+    /// Move to the next word start (`w` motion).
+    /// `big` true uses whitespace-only word boundaries (`W`).
+    pub fn copy_word_forward(&mut self, big: bool) {
+        let line = self.copy_cursor_line;
+        let text = self.copy_line_text(line);
+        let chars: Vec<char> = text.chars().collect();
+        let mut pos = self.copy_cursor_col as usize;
+        if pos >= chars.len() {
+            // At end of line — move to next line.
+            self.copy_move_line(1);
+            self.copy_cursor_col = 0;
+            self.sync_selection_cursor();
+            return;
+        }
+        // Skip current word.
+        let is_word = |c: char| {
+            if big {
+                !c.is_whitespace()
+            } else {
+                c.is_alphanumeric() || c == '_'
+            }
+        };
+        if pos < chars.len() && is_word(chars[pos]) {
+            while pos < chars.len() && is_word(chars[pos]) {
+                pos += 1;
+            }
+        } else if pos < chars.len() && !chars[pos].is_whitespace() {
+            // Skip punctuation.
+            while pos < chars.len() && !is_word(chars[pos]) && !chars[pos].is_whitespace() {
+                pos += 1;
+            }
+        }
+        // Skip whitespace.
+        while pos < chars.len() && chars[pos].is_whitespace() {
+            pos += 1;
+        }
+        self.copy_cursor_col = pos as i32;
+        self.sync_selection_cursor();
+    }
+
+    /// Move to the previous word start (`b` motion).
+    pub fn copy_word_backward(&mut self, big: bool) {
+        let line = self.copy_cursor_line;
+        let text = self.copy_line_text(line);
+        let chars: Vec<char> = text.chars().collect();
+        if chars.is_empty() {
+            self.copy_move_line(-1);
+            self.copy_last_non_blank();
+            return;
+        }
+        let mut pos = (self.copy_cursor_col as usize).saturating_sub(1);
+        let is_word = |c: char| {
+            if big {
+                !c.is_whitespace()
+            } else {
+                c.is_alphanumeric() || c == '_'
+            }
+        };
+        // Skip whitespace backward.
+        while pos > 0 && chars[pos].is_whitespace() {
+            pos -= 1;
+        }
+        // Skip word backward.
+        if pos < chars.len() && is_word(chars[pos]) {
+            while pos > 0 && is_word(chars[pos - 1]) {
+                pos -= 1;
+            }
+        } else if pos < chars.len() && !chars[pos].is_whitespace() {
+            while pos > 0 && !is_word(chars[pos - 1]) && !chars[pos - 1].is_whitespace() {
+                pos -= 1;
+            }
+        }
+        self.copy_cursor_col = pos as i32;
+        self.sync_selection_cursor();
+    }
+
+    /// Move to the next word end (`e` motion).
+    pub fn copy_word_end(&mut self, big: bool) {
+        let line = self.copy_cursor_line;
+        let text = self.copy_line_text(line);
+        let chars: Vec<char> = text.chars().collect();
+        let mut pos = (self.copy_cursor_col as usize + 1).min(chars.len().saturating_sub(1));
+        let is_word = |c: char| {
+            if big {
+                !c.is_whitespace()
+            } else {
+                c.is_alphanumeric() || c == '_'
+            }
+        };
+        // Skip whitespace forward.
+        while pos < chars.len() && chars[pos].is_whitespace() {
+            pos += 1;
+        }
+        if pos >= chars.len() {
+            return;
+        }
+        // Skip word forward.
+        if is_word(chars[pos]) {
+            while pos + 1 < chars.len() && is_word(chars[pos + 1]) {
+                pos += 1;
+            }
+        } else {
+            while pos + 1 < chars.len()
+                && !is_word(chars[pos + 1])
+                && !chars[pos + 1].is_whitespace()
+            {
+                pos += 1;
+            }
+        }
+        self.copy_cursor_col = pos as i32;
+        self.sync_selection_cursor();
+    }
+
+    /// Move to the next/previous occurrence of `target` on the current line.
+    /// `forward` true = `f`/`t`, false = `F`/`T`.
+    /// `till` true = `t`/`T` (stop before), false = `f`/`F` (land on).
+    pub fn copy_char_search(&mut self, target: char, forward: bool, till: bool) {
+        let text = self.copy_line_text(self.copy_cursor_line);
+        let chars: Vec<char> = text.chars().collect();
+        let start = self.copy_cursor_col as usize;
+        if forward {
+            for (i, &c) in chars.iter().enumerate().skip(start + 1) {
+                if c == target {
+                    self.copy_cursor_col = if till { i as i32 - 1 } else { i as i32 };
+                    self.sync_selection_cursor();
+                    self.copy_last_char_search = Some((target, forward, till));
+                    return;
+                }
+            }
+        } else if start > 0 {
+            for (i, &c) in chars.iter().enumerate().take(start).rev() {
+                if c == target {
+                    self.copy_cursor_col = if till { i as i32 + 1 } else { i as i32 };
+                    self.sync_selection_cursor();
+                    self.copy_last_char_search = Some((target, forward, till));
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Repeat the last char search (`;`), optionally reversed (`,`).
+    pub fn copy_char_search_repeat(&mut self, reverse: bool) {
+        if let Some((target, forward, till)) = self.copy_last_char_search {
+            let fwd = if reverse { !forward } else { forward };
+            self.copy_char_search(target, fwd, till);
+        }
+    }
+
+    /// Execute the pending regex search.
+    pub fn copy_execute_search(&mut self) {
+        if self.copy_search_query.is_empty() {
+            self.copy_search_typing = false;
+            return;
+        }
+        let query = self.copy_search_query.clone();
+        let forward = self.copy_search_forward;
+        self.copy_search_typing = false;
+        self.copy_search_next_match(&query, forward, false);
+    }
+
+    /// Find the next/previous match of `query` from the current cursor.
+    pub fn copy_search_next_match(&mut self, query: &str, forward: bool, reverse: bool) {
+        let fwd = if reverse { !forward } else { forward };
+        let Ok(re) = regex::Regex::new(query) else {
+            return;
+        };
+        let count = {
+            let Some(i) = self.focused_window else {
+                return;
+            };
+            let Some(w) = self.windows.get(i) else {
+                return;
+            };
+            let Ok(emu) = w.emulator.lock() else {
+                return;
+            };
+            emu.content_line_count()
+        };
+        let start_line = self.copy_cursor_line;
+        let start_col = self.copy_cursor_col as usize;
+        if fwd {
+            // Search forward from current position.
+            for line in start_line..count {
+                let text = self.copy_line_text(line);
+                let start = if line == start_line { start_col + 1 } else { 0 };
+                if let Some(m) = re.find_at(&text, start) {
+                    self.copy_cursor_line = line;
+                    self.copy_cursor_col = m.start() as i32;
+                    self.scroll_to_cursor(line);
+                    self.sync_selection_cursor();
+                    return;
+                }
+            }
+        } else {
+            // Search backward from current position.
+            for line in (0..=start_line).rev() {
+                let text = self.copy_line_text(line);
+                let end = if line == start_line {
+                    start_col
+                } else {
+                    text.len()
+                };
+                if let Some(pos) = re.find_iter(&text[..end]).last() {
+                    self.copy_cursor_line = line;
+                    self.copy_cursor_col = pos.start() as i32;
+                    self.scroll_to_cursor(line);
+                    self.sync_selection_cursor();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Move cursor to top of viewport (`H`).
+    pub fn copy_viewport_top(&mut self) {
+        if let Some(i) = self.focused_window {
+            if let Some(w) = self.windows.get(i) {
+                if let Ok(emu) = w.emulator.lock() {
+                    let sb = emu.scrollback_len();
+                    let viewport = emu.viewport();
+                    self.copy_cursor_line = sb.saturating_sub(viewport);
+                }
+            }
+        }
+        self.sync_selection_cursor();
+    }
+
+    /// Move cursor to middle of viewport (`M`).
+    pub fn copy_viewport_middle(&mut self) {
+        if let Some(i) = self.focused_window {
+            if let Some(w) = self.windows.get(i) {
+                if let Ok(emu) = w.emulator.lock() {
+                    let sb = emu.scrollback_len();
+                    let viewport = emu.viewport();
+                    let h = emu.height() as usize;
+                    self.copy_cursor_line = sb.saturating_sub(viewport) + h / 2;
+                }
+            }
+        }
+        self.sync_selection_cursor();
+    }
+
+    /// Move cursor to bottom of viewport (`L`).
+    pub fn copy_viewport_bottom(&mut self) {
+        if let Some(i) = self.focused_window {
+            if let Some(w) = self.windows.get(i) {
+                if let Ok(emu) = w.emulator.lock() {
+                    let sb = emu.scrollback_len();
+                    let viewport = emu.viewport();
+                    let h = emu.height() as usize;
+                    self.copy_cursor_line = sb.saturating_sub(viewport) + h.saturating_sub(1);
+                }
+            }
+        }
+        self.sync_selection_cursor();
+    }
+
+    /// Move to the next/previous blank line (`}`/`{`).
+    pub fn copy_blank_line(&mut self, forward: bool) {
+        let count = {
+            let Some(i) = self.focused_window else {
+                return;
+            };
+            let Some(w) = self.windows.get(i) else {
+                return;
+            };
+            let Ok(emu) = w.emulator.lock() else {
+                return;
+            };
+            emu.content_line_count()
+        };
+        if count == 0 {
+            return;
+        }
+        let delta = if forward { 1 } else { -1 };
+        let mut line = self.copy_cursor_line as i64 + delta;
+        while line >= 0 && (line as usize) < count {
+            let text = self.copy_line_text(line as usize);
+            if text.trim().is_empty() {
+                self.copy_cursor_line = line as usize;
+                self.copy_cursor_col = 0;
+                self.scroll_to_cursor(line as usize);
+                self.sync_selection_cursor();
+                return;
+            }
+            line += delta;
+        }
     }
 
     /// The content position (line, column) under a screen cell coordinate for
@@ -2295,6 +2774,186 @@ impl Os {
             }
         }
         best.map(|(idx, _)| idx)
+    }
+
+    /// Detect if a screen coordinate is on a pane border (within 1 cell slop).
+    /// Returns (window_id, edge) if the click is on a border between panes.
+    fn border_at(&self, column: i32, row: i32) -> Option<(i32, crate::layout::ResizeEdge)> {
+        let layout = self.current_layout();
+        let slop = 1;
+        for (&wid, &rect) in &layout {
+            // Right border: column is at rect.x + rect.w or rect.x + rect.w - 1
+            if (column == rect.x + rect.w || column == rect.x + rect.w - 1)
+                && row >= rect.y.saturating_sub(slop)
+                && row < rect.y + rect.h + slop
+            {
+                // Check if there's a neighbor to the right.
+                let has_right = layout.iter().any(|(_, r)| r.x == rect.x + rect.w);
+                if has_right {
+                    return Some((wid, crate::layout::ResizeEdge::Right));
+                }
+            }
+            // Bottom border
+            if (row == rect.y + rect.h || row == rect.y + rect.h - 1)
+                && column >= rect.x.saturating_sub(slop)
+                && column < rect.x + rect.w + slop
+            {
+                let has_below = layout.iter().any(|(_, r)| r.y == rect.y + rect.h);
+                if has_below {
+                    return Some((wid, crate::layout::ResizeEdge::Bottom));
+                }
+            }
+            // Left border
+            if (column == rect.x || column == rect.x + 1)
+                && row >= rect.y.saturating_sub(slop)
+                && row < rect.y + rect.h + slop
+            {
+                let has_left = layout.iter().any(|(_, r)| r.x + r.w == rect.x);
+                if has_left {
+                    return Some((wid, crate::layout::ResizeEdge::Left));
+                }
+            }
+            // Top border
+            if (row == rect.y || row == rect.y + 1)
+                && column >= rect.x.saturating_sub(slop)
+                && column < rect.x + rect.w + slop
+            {
+                let has_above = layout.iter().any(|(_, r)| r.y + r.h == rect.y);
+                if has_above {
+                    return Some((wid, crate::layout::ResizeEdge::Top));
+                }
+            }
+        }
+        None
+    }
+
+    /// Begin a border-drag resize operation.
+    pub fn begin_border_drag(&mut self, window_id: i32, edge: crate::layout::ResizeEdge, pos: i32) {
+        self.drag_resize = Some((window_id, edge, pos));
+    }
+
+    /// Apply a border-drag resize to the current position.
+    pub fn apply_border_drag(&mut self, pos: i32) {
+        let Some((wid, edge, _start)) = self.drag_resize else {
+            return;
+        };
+        let ws = self.current_workspace;
+        let bounds = self.workspace_bounds(ws);
+        let gap = self.gap;
+        self.workspace_mut(ws)
+            .tree
+            .resize_split(wid, edge, pos, bounds, gap);
+    }
+
+    /// End the border-drag resize.
+    pub fn end_border_drag(&mut self) {
+        self.drag_resize = None;
+    }
+
+    /// Select a word at the given screen position and return the selection text.
+    pub fn select_word_at(&mut self, window: usize, column: i32, row: i32) {
+        let Some((line, col)) = self.content_position_at(window, column, row) else {
+            return;
+        };
+        let text = {
+            let Some(w) = self.windows.get(window) else {
+                return;
+            };
+            let Ok(emu) = w.emulator.lock() else {
+                return;
+            };
+            emu.content_line_text(line)
+        };
+        let chars: Vec<char> = text.chars().collect();
+        if chars.is_empty() {
+            return;
+        }
+        let pos = (col as usize).min(chars.len().saturating_sub(1));
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        if !is_word(chars[pos]) {
+            // If not on a word char, select the single char.
+            self.selection = Some(Selection {
+                window,
+                anchor_line: line,
+                anchor_col: col,
+                cursor_line: line,
+                cursor_col: col + 1,
+            });
+            return;
+        }
+        // Find word boundaries.
+        let mut start = pos;
+        while start > 0 && is_word(chars[start - 1]) {
+            start -= 1;
+        }
+        let mut end = pos;
+        while end + 1 < chars.len() && is_word(chars[end + 1]) {
+            end += 1;
+        }
+        self.selection = Some(Selection {
+            window,
+            anchor_line: line,
+            anchor_col: start as i32,
+            cursor_line: line,
+            cursor_col: (end + 1) as i32,
+        });
+    }
+
+    /// Select the entire line at the given screen position.
+    pub fn select_line_at(&mut self, window: usize, column: i32, row: i32) {
+        let Some((line, _)) = self.content_position_at(window, column, row) else {
+            return;
+        };
+        let width = {
+            let Some(w) = self.windows.get(window) else {
+                return;
+            };
+            let Ok(emu) = w.emulator.lock() else {
+                return;
+            };
+            emu.width()
+        };
+        self.selection = Some(Selection {
+            window,
+            anchor_line: line,
+            anchor_col: 0,
+            cursor_line: line,
+            cursor_col: width,
+        });
+    }
+
+    pub fn open_theme_picker(&mut self) {
+        self.theme_list = crate::config::theme::all_themes()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        self.theme_picker_open = true;
+        self.theme_picker_selected = 0;
+    }
+
+    pub fn close_theme_picker(&mut self) {
+        self.theme_picker_open = false;
+    }
+
+    pub fn theme_picker_move(&mut self, delta: i32) {
+        if self.theme_list.is_empty() {
+            return;
+        }
+        let len = self.theme_list.len() as i32;
+        let new = (self.theme_picker_selected as i32 + delta).rem_euclid(len) as usize;
+        self.theme_picker_selected = new;
+    }
+
+    pub fn apply_selected_theme(&mut self) {
+        if let Some(name) = self.theme_list.get(self.theme_picker_selected).cloned() {
+            self.config.appearance.theme = name;
+            self.close_theme_picker();
+        }
+    }
+
+    /// Toggle the help modal overlay.
+    pub fn toggle_help(&mut self) {
+        self.help_open = !self.help_open;
     }
 }
 
@@ -2829,13 +3488,13 @@ mod tests {
         let mut os = os_with_window();
         os.enter_scrollback_mode();
         assert!(os.scrollback_mode);
-        os.toggle_visual();
+        os.toggle_visual(false);
         assert!(os.copy_visual);
         let sel = os.selection.as_ref().unwrap();
         assert_eq!(sel.window, 0);
         assert_eq!(sel.anchor_line, sel.cursor_line);
         // Esc clears visual selection.
-        os.toggle_visual();
+        os.toggle_visual(false);
         assert!(!os.copy_visual);
         assert!(os.selection.is_none());
     }

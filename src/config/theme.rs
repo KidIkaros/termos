@@ -1,6 +1,8 @@
 //! Themes — built-in color themes and custom theme JSON, ported from TUIOS
 //! `internal/theme`.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 /// A color as a 24-bit RGB triple.
@@ -136,12 +138,109 @@ impl Theme {
     }
 }
 
+/// Parse a hex color string like `#rrggbb` into an `Rgb`.
+pub fn parse_hex(s: &str) -> Option<Rgb> {
+    Rgb::parse(s)
+}
+
+/// The directory where custom theme JSON files live:
+/// `~/.config/termos/themes/`.
+pub fn themes_dir() -> Option<PathBuf> {
+    let config = dirs::config_dir()?;
+    Some(config.join("termos").join("themes"))
+}
+
+/// Load every custom theme from `~/.config/termos/themes/*.json`.
+///
+/// Each file must match the JSON shape:
+/// ```json
+/// { "name": "...", "foreground": "#hex", "background": "#hex",
+///   "cursor": "#hex", "ansi": ["#hex", ...16 entries...] }
+/// ```
+///
+/// Invalid files log a warning and are skipped; the function never fails.
+pub fn load_custom_themes() -> Vec<Theme> {
+    let Some(dir) = themes_dir() else {
+        return Vec::new();
+    };
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut themes = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        match load_theme_file(&path) {
+            Ok(theme) => themes.push(theme),
+            Err(e) => {
+                log::warn!("theme: failed to load {}: {e}", path.display());
+            }
+        }
+    }
+    themes
+}
+
+/// Read and parse a single theme JSON file.
+fn load_theme_file(path: &PathBuf) -> Result<Theme, Box<dyn std::error::Error>> {
+    let data = std::fs::read_to_string(path)?;
+    let raw: ThemeJson = serde_json::from_str(&data)?;
+    raw.into_theme()
+}
+
+/// The on-disk JSON representation of a theme.
+#[derive(Debug, Deserialize)]
+struct ThemeJson {
+    name: String,
+    foreground: String,
+    background: String,
+    cursor: String,
+    ansi: Vec<String>,
+}
+
+impl ThemeJson {
+    fn into_theme(self) -> Result<Theme, Box<dyn std::error::Error>> {
+        let foreground = parse_hex(&self.foreground)
+            .ok_or_else(|| format!("invalid foreground: {}", self.foreground))?;
+        let background = parse_hex(&self.background)
+            .ok_or_else(|| format!("invalid background: {}", self.background))?;
+        let cursor =
+            parse_hex(&self.cursor).ok_or_else(|| format!("invalid cursor: {}", self.cursor))?;
+        if self.ansi.len() != 16 {
+            return Err(format!("ansi must have 16 entries, got {}", self.ansi.len()).into());
+        }
+        let mut ansi = [Rgb::new(0, 0, 0); 16];
+        for (i, hex) in self.ansi.iter().enumerate() {
+            ansi[i] = parse_hex(hex).ok_or_else(|| format!("invalid ansi[{}]: {}", i, hex))?;
+        }
+        Ok(Theme {
+            name: self.name,
+            foreground,
+            background,
+            cursor,
+            ansi,
+        })
+    }
+}
+
+/// All available themes: built-ins first, then custom themes from disk.
+pub fn all_themes() -> Vec<Theme> {
+    let mut themes: Vec<Theme> = Theme::built_in_names()
+        .iter()
+        .filter_map(|name| Theme::built_in(name))
+        .collect();
+    themes.extend(load_custom_themes());
+    themes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parse_hex() {
+    fn parse_hex_works() {
         assert_eq!(Rgb::parse("#1e1e2e"), Some(Rgb::new(0x1e, 0x1e, 0x2e)));
         assert_eq!(Rgb::parse("1E1E2E"), Some(Rgb::new(0x1e, 0x1e, 0x2e)));
         assert_eq!(Rgb::parse("xyz"), None);
@@ -152,5 +251,56 @@ mod tests {
         assert!(Theme::built_in("dracula").is_some());
         assert!(Theme::built_in("catppuccin-mocha").is_some());
         assert!(Theme::built_in("nonexistent").is_none());
+    }
+
+    #[test]
+    fn parse_hex_helper() {
+        assert_eq!(parse_hex("#ff0000"), Some(Rgb::new(0xff, 0x00, 0x00)));
+        assert_eq!(parse_hex("00ff00"), Some(Rgb::new(0x00, 0xff, 0x00)));
+        assert_eq!(parse_hex("#gggggg"), None);
+    }
+
+    #[test]
+    fn theme_json_roundtrip() {
+        let json = r##"{
+            "name": "test-custom",
+            "foreground": "#cdd6f4",
+            "background": "#1e1e2e",
+            "cursor": "#f5e0dc",
+            "ansi": [
+                "#1e1e2e","#f38ba8","#a6e3a1","#f9e2af",
+                "#89b4fa","#f5c2e7","#94e2d5","#bac2de",
+                "#585b70","#f38ba8","#a6e3a1","#f9e2af",
+                "#89b4fa","#f5c2e7","#94e2d5","#cdd6f4"
+            ]
+        }"##;
+        let raw: ThemeJson = serde_json::from_str(json).unwrap();
+        let theme = raw.into_theme().unwrap();
+        assert_eq!(theme.name, "test-custom");
+        assert_eq!(theme.foreground, Rgb::new(0xcd, 0xd6, 0xf4));
+        assert_eq!(theme.background, Rgb::new(0x1e, 0x1e, 0x2e));
+        assert_eq!(theme.ansi.len(), 16);
+        assert_eq!(theme.ansi[1], Rgb::new(0xf3, 0x8b, 0xa8));
+    }
+
+    #[test]
+    fn theme_json_bad_ansi_count() {
+        let json = r##"{
+            "name": "bad",
+            "foreground": "#000000",
+            "background": "#000000",
+            "cursor": "#000000",
+            "ansi": ["#000000","#000000"]
+        }"##;
+        let raw: ThemeJson = serde_json::from_str(json).unwrap();
+        assert!(raw.into_theme().is_err());
+    }
+
+    #[test]
+    fn all_themes_includes_builtins() {
+        let themes = all_themes();
+        let names: Vec<&str> = themes.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"catppuccin-mocha"));
+        assert!(names.contains(&"dracula"));
     }
 }

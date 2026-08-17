@@ -237,6 +237,27 @@ pub fn spawn_pty(
                     value.as_ptr(),
                     1,
                 );
+                // Advertise TERM_PROGRAM so guest tools (chafa, yazi, kitten icat)
+                // pick the right output format for the graphics protocol we forward.
+                let term_program = CString::new(
+                    std::env::var("TERMOS_TERM_PROGRAM").unwrap_or_else(|_| "TermOS".to_string()),
+                )
+                .unwrap();
+                libc::setenv(
+                    CString::new("TERM_PROGRAM").unwrap().as_ptr(),
+                    term_program.as_ptr(),
+                    1,
+                );
+                let term_program_version = CString::new(
+                    std::env::var("TERMOS_TERM_PROGRAM_VERSION")
+                        .unwrap_or_else(|_| "0.1.0".to_string()),
+                )
+                .unwrap();
+                libc::setenv(
+                    CString::new("TERM_PROGRAM_VERSION").unwrap().as_ptr(),
+                    term_program_version.as_ptr(),
+                    1,
+                );
                 // Caller-supplied environment (e.g. TERMOS_ENV).
                 for (k, v) in extra_env {
                     let Ok(kc) = CString::new(k.as_str()) else {

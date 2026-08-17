@@ -2,7 +2,7 @@
 //! `internal/config/userconfig.go`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -307,6 +307,129 @@ impl UserConfig {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         std::fs::write(&path, toml).map_err(|e| e.to_string())
+    }
+
+    /// Spawn a file watcher that reloads the config on change. Returns a
+    /// receiver that yields a new `UserConfig` whenever the file is modified
+    /// (debounced 300ms). Drops cleanly when the receiver is dropped.
+    pub fn watch(path: PathBuf) -> Result<std::sync::mpsc::Receiver<UserConfig>, String> {
+        use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx_clone = tx.clone();
+        let watch_path = path.clone();
+        let mut debouncer = new_debouncer(
+            std::time::Duration::from_millis(300),
+            move |res: Result<Vec<notify_debouncer_mini::DebouncedEvent>, _>| {
+                if let Ok(events) = res {
+                    if events.iter().any(|e| e.kind == DebouncedEventKind::Any) {
+                        let cfg = UserConfig::load_from(&path);
+                        let _ = tx_clone.send(cfg);
+                    }
+                }
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        debouncer
+            .watcher()
+            .watch(&watch_path, notify::RecursiveMode::NonRecursive)
+            .map_err(|e| e.to_string())?;
+        // Keep the debouncer alive for the lifetime of the channel.
+        std::mem::forget(debouncer);
+        Ok(rx)
+    }
+
+    /// Load config from a specific path (used by the watcher).
+    pub fn load_from(path: &Path) -> Self {
+        let data = match std::fs::read_to_string(path) {
+            Ok(data) => data,
+            Err(_) => return Self::default_config(),
+        };
+        let mut cfg: UserConfig = match toml::from_str(&data) {
+            Ok(cfg) => cfg,
+            Err(_) => return Self::default_config(),
+        };
+        cfg.keybindings.fill_missing();
+        cfg
+    }
+}
+
+/// CLI flag overrides that take precedence over config file values.
+/// Zero values indicate the flag was not set.
+#[derive(Debug, Default, Clone)]
+pub struct Overrides {
+    pub border_style: Option<String>,
+    pub dockbar_position: Option<String>,
+    pub ascii_only: Option<bool>,
+    pub theme: Option<String>,
+    pub no_which_key: Option<bool>,
+}
+
+impl Overrides {
+    /// Parse CLI flags from args. Returns (overrides, remaining_args).
+    /// Recognized flags:
+    /// --border-style <style>
+    /// --dockbar-position <top|bottom>
+    /// --ascii-only
+    /// --theme <name>
+    /// --no-which-key
+    pub fn parse(args: &[String]) -> (Self, Vec<String>) {
+        let mut ov = Self::default();
+        let mut remaining = Vec::new();
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--border-style" => {
+                    i += 1;
+                    if let Some(v) = args.get(i) {
+                        ov.border_style = Some(v.clone());
+                    }
+                }
+                "--dockbar-position" => {
+                    i += 1;
+                    if let Some(v) = args.get(i) {
+                        ov.dockbar_position = Some(v.clone());
+                    }
+                }
+                "--ascii-only" => {
+                    ov.ascii_only = Some(true);
+                }
+                "--theme" => {
+                    i += 1;
+                    if let Some(v) = args.get(i) {
+                        ov.theme = Some(v.clone());
+                    }
+                }
+                "--no-which-key" => {
+                    ov.no_which_key = Some(true);
+                }
+                _ => {
+                    remaining.push(args[i].clone());
+                }
+            }
+            i += 1;
+        }
+        (ov, remaining)
+    }
+
+    /// Apply overrides to a loaded config.
+    pub fn apply(&self, config: &mut UserConfig) {
+        if let Some(ref bs) = self.border_style {
+            config.appearance.border_style = bs.clone();
+        }
+        if let Some(ref dp) = self.dockbar_position {
+            config.appearance.dockbar_position = dp.clone();
+        }
+        if let Some(true) = self.ascii_only {
+            // ASCII-only mode: use plain borders and disable animations.
+            config.appearance.border_style = "plain".into();
+            config.appearance.animations_enabled = false;
+        }
+        if let Some(ref theme) = self.theme {
+            config.appearance.theme = theme.clone();
+        }
+        if let Some(true) = self.no_which_key {
+            config.appearance.which_key_enabled = false;
+        }
     }
 }
 

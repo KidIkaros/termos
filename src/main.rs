@@ -30,24 +30,33 @@ use ratatui::Terminal;
 use termos::app::input::{handle_key, handle_mouse, KeyResult};
 use termos::app::render::render;
 use termos::app::Os;
-use termos::config::userconfig::UserConfig;
+use termos::config::userconfig::{Overrides, UserConfig};
 use termos::session::model::{SessionInfo, WindowInfo};
 use termos::session::{self, protocol, Daemon, DaemonClient, Message, RemoteSink};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
-        return dispatch(&args);
+    let raw_args: Vec<String> = std::env::args().collect();
+    let (overrides, remaining) = Overrides::parse(&raw_args[1..]);
+    if !remaining.is_empty() {
+        return dispatch(&remaining, &overrides);
     }
 
-    run_local_tui()
+    run_local_tui_with_overrides(&overrides)
 }
 
 /// Route a subcommand to its handler.
-fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    match args[1].as_str() {
+fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::error::Error>> {
+    match args[0].as_str() {
+        "--help" | "-h" => {
+            print_help();
+            Ok(())
+        }
+        "--version" | "-v" => {
+            println!("termos {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         "--skill" => {
             print!("{}", SKILL_DOC);
             Ok(())
@@ -161,6 +170,52 @@ enum Verb {
     SendText,
     CapturePane,
     WaitFor,
+}
+
+/// Print CLI usage information.
+fn print_help() {
+    println!(
+        "termos {} — terminal multiplexer and window manager",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!();
+    println!("USAGE:");
+    println!("    termos [OPTIONS]            Run the TUI");
+    println!("    termos <SUBCOMMAND> [ARGS]  Run a subcommand");
+    println!();
+    println!("OPTIONS:");
+    println!("    --border-style <style>     Override border style (rounded/plain/double/none)");
+    println!("    --dockbar-position <pos>   Override dockbar position (top/bottom)");
+    println!("    --ascii-only               Use ASCII characters instead of Nerd Font icons");
+    println!("    --theme <name>             Override theme (e.g. catppuccin-mocha, dracula)");
+    println!("    --no-which-key             Disable which-key overlay");
+    println!("    --help, -h                 Print this help");
+    println!("    --version, -v              Print version");
+    println!("    --skill                    Print the agent skill document");
+    println!();
+    println!("SUBCOMMANDS:");
+    println!("    daemon                     Start the session daemon");
+    println!("    run [name]                 Create and attach a new session");
+    println!("    attach <name>              Attach to an existing session");
+    println!("    list, ls                   List sessions");
+    println!("    kill <name>                Kill a session");
+    println!("    tape <play|validate|list|show|delete|dir|exec>  Tape scripting");
+    println!("    set-agent-state <args>     Set agent state on a pane");
+    println!("    get-agent-state <args>     Get agent state from a pane");
+    println!("    send-keys <args>           Send keys to a pane");
+    println!("    send-text <args>           Send text to a pane");
+    println!("    capture-pane <args>        Capture pane content");
+    println!("    wait-for <args>            Wait for a condition");
+    println!("    list-verbs                 List control protocol verbs");
+    println!();
+    println!("EXAMPLES:");
+    println!("    termos                         # Start the TUI");
+    println!("    termos --theme dracula         # Start with dracula theme");
+    println!("    termos --ascii-only            # Start with ASCII-only mode");
+    println!("    termos daemon                  # Start the daemon");
+    println!("    termos run my-session          # Create and attach a session");
+    println!("    termos attach my-session       # Attach to existing session");
+    println!("    termos tape play demo.tape     # Play a tape script");
 }
 
 fn cmd_list() -> Result<(), Box<dyn std::error::Error>> {
@@ -364,7 +419,7 @@ fn cmd_tape_play(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
     set_os_size(&mut os);
 
-    let result = run_event_loop(&mut os, &mut terminal);
+    let result = run_event_loop(&mut os, &mut terminal, None);
 
     disable_raw_mode()?;
     execute!(
@@ -1081,10 +1136,14 @@ fn wait_for_list(events: &Receiver<RemoteEvent>) -> Result<Vec<SessionInfo>, Str
 // Legacy single-process TUI
 // ---------------------------------------------------------------------------
 
-fn run_local_tui() -> Result<(), Box<dyn std::error::Error>> {
-    let config = UserConfig::load();
+fn run_local_tui_with_overrides(overrides: &Overrides) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = UserConfig::load();
+    overrides.apply(&mut config);
     let mut os = Os::new(config);
     os.init_graphics();
+
+    // Spawn a config file watcher for hot-reload.
+    let config_rx = UserConfig::config_path().and_then(|p| UserConfig::watch(p).ok());
 
     // Set up the terminal.
     enable_raw_mode()?;
@@ -1113,7 +1172,7 @@ fn run_local_tui() -> Result<(), Box<dyn std::error::Error>> {
         return Err(e.into());
     }
 
-    let result = run_event_loop(&mut os, &mut terminal);
+    let result = run_event_loop(&mut os, &mut terminal, config_rx);
 
     // Restore the terminal.
     disable_raw_mode()?;
@@ -1144,11 +1203,20 @@ fn set_os_size(os: &mut Os) {
 fn run_event_loop(
     os: &mut Os,
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    config_rx: Option<std::sync::mpsc::Receiver<UserConfig>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut last_render = Instant::now();
     let frame_budget = Duration::from_millis(16); // ~60 FPS
 
     loop {
+        // Hot-reload config if the watcher sent an update.
+        if let Some(rx) = &config_rx {
+            if let Ok(new_config) = rx.try_recv() {
+                os.config = new_config;
+                os.notify("config reloaded", "info");
+            }
+        }
+
         // Raise any agent alerts whose settle window has expired.
         os.tick_agent_alerts();
         // Advance tape playback (blocks internally on sleeps/waits).
