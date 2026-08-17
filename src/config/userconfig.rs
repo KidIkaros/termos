@@ -276,7 +276,7 @@ impl UserConfig {
 
     /// The config file path (XDG: `~/.config/tuios/config.toml`).
     pub fn config_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("tuios").join("config.toml"))
+        dirs::config_dir().map(|d| d.join("termos").join("config.toml"))
     }
 
     /// Load the user config from the XDG config directory. If no file exists,

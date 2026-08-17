@@ -1,4 +1,4 @@
-# TUIOS Rust port — roadmap
+# TermOS Rust port — roadmap
 
 Everything not yet shipped, organized into phases by dependency, value, and
 risk. Each phase is independently shippable and leaves the crate building,

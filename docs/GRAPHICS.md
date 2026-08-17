@@ -1,6 +1,6 @@
 # Graphics Passthrough
 
-TUIOS is a passthrough-first terminal multiplexer for images: it does not
+TermOS is a passthrough-first terminal multiplexer for images: it does not
 rasterize images into text cells. Instead it forwards Kitty graphics
 protocol and Sixel sequences to the host terminal, rewriting image IDs
 and placement coordinates so images follow their panes.
@@ -14,7 +14,7 @@ and placement coordinates so images follow their panes.
 
 ## How It Works
 
-1. **Capability probing** (`graphics/capability.rs`): At startup, TUIOS
+1. **Capability probing** (`graphics/capability.rs`): At startup, TermOS
    reads `TERM_PROGRAM`, `TERM`, and terminal-specific env vars to
    determine which graphics protocols the host supports.
 
@@ -46,7 +46,7 @@ and placement coordinates so images follow their panes.
 
 ## Multiplexer Nesting
 
-When TUIOS runs inside tmux or screen, graphics sequences may be filtered
+When TermOS runs inside tmux or screen, graphics sequences may be filtered
 by the outer multiplexer. The capability probe detects this
 (`inside_multiplexer`) but cannot work around it — the outer multiplexer
 must be configured to pass through APC/DCS sequences.

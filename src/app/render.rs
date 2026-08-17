@@ -109,7 +109,7 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         render_overlay(
             buf,
             content_area,
-            &["Quit TUIOS?  (y/n)".to_string()],
+            &["Quit TermOS?  (y/n)".to_string()],
             "Quit",
         );
     } else if os.scrollback_mode {

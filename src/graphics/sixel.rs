@@ -3,7 +3,7 @@
 //! pane. Ported from TUIOS `internal/app/sixel_passthrough.go`.
 //!
 //! Sixel is simpler than Kitty: there's no image-id remap, and the image is
-//! placed at the cursor position. TUIOS positions the cursor at the pane's
+//! placed at the cursor position. TermOS positions the cursor at the pane's
 //! top-left (using CUP) before forwarding, then restores it.
 
 use std::io::Write;

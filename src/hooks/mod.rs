@@ -2,7 +2,7 @@
 //!
 //! Hooks fire asynchronously when specific events occur (window creation,
 //! focus changes, workspace switches, etc.) and execute user-defined shell
-//! commands with `TUIOS_*` environment variables providing context.
+//! commands with `TERMOS_*` environment variables providing context.
 
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
@@ -104,37 +104,37 @@ pub struct Context {
 }
 
 impl Context {
-    /// The `TUIOS_*` environment pairs for this context.
+    /// The `TERMOS_*` environment pairs for this context.
     pub fn env_pairs(&self) -> Vec<(String, String)> {
         vec![
             (
-                "TUIOS_EVENT".to_string(),
+                "TERMOS_EVENT".to_string(),
                 self.event
                     .map(|e| e.as_str().to_string())
                     .unwrap_or_default(),
             ),
-            ("TUIOS_WINDOW_ID".to_string(), self.window_id.clone()),
-            ("TUIOS_WINDOW_NAME".to_string(), self.window_name.clone()),
-            ("TUIOS_WORKSPACE".to_string(), self.workspace.to_string()),
-            ("TUIOS_SESSION_ID".to_string(), self.session_id.clone()),
+            ("TERMOS_WINDOW_ID".to_string(), self.window_id.clone()),
+            ("TERMOS_WINDOW_NAME".to_string(), self.window_name.clone()),
+            ("TERMOS_WORKSPACE".to_string(), self.workspace.to_string()),
+            ("TERMOS_SESSION_ID".to_string(), self.session_id.clone()),
             (
-                "TUIOS_PREV_WORKSPACE".to_string(),
+                "TERMOS_PREV_WORKSPACE".to_string(),
                 self.previous_workspace.to_string(),
             ),
-            ("TUIOS_LAYOUT".to_string(), self.layout.clone()),
-            ("TUIOS_WIDTH".to_string(), self.width.to_string()),
-            ("TUIOS_HEIGHT".to_string(), self.height.to_string()),
-            ("TUIOS_AGENT_STATE".to_string(), self.agent_state.clone()),
+            ("TERMOS_LAYOUT".to_string(), self.layout.clone()),
+            ("TERMOS_WIDTH".to_string(), self.width.to_string()),
+            ("TERMOS_HEIGHT".to_string(), self.height.to_string()),
+            ("TERMOS_AGENT_STATE".to_string(), self.agent_state.clone()),
             (
-                "TUIOS_AGENT_PREV_STATE".to_string(),
+                "TERMOS_AGENT_PREV_STATE".to_string(),
                 self.prev_agent_state.clone(),
             ),
             (
-                "TUIOS_AGENT_HARNESS".to_string(),
+                "TERMOS_AGENT_HARNESS".to_string(),
                 self.agent_harness.clone(),
             ),
             (
-                "TUIOS_AGENT_MESSAGE".to_string(),
+                "TERMOS_AGENT_MESSAGE".to_string(),
                 self.agent_message.clone(),
             ),
         ]
@@ -430,7 +430,7 @@ mod tests {
 
         m.register(
             Event::AfterFocusChange,
-            format!("env | grep TUIOS_ > {}", env_file.display()),
+            format!("env | grep TERMOS_ > {}", env_file.display()),
         );
         m.fire(
             Event::AfterFocusChange,
@@ -446,11 +446,11 @@ mod tests {
 
         let content = std::fs::read_to_string(&env_file).expect("env file written");
         for want in [
-            "TUIOS_EVENT=after-focus-change",
-            "TUIOS_WINDOW_ID=win-abc",
-            "TUIOS_WINDOW_NAME=MyWindow",
-            "TUIOS_WORKSPACE=3",
-            "TUIOS_SESSION_ID=sess-xyz",
+            "TERMOS_EVENT=after-focus-change",
+            "TERMOS_WINDOW_ID=win-abc",
+            "TERMOS_WINDOW_NAME=MyWindow",
+            "TERMOS_WORKSPACE=3",
+            "TERMOS_SESSION_ID=sess-xyz",
         ] {
             assert!(
                 content.contains(want),
@@ -469,7 +469,7 @@ mod tests {
 
         m.register(
             Event::AfterAgentState,
-            format!("env | grep '^TUIOS_' | sort > {}", out.display()),
+            format!("env | grep '^TERMOS_' | sort > {}", out.display()),
         );
         m.fire(
             Event::AfterAgentState,
@@ -489,15 +489,15 @@ mod tests {
 
         let got = std::fs::read_to_string(&out).expect("hook ran");
         for want in [
-            "TUIOS_EVENT=after-agent-state",
-            "TUIOS_WINDOW_ID=w-1",
-            "TUIOS_WINDOW_NAME=build",
-            "TUIOS_WORKSPACE=3",
-            "TUIOS_SESSION_ID=main",
-            "TUIOS_AGENT_STATE=needs_input",
-            "TUIOS_AGENT_PREV_STATE=working",
-            "TUIOS_AGENT_HARNESS=claude",
-            "TUIOS_AGENT_MESSAGE=awaiting approval",
+            "TERMOS_EVENT=after-agent-state",
+            "TERMOS_WINDOW_ID=w-1",
+            "TERMOS_WINDOW_NAME=build",
+            "TERMOS_WORKSPACE=3",
+            "TERMOS_SESSION_ID=main",
+            "TERMOS_AGENT_STATE=needs_input",
+            "TERMOS_AGENT_PREV_STATE=working",
+            "TERMOS_AGENT_HARNESS=claude",
+            "TERMOS_AGENT_MESSAGE=awaiting approval",
         ] {
             assert!(got.contains(want), "missing {want:?} from hook env:\n{got}");
         }
@@ -516,7 +516,7 @@ mod tests {
 
         m.register(
             Event::AfterAgentState,
-            format!("printf '%s' \"$TUIOS_AGENT_MESSAGE\" > {}", out.display()),
+            format!("printf '%s' \"$TERMOS_AGENT_MESSAGE\" > {}", out.display()),
         );
         m.fire(
             Event::AfterAgentState,

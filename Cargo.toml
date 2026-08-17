@@ -1,16 +1,16 @@
 [package]
-name = "tuios-rs"
+name = "termos"
 version = "0.1.0"
 edition = "2021"
-description = "TUIOS — a terminal multiplexer and window manager, ported to Rust"
+description = "TermOS — a terminal multiplexer and window manager, ported to Rust from TUIOS"
 license = "MIT"
 
 [[bin]]
-name = "tuios"
+name = "termos"
 path = "src/main.rs"
 
 [lib]
-name = "tuios"
+name = "termos"
 path = "src/lib.rs"
 
 [dependencies]

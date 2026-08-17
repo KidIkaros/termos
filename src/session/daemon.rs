@@ -29,13 +29,13 @@ use super::protocol::{self, Message, VERSION};
 
 /// The default Unix socket path.
 pub fn default_socket_path() -> PathBuf {
-    if let Ok(p) = std::env::var("TUIOS_SOCKET") {
+    if let Ok(p) = std::env::var("TERMOS_SOCKET") {
         return PathBuf::from(p);
     }
     if let Some(dir) = dirs::runtime_dir() {
-        let d = dir.join("tuios");
+        let d = dir.join("termos");
         let _ = std::fs::create_dir_all(&d);
-        return d.join("tuios.sock");
+        return d.join("termos.sock");
     }
     let uid = unsafe { nix::libc::getuid() };
     PathBuf::from(format!("/tmp/tuios-{uid}.sock"))
@@ -260,11 +260,11 @@ impl Daemon {
     ) -> Result<LiveWindow, String> {
         let size = WinSize { cols: 80, rows: 24 };
         let argv = vec![shell.to_string()];
-        // Advertise TUIOS to the pane so agents can detect the environment.
+        // Advertise TermOS to the pane so agents can detect the environment.
         let env = vec![
-            ("TUIOS_ENV".to_string(), "1".to_string()),
-            ("TUIOS_SESSION_ID".to_string(), session.to_string()),
-            ("TUIOS_WINDOW_ID".to_string(), id.to_string()),
+            ("TERMOS_ENV".to_string(), "1".to_string()),
+            ("TERMOS_SESSION_ID".to_string(), session.to_string()),
+            ("TERMOS_WINDOW_ID".to_string(), id.to_string()),
         ];
         let (writer, handle, reader) =
             spawn_pty(size, &argv, Box::new(|| {}), &env).map_err(|e| e.to_string())?;
@@ -645,7 +645,7 @@ impl Daemon {
             let _ = std::fs::create_dir_all(parent);
         }
         let listener = UnixListener::bind(path)?;
-        log::info!("tuios daemon listening on {}", path.display());
+        log::info!("termos daemon listening on {}", path.display());
 
         for stream in listener.incoming() {
             match stream {

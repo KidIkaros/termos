@@ -952,7 +952,7 @@ impl Os {
     // -----------------------------------------------------------------------
 
     /// Probe the host terminal and initialize graphics passthrough. The host
-    /// output is stdout (the terminal TUIOS is running inside).
+    /// output is stdout (the terminal TermOS is running inside).
     pub fn init_graphics(&mut self) {
         let caps = crate::graphics::capability::Capabilities::probe();
         self.graphics_caps = caps;
@@ -1079,7 +1079,7 @@ impl Os {
         let recorder = self.recorder.as_mut()?;
         recorder.stop();
         let count = recorder.command_count();
-        let content = recorder.string("Recorded in TUIOS");
+        let content = recorder.string("Recorded in TermOS");
         let name = format!("recording-{}", crate::tape::tapes::timestamp_stamp());
         match crate::tape::tapes::save_tape(&name, &content) {
             Ok(path) => {
@@ -1337,7 +1337,7 @@ impl Os {
         let index = self.windows.len();
         let id = format!("win-{index}");
         let size = WinSize { cols: 80, rows: 24 };
-        let env = vec![("TUIOS_ENV".to_string(), "1".to_string())];
+        let env = vec![("TERMOS_ENV".to_string(), "1".to_string())];
         let window = Window::spawn(id, "Terminal", size, shell, None, wake, &env)
             .map_err(|e| e.to_string())?;
         self.windows.push(window);
@@ -1673,7 +1673,7 @@ impl Os {
         let index = self.windows.len();
         let id = format!("win-{index}");
         let size = WinSize { cols: 40, rows: 12 };
-        let env = vec![("TUIOS_ENV".to_string(), "1".to_string())];
+        let env = vec![("TERMOS_ENV".to_string(), "1".to_string())];
         let window = Window::spawn(id, "Terminal", size, shell, None, wake, &env)
             .map_err(|e| e.to_string())?;
         self.windows.push(window);

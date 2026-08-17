@@ -1,6 +1,6 @@
 //! Graphics passthrough — Kitty graphics protocol and Sixel forwarding.
 //!
-//! TUIOS is a passthrough-first terminal multiplexer for images: it does not
+//! TermOS is a passthrough-first terminal multiplexer for images: it does not
 //! rasterize images into ratatui cells. Instead it probes the host terminal's
 //! capabilities, forwards or rewrites Kitty APC sequences and Sixel streams to
 //! the host, and tracks placements so they can be re-placed when panes move,

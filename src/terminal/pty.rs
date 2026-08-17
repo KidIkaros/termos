@@ -237,7 +237,7 @@ pub fn spawn_pty(
                     value.as_ptr(),
                     1,
                 );
-                // Caller-supplied environment (e.g. TUIOS_ENV).
+                // Caller-supplied environment (e.g. TERMOS_ENV).
                 for (k, v) in extra_env {
                     let Ok(kc) = CString::new(k.as_str()) else {
                         continue;

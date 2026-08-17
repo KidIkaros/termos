@@ -6,7 +6,7 @@ use std::path::PathBuf;
 /// The recordings directory, creating it if needed.
 pub fn tape_dir() -> Result<PathBuf, String> {
     let base = dirs::data_dir().ok_or("no data dir")?;
-    let dir = base.join("tuios").join("tapes");
+    let dir = base.join("termos").join("tapes");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }

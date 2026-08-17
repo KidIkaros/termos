@@ -1,4 +1,4 @@
-# TUIOS-RS Architecture
+# TermOS Architecture
 
 A Rust port of [TUIOS](https://github.com/Gaurav-Gosain/tuios), the terminal
 multiplexer and window manager. This document describes the Rust crate's
@@ -54,7 +54,7 @@ src/
 
 ## Architecture
 
-TUIOS follows a Model-View-Update loop:
+TermOS follows a Model-View-Update loop:
 
 - **Model**: `Os` struct in `app/mod.rs` — windows, workspaces, modes,
   hooks, agent state, recording, graphics passthrough.
@@ -68,7 +68,7 @@ feeds them to the Os, and renders at ~60 FPS.
 
 ## Graphics Passthrough
 
-TUIOS is a passthrough-first multiplexer for images: it does not rasterize
+TermOS is a passthrough-first multiplexer for images: it does not rasterize
 images into ratatui cells. Instead it:
 
 1. Probes the host terminal's capabilities (`graphics/capability.rs`).
@@ -94,5 +94,5 @@ Tapes are reproducible terminal automation scripts. See
 
 ## Sessions and Daemon
 
-TUIOS runs a Unix-socket daemon for session persistence. See
+TermOS runs a Unix-socket daemon for session persistence. See
 [DAEMON.md](DAEMON.md) for details.

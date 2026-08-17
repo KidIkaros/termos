@@ -9,7 +9,7 @@ use super::model::{SessionState, WindowState};
 /// The state directory: `$XDG_STATE_HOME/tuios/sessions` (or the platform
 /// default).
 pub fn state_dir() -> Option<PathBuf> {
-    dirs::state_dir().map(|d| d.join("tuios").join("sessions"))
+    dirs::state_dir().map(|d| d.join("termos").join("sessions"))
 }
 
 /// The state file for a session name.

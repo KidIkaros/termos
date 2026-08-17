@@ -9,13 +9,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-use tuios::config::UserConfig;
-use tuios::network::web::run_web_server;
+use termos::config::UserConfig;
+use termos::network::web::run_web_server;
 
 /// Connect to a TCP port and verify the SSH banner is received.
 #[tokio::test]
 async fn ssh_server_starts_and_accepts_connection() {
-    use tuios::network::ssh::{SshServerConfig, TuiosSshServer};
+    use termos::network::ssh::{SshServerConfig, TermosSshServer};
 
     // Generate a temporary host key.
     let key_dir = std::env::temp_dir().join(format!("tuios-ssh-test-{}", std::process::id()));
@@ -39,7 +39,7 @@ async fn ssh_server_starts_and_accepts_connection() {
     }
 
     let config = UserConfig::default();
-    let _server = TuiosSshServer::new(config);
+    let _server = TermosSshServer::new(config);
     let _server_cfg = SshServerConfig {
         addr: "127.0.0.1:0".to_string(),
         host_key_path: Some(key_path.to_string_lossy().into_owned()),
@@ -57,7 +57,7 @@ async fn ssh_server_starts_and_accepts_connection() {
     };
 
     // Spawn the server.
-    let server2 = TuiosSshServer::new(UserConfig::default());
+    let server2 = TermosSshServer::new(UserConfig::default());
     tokio::spawn(async move {
         let _ = server2.run(server_cfg2).await;
     });
@@ -130,7 +130,7 @@ async fn web_server_serves_index_html() {
 /// Verify the web server accepts a WebSocket upgrade at /ws.
 #[tokio::test]
 async fn web_websocket_upgrade() {
-    use tuios::network::web::run_web_server;
+    use termos::network::web::run_web_server;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

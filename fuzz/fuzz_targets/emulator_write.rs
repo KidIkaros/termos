@@ -10,7 +10,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use tuios::vt::Emulator;
+use termos::vt::Emulator;
 
 const WIDTH: i32 = 80;
 const HEIGHT: i32 = 24;

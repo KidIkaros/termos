@@ -1,6 +1,6 @@
-//! SSH server network mode — serves TUIOS sessions over SSH using `russh`.
+//! SSH server network mode — serves TermOS sessions over SSH using `russh`.
 //!
-//! Each SSH connection gets its own TUIOS session. The SSH channel's
+//! Each SSH connection gets its own TermOS session. The SSH channel's
 //! stdin/stdout is wired to a ratatui `CrosstermBackend` so the TUI renders
 //! over SSH. PTY resize requests from the SSH client resize the terminal.
 //!
@@ -28,10 +28,10 @@ pub struct SshServerConfig {
     pub host_key_path: Option<String>,
 }
 
-/// A TUIOS SSH server. Each connection gets a fresh `Os` with its own
+/// A TermOS SSH server. Each connection gets a fresh `Os` with its own
 /// windows and workspaces.
 #[derive(Clone)]
-pub struct TuiosSshServer {
+pub struct TermosSshServer {
     /// Per-client sessions: client_id -> (terminal, os).
     clients: Arc<Mutex<HashMap<usize, ClientSession>>>,
     /// The next client id.
@@ -91,7 +91,7 @@ impl std::io::Write for TerminalHandle {
     }
 }
 
-impl TuiosSshServer {
+impl TermosSshServer {
     pub fn new(config: UserConfig) -> Self {
         Self {
             clients: Arc::new(Mutex::new(HashMap::new())),
@@ -124,7 +124,7 @@ impl TuiosSshServer {
     }
 }
 
-impl Server for TuiosSshServer {
+impl Server for TermosSshServer {
     type Handler = Self;
     fn new_client(&mut self, _addr: Option<SocketAddr>) -> Self {
         self.clone()
@@ -132,7 +132,7 @@ impl Server for TuiosSshServer {
 }
 
 #[async_trait::async_trait]
-impl Handler for TuiosSshServer {
+impl Handler for TermosSshServer {
     type Error = Box<dyn std::error::Error + Send + Sync>;
 
     async fn auth_publickey(&mut self, _user: &str, _key: &PublicKey) -> Result<Auth, Self::Error> {
@@ -214,7 +214,7 @@ impl Handler for TuiosSshServer {
     }
 }
 
-impl Drop for TuiosSshServer {
+impl Drop for TermosSshServer {
     fn drop(&mut self) {
         let id = self.next_id.load(std::sync::atomic::Ordering::SeqCst);
         let clients = self.clients.clone();

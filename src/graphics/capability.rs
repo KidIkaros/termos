@@ -2,13 +2,13 @@
 //! `internal/config/hostterm.go` and the Kitty/Sixel detection in
 //! `internal/app/kitty_passthrough.go`.
 //!
-//! The probe is environmental (no DA1/DA2 queries): TUIOS reads
+//! The probe is environmental (no DA1/DA2 queries): TermOS reads
 //! `$TERM_PROGRAM`, `$TERM`, and the kitty/ghostty/alacritty-specific
 //! environment variables to decide which graphics protocols the host
 //! supports. A real DA query would race the PTY reader; the environment is
 //! authoritative on Linux and macOS where these terminals set it.
 
-/// The host terminal emulator TUIOS is running inside, as far as the
+/// The host terminal emulator TermOS is running inside, as far as the
 /// environment gives it away. `Unknown` is not a failure — it only means
 /// advice has to stay generic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -52,7 +52,7 @@ pub struct Capabilities {
     pub sixel: bool,
     /// The host terminal itself (for advice and placement decisions).
     pub host: HostTerminal,
-    /// A multiplexer (tmux/screen) sits between TUIOS and the host.
+    /// A multiplexer (tmux/screen) sits between TermOS and the host.
     pub inside_multiplexer: bool,
 }
 
@@ -144,7 +144,7 @@ where
     HostTerminal::Unknown
 }
 
-/// True if a multiplexer (tmux/screen) sits between TUIOS and the host.
+/// True if a multiplexer (tmux/screen) sits between TermOS and the host.
 pub fn inside_multiplexer() -> bool {
     inside_multiplexer_with(|k| std::env::var(k).ok())
 }

@@ -1,4 +1,4 @@
-//! Web server network mode — serves TUIOS over HTTP + WebSocket.
+//! Web server network mode — serves TermOS over HTTP + WebSocket.
 //!
 //! The Go reference uses a separate `tuios-web` binary with xterm.js for
 //! security isolation. The Rust port uses `axum` for HTTP and
@@ -60,7 +60,7 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_ws(socket, state))
 }
 
-/// Handle a WebSocket connection: spawn a TUIOS session and bridge I/O.
+/// Handle a WebSocket connection: spawn a TermOS session and bridge I/O.
 async fn handle_ws(socket: WebSocket, state: WebServerState) {
     let mut os = Os::new((*state.config).clone());
     os.width = 80;

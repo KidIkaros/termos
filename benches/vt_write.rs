@@ -8,7 +8,7 @@
 //! - `fullscreen-repaint`: an editor/dashboard repainting every row
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use tuios::vt::Emulator;
+use termos::vt::Emulator;
 
 const COLS: i32 = 207;
 const ROWS: i32 = 55;

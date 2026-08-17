@@ -1,11 +1,11 @@
-//! TUIOS — Terminal UI Operating System, ported to Rust.
+//! TermOS — Terminal UI Operating System, ported to Rust.
 //!
 //! The binary runs inside the existing terminal (like tmux/zellij): it takes
 //! over the screen, spawns shell sessions in panes, and manages them with a
 //! vim-like modal interface.
 //!
 //! Subcommands:
-//!   tuios daemon            run the session daemon in the foreground
+//!   termos daemon            run the session daemon in the foreground
 //!   tuios run [name]        start daemon, create/attach a session, run the TUI
 //!   tuios attach <name>     attach to an existing session in the TUI
 //!   tuios list | ls         list sessions
@@ -27,12 +27,12 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use tuios::app::input::{handle_key, handle_mouse, KeyResult};
-use tuios::app::render::render;
-use tuios::app::Os;
-use tuios::config::userconfig::UserConfig;
-use tuios::session::model::{SessionInfo, WindowInfo};
-use tuios::session::{self, protocol, Daemon, DaemonClient, Message, RemoteSink};
+use termos::app::input::{handle_key, handle_mouse, KeyResult};
+use termos::app::render::render;
+use termos::app::Os;
+use termos::config::userconfig::UserConfig;
+use termos::session::model::{SessionInfo, WindowInfo};
+use termos::session::{self, protocol, Daemon, DaemonClient, Message, RemoteSink};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
@@ -105,7 +105,7 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     cmd_tape_delete(name)
                 }
                 "dir" => {
-                    let dir = tuios::tape::tapes::tape_dir()?;
+                    let dir = termos::tape::tapes::tape_dir()?;
                     println!("{}", dir.display());
                     Ok(())
                 }
@@ -140,7 +140,7 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// The embedded agent skill document (`tuios --skill`).
-const SKILL_DOC: &str = include_str!("../skills/tuios/SKILL.md");
+const SKILL_DOC: &str = include_str!("../skills/termos/SKILL.md");
 
 /// The verbs the embedded skill documents, in a stable order.
 const VERBS: [&str; 7] = [
@@ -198,7 +198,7 @@ fn cmd_attach(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_tape_validate(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let content =
         std::fs::read_to_string(path).map_err(|e| format!("failed to read tape file: {e}"))?;
-    let (commands, parse_errors) = tuios::tape::parser::parse_file(&content);
+    let (commands, parse_errors) = termos::tape::parser::parse_file(&content);
     if !parse_errors.is_empty() {
         eprintln!("Parsing errors found:");
         for err in &parse_errors {
@@ -214,13 +214,13 @@ fn cmd_tape_validate(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 /// `tuios tape list` — list recorded tapes.
 fn cmd_tape_list() -> Result<(), Box<dyn std::error::Error>> {
-    let dir = tuios::tape::tapes::tape_dir()?;
+    let dir = termos::tape::tapes::tape_dir()?;
     println!("Tape Recordings");
     println!("Location: {}\n", dir.display());
-    let files = tuios::tape::tapes::list_tapes()?;
+    let files = termos::tape::tapes::list_tapes()?;
     if files.is_empty() {
         println!("No tape recordings found");
-        println!("Use Ctrl+B, T, r in TUIOS to start recording");
+        println!("Use Ctrl+B, T, r in TermOS to start recording");
         return Ok(());
     }
     for f in files {
@@ -233,7 +233,7 @@ fn cmd_tape_list() -> Result<(), Box<dyn std::error::Error>> {
 
 /// `tuios tape show <name>` — print a recording's content.
 fn cmd_tape_show(name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let path = tuios::tape::tapes::resolve_tape_path(name);
+    let path = termos::tape::tapes::resolve_tape_path(name);
     let content = std::fs::read_to_string(&path).map_err(|_| format!("no such tape: {name}"))?;
     print!("{content}");
     Ok(())
@@ -241,7 +241,7 @@ fn cmd_tape_show(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 /// `tuios tape delete <name>` — delete a recording.
 fn cmd_tape_delete(name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let path = tuios::tape::tapes::delete_tape(name)?;
+    let path = termos::tape::tapes::delete_tape(name)?;
     println!("deleted {}", path.display());
     Ok(())
 }
@@ -251,7 +251,7 @@ fn cmd_tape_delete(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_tape_exec(session: Option<&str>, path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let script =
         std::fs::read_to_string(path).map_err(|e| format!("failed to read tape file: {e}"))?;
-    let (commands, errors) = tuios::tape::parser::parse_file(&script);
+    let (commands, errors) = termos::tape::parser::parse_file(&script);
     if !errors.is_empty() || commands.is_empty() {
         return Err("tape script has no commands or contains errors".into());
     }
@@ -291,9 +291,9 @@ fn cmd_tape_exec(session: Option<&str>, path: &str) -> Result<(), Box<dyn std::e
 /// run. Returns the tape content when it may run.
 fn trust_gate(path: &str) -> Result<String, String> {
     use std::io::Write;
-    use tuios::tape::trust::Status;
+    use termos::tape::trust::Status;
 
-    let mut store = tuios::tape::trust::Store::load()?;
+    let mut store = termos::tape::trust::Store::load()?;
     let result = store.check(path)?;
     match result.status {
         Status::Trusted => Ok(String::from_utf8_lossy(&result.content).into_owned()),
@@ -328,7 +328,7 @@ fn cmd_tape_play(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Trust gate: content is the exact hashed bytes, so no re-read after the
     // check (TOCTOU-safe).
     let content = trust_gate(path)?;
-    let (commands, parse_errors) = tuios::tape::parser::parse_file(&content);
+    let (commands, parse_errors) = termos::tape::parser::parse_file(&content);
     if !parse_errors.is_empty() {
         eprintln!("Tape parsing errors:");
         for err in &parse_errors {
@@ -351,7 +351,7 @@ fn cmd_tape_play(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     // tapes, which prepend DisableAnimations).
     os.config.appearance.animations_enabled = false;
     os.script_mode = true;
-    os.script_player = Some(tuios::tape::player::Player::new(commands));
+    os.script_player = Some(termos::tape::player::Player::new(commands));
 
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -382,10 +382,10 @@ fn cmd_set_agent_state(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let state = args.first().ok_or(
         "usage: tuios set-agent-state <state> [-s session] [-w window] [-m message] [--harness H]",
     )?;
-    if tuios::app::agent_alert::parse_agent_state(state).is_none() {
+    if termos::app::agent_alert::parse_agent_state(state).is_none() {
         return Err(format!(
             "invalid state '{state}' (valid: {})",
-            tuios::app::agent_alert::AGENT_STATE_NAMES.join(", ")
+            termos::app::agent_alert::AGENT_STATE_NAMES.join(", ")
         )
         .into());
     }
@@ -529,7 +529,7 @@ fn cmd_agent_verb(args: &[String], verb: Verb) -> Result<(), Box<dyn std::error:
             }
             let mut data = Vec::new();
             for key in &positional {
-                match tuios::keys::encode_key_name(key) {
+                match termos::keys::encode_key_name(key) {
                     Some(bytes) => data.extend_from_slice(&bytes),
                     None => return Err(format!("unknown key '{key}'").into()),
                 }
@@ -657,7 +657,7 @@ enum RemoteEvent {
     TapeCommand {
         index: usize,
         total: usize,
-        command: tuios::tape::command::Command,
+        command: termos::tape::command::Command,
     },
     /// A remote tape finished.
     TapeFinished { total: usize },
@@ -1214,13 +1214,13 @@ mod tests {
     fn embedded_skill_matches_disk() {
         let on_disk = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/skills/tuios/SKILL.md"
+            "/skills/termos/SKILL.md"
         ))
-        .expect("read skills/tuios/SKILL.md");
+        .expect("read skills/termos/SKILL.md");
         assert_eq!(
             super::SKILL_DOC,
             on_disk,
-            "the embedded skill differs from skills/tuios/SKILL.md"
+            "the embedded skill differs from skills/termos/SKILL.md"
         );
     }
 }

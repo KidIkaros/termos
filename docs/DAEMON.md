@@ -28,7 +28,7 @@ PTY to a remote one.
 
 Unix domain socket (SOCK_STREAM) at:
 
-- `$TUIOS_SOCKET` if set,
+- `$TERMOS_SOCKET` if set,
 - else `$XDG_RUNTIME_DIR/tuios/tuios.sock`,
 - else `/tmp/tuios-<uid>.sock`.
 

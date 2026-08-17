@@ -8,7 +8,7 @@
 //! `--network ssh` / `--network web` flags.
 //!
 //! Architecture:
-//! - `ssh`: russh server that spawns a TUIOS session per connection,
+//! - `ssh`: russh server that spawns a TermOS session per connection,
 //!   forwarding PTY I/O and resize events. Graphics passthrough works
 //!   over SSH because the APC/DCS sequences are forwarded as-is.
 //! - `web`: axum HTTP server serves a static xterm.js frontend; a

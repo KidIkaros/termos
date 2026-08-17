@@ -6,7 +6,7 @@
 //! terminal) and 80x24 (common default).
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use tuios::vt::Emulator;
+use termos::vt::Emulator;
 
 fn fill_screen(emu: &mut Emulator, cols: i32, rows: i32) {
     for y in 1..=rows {

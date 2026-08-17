@@ -1,6 +1,6 @@
 # Tape Scripting
 
-Tapes are reproducible terminal automation scripts for TUIOS. They record
+Tapes are reproducible terminal automation scripts for TermOS. They record
 and replay keyboard input, window management actions, and mode changes.
 
 ## File Format

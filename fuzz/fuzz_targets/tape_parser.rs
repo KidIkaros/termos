@@ -8,5 +8,5 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|input: &str| {
-    let _ = tuios::tape::parser::parse_file(input);
+    let _ = termos::tape::parser::parse_file(input);
 });

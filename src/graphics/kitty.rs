@@ -6,7 +6,7 @@
 //! The Kitty graphics protocol uses APC (Application Program Command):
 //!   `\x1b_G <key=value;...> <payload> \x1b\`  (or `\x9b` for ST)
 //!
-//! TUIOS rewrites:
+//! TermOS rewrites:
 //!   - `i=<id>` to the host-side id (per-window remap)
 //!   - placement coordinates (`x=`, `y=`) to absolute screen positions
 //!   - and forwards the payload bytes verbatim (no decode/re-encode).

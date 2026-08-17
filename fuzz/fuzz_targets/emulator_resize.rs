@@ -6,7 +6,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use tuios::vt::Emulator;
+use termos::vt::Emulator;
 
 fuzz_target!(|input: (Vec<u8>, u8, u8)| {
     let (data, w, h) = input;

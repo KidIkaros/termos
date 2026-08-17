@@ -1,4 +1,4 @@
-//! TUIOS — a terminal multiplexer and window manager, ported to Rust.
+//! TermOS — a terminal multiplexer and window manager, ported to Rust.
 //!
 //! This crate mirrors the architecture of the Go TUIOS project:
 //! - [`vt`] — the VT emulator (parser + screen + scrollback)

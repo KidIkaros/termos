@@ -4,7 +4,7 @@
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
-use tuios::session::{Daemon, DaemonClient, Message};
+use termos::session::{Daemon, DaemonClient, Message};
 
 /// Point persistence at a throwaway directory so tests never touch (or
 /// resurrect from) the user's real state directory.
@@ -179,7 +179,7 @@ fn daemon_fires_window_lifecycle_hooks() {
         hook_cfg.insert(ev.to_string(), toml::Value::String("dummy".into()));
     }
     daemon.load_hooks(&hook_cfg);
-    let seen: Arc<Mutex<Vec<(tuios::hooks::Event, String, String)>>> =
+    let seen: Arc<Mutex<Vec<(termos::hooks::Event, String, String)>>> =
         Arc::new(Mutex::new(Vec::new()));
     let seen2 = Arc::clone(&seen);
     daemon.set_hook_runner(move |_, ctx| {
@@ -202,7 +202,7 @@ fn daemon_fires_window_lifecycle_hooks() {
         }
     };
 
-    let wait_until = |pred: &dyn Fn(&(tuios::hooks::Event, String, String)) -> bool| {
+    let wait_until = |pred: &dyn Fn(&(termos::hooks::Event, String, String)) -> bool| {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             let hit = seen.lock().unwrap().iter().any(pred);
@@ -216,7 +216,7 @@ fn daemon_fires_window_lifecycle_hooks() {
     // Creating a session spawns its first window (w0) → after-new-window.
     client.new_session("hooks", "/bin/sh").unwrap();
     assert!(wait_until(&|(e, sess, wid)| {
-        *e == tuios::hooks::Event::AfterNewWindow && sess == "hooks" && wid == "w0"
+        *e == termos::hooks::Event::AfterNewWindow && sess == "hooks" && wid == "w0"
     }));
 
     // Adding a window over the protocol → after-new-window for the new id.
@@ -237,7 +237,7 @@ fn daemon_fires_window_lifecycle_hooks() {
     }
     assert!(added, "no WindowAdded reply");
     assert!(wait_until(&|(e, sess, wid)| {
-        *e == tuios::hooks::Event::AfterNewWindow && sess == "hooks" && wid == "w1"
+        *e == termos::hooks::Event::AfterNewWindow && sess == "hooks" && wid == "w1"
     }));
 
     // Closing a window → after-close-window for that id.
@@ -257,7 +257,7 @@ fn daemon_fires_window_lifecycle_hooks() {
     }
     assert!(closed, "no WindowClosed reply");
     assert!(wait_until(&|(e, sess, wid)| {
-        *e == tuios::hooks::Event::AfterCloseWindow && sess == "hooks" && wid == "w1"
+        *e == termos::hooks::Event::AfterCloseWindow && sess == "hooks" && wid == "w1"
     }));
 }
 

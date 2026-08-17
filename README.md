@@ -1,4 +1,4 @@
-# TUIOS-RS
+# TermOS
 
 A Rust port of [TUIOS](https://github.com/Gaurav-Gosain/tuios), the terminal
 multiplexer and window manager.
@@ -21,7 +21,7 @@ multiplexer and window manager.
 - **Network modes** (optional): SSH server (russh) and web terminal
   (axum + xterm.js) behind the `network` cargo feature
 - **Hooks**: shell-command lifecycle hooks (TOML config)
-- **Agent state**: `--skill` mode for AI agents driving TUIOS panes
+- **Agent state**: `--skill` mode for AI agents driving TermOS panes
 
 ## Quick Start
 

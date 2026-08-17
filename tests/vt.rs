@@ -1,7 +1,7 @@
 //! VT emulator conformance smoke tests — verifying that common escape
 //! sequences produce the expected screen state.
 
-use tuios::vt::Emulator;
+use termos::vt::Emulator;
 
 /// Feed bytes and return the rendered screen text.
 fn run(bytes: &[u8], w: i32, h: i32) -> Emulator {
@@ -68,7 +68,7 @@ fn sgr_bold_sets_pen() {
 #[test]
 fn sgr_truecolor_sets_foreground() {
     let emu = run(b"\x1b[38;2;255;0;0m", 20, 2);
-    assert_eq!(emu.pen().fg, tuios::vt::Color::Rgb(255, 0, 0));
+    assert_eq!(emu.pen().fg, termos::vt::Color::Rgb(255, 0, 0));
 }
 
 #[test]

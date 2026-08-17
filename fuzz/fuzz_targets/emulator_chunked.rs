@@ -7,7 +7,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use tuios::vt::Emulator;
+use termos::vt::Emulator;
 
 fuzz_target!(|data: &[u8]| {
     let data = if data.len() > 32768 { &data[..32768] } else { data };

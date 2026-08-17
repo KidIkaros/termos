@@ -5,7 +5,7 @@
 //! `cargo test` for CI integration.
 
 use proptest::prelude::*;
-use tuios::vt::Emulator;
+use termos::vt::Emulator;
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
@@ -70,7 +70,7 @@ proptest! {
     /// The tape parser must never panic on arbitrary input.
     #[test]
     fn tape_parse_never_panics(ref input in ".{0,10000}") {
-        let (_commands, _errors) = tuios::tape::parser::parse_file(input);
+        let (_commands, _errors) = termos::tape::parser::parse_file(input);
         // Should not panic on any input.
     }
 }

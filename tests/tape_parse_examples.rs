@@ -1,5 +1,5 @@
 //! Every example tape must parse cleanly (errors collected, no panics).
-use tuios::tape::parser::parse_file;
+use termos::tape::parser::parse_file;
 
 #[test]
 fn example_tapes_parse() {

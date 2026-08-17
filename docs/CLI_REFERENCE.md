@@ -18,7 +18,7 @@ tuios [--debug] [--config <FILE>] [--skill]
 
 - `--debug`: enable debug logging
 - `--config <FILE>`: load a custom config file
-- `--skill`: print the agent skill sheet (recipes for driving TUIOS from
+- `--skill`: print the agent skill sheet (recipes for driving TermOS from
   inside a pane) and exit
 
 ### `tuios daemon`
@@ -89,7 +89,7 @@ Print the tape storage directory.
 
 ### `tuios --network ssh --host-key <PATH> [--addr <ADDR>]`
 
-Run the SSH server. Each connection gets a fresh TUIOS session.
+Run the SSH server. Each connection gets a fresh TermOS session.
 
 ### `tuios --network web [--addr <ADDR>]`
 
@@ -97,7 +97,7 @@ Run the web terminal server (xterm.js + WebSocket).
 
 ## Environment
 
-- `TUIOS_SOCKET`: override the daemon socket path
+- `TERMOS_SOCKET`: override the daemon socket path
 - `XDG_DATA_HOME`: tape storage and trust store location
 - `XDG_STATE_HOME`: session state location
 - `TERM_PROGRAM`: detected for graphics capability probing

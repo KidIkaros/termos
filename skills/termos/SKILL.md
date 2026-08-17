@@ -1,16 +1,16 @@
-# Driving TUIOS from a pane
+# Driving TermOS from a pane
 
-This document is for an **agent running inside a TUIOS pane** (or any program
-that wants to drive a TUIOS session programmatically). It is embedded in the
+This document is for an **agent running inside a TermOS pane** (or any program
+that wants to drive a TermOS session programmatically). It is embedded in the
 binary and printed by `tuios --skill`.
 
-## Detecting TUIOS
+## Detecting TermOS
 
-Every pane spawned by TUIOS gets these environment variables:
+Every pane spawned by TermOS gets these environment variables:
 
-- `TUIOS_ENV=1` — you are inside TUIOS.
-- `TUIOS_SESSION_ID=<name>` — the session this pane belongs to.
-- `TUIOS_WINDOW_ID=<id>` — this pane's window id.
+- `TERMOS_ENV=1` — you are inside TermOS.
+- `TERMOS_SESSION_ID=<name>` — the session this pane belongs to.
+- `TERMOS_WINDOW_ID=<id>` — this pane's window id.
 
 ## Addressing panes
 
@@ -83,7 +83,7 @@ tuios wait-for "\\$"                # wait for a shell prompt
 
 ### set-agent-state / get-agent-state — report pane state
 
-Agents report their state so TUIOS can surface which panes need a human.
+Agents report their state so TermOS can surface which panes need a human.
 States: `none`, `working`, `needs_input`, `idle`, `done`, `errored`.
 
 ```
@@ -97,12 +97,12 @@ tuios set-agent-state needs_input -m "waiting for approval"
 tuios set-agent-state done
 ```
 
-`[notifications.agent]` in the config decides what TUIOS does with these
+`[notifications.agent]` in the config decides what TermOS does with these
 transitions (dock message, terminal notification, sound, shell command).
 
 ## Best practices
 
 - Prefer `wait-for` over fixed sleeps: it is deterministic.
-- Check `TUIOS_ENV` before assuming the verb surface exists.
+- Check `TERMOS_ENV` before assuming the verb surface exists.
 - The message text passed to `set-agent-state -m` is free text; it travels as
   an environment variable, never as a shell command.

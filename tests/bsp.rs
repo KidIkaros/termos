@@ -1,7 +1,7 @@
 //! Integration tests for the BSP tree — verifying the port preserves the
 //! semantics of TUIOS `internal/layout/bsp.go`.
 
-use tuios::layout::{AutoScheme, BSPTree, Rect, SplitType};
+use termos::layout::{AutoScheme, BSPTree, Rect, SplitType};
 
 fn bounds() -> Rect {
     Rect {
@@ -127,7 +127,7 @@ fn resize_split_moves_divider() {
     tree.insert_window(1, -1, SplitType::None, 0.5, bounds(), 0);
     tree.insert_window(2, 1, SplitType::Vertical, 0.5, bounds(), 0);
 
-    use tuios::layout::ResizeEdge;
+    use termos::layout::ResizeEdge;
     // Drag the divider to x=30 (from window 1's right edge).
     let moved = tree.resize_split(1, ResizeEdge::Right, 30, bounds(), 0);
     assert!(moved);

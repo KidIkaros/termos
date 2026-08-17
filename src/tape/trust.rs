@@ -105,7 +105,7 @@ impl Store {
     /// Open (or create) the trust store at the default XDG location.
     pub fn load() -> std::result::Result<Self, String> {
         let base = dirs::data_dir().ok_or("no data dir")?;
-        Self::load_from_path(base.join("tuios").join("tape-trust.toml"))
+        Self::load_from_path(base.join("termos").join("tape-trust.toml"))
     }
 
     /// Open (or create) the trust store at `path`. A missing store is created

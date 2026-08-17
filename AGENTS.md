@@ -1,10 +1,10 @@
-# AGENTS.md - Agent Guide for TUIOS-RS
+# AGENTS.md - Agent Guide for TermOS
 
 This file is for an agent working on the Rust port of TUIOS.
 
 ## Project Overview
 
-TUIOS-RS is a Rust port of [TUIOS](https://github.com/Gaurav-Gosain/tuios),
+TermOS is a Rust port of [TUIOS](https://github.com/Gaurav-Gosain/tuios),
 the terminal multiplexer and window manager. It uses ratatui for rendering,
 crossterm for input, and nix for PTY management.
 
