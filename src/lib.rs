@@ -9,6 +9,7 @@
 //! - [`ui`] — shared rendering helpers
 //! - [`hooks`] — shell-command lifecycle hooks
 //! - [`keys`] — key-name encoding for verbs and tape scripting
+//! - [`tape`] — the `.tape` scripting language (lexer, parser, executor)
 
 pub mod app;
 pub mod config;
@@ -16,6 +17,7 @@ pub mod hooks;
 pub mod keys;
 pub mod layout;
 pub mod session;
+pub mod tape;
 pub mod terminal;
 pub mod ui;
 pub mod vt;
