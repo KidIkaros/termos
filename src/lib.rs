@@ -10,9 +10,11 @@
 //! - [`hooks`] — shell-command lifecycle hooks
 //! - [`keys`] — key-name encoding for verbs and tape scripting
 //! - [`tape`] — the `.tape` scripting language (lexer, parser, executor)
+//! - [`graphics`] — Kitty/Sixel graphics passthrough and placement tracking
 
 pub mod app;
 pub mod config;
+pub mod graphics;
 pub mod hooks;
 pub mod keys;
 pub mod layout;
