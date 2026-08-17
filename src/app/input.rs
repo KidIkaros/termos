@@ -127,6 +127,23 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         return handle_quit_confirmation(os, key);
     }
 
+    // During tape playback, Ctrl+P toggles pause/resume (Go's prefix routing).
+    if os.script_active()
+        && key.code == KeyCode::Char('p')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        os.script_paused = !os.script_paused;
+        os.notify(
+            if os.script_paused {
+                "tape paused (Ctrl+P to resume)"
+            } else {
+                "tape resumed"
+            },
+            "info",
+        );
+        return KeyResult::Consumed;
+    }
+
     // Modal overlays capture keys before the prefix and mode layers.
     if os.scrollback_mode {
         return handle_scrollback_mode(os, key);

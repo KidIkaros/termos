@@ -306,6 +306,20 @@ pub struct Os {
     /// Host-terminal sequences queued by alerts (OSC 9 / BEL), flushed by the
     /// event loop after each draw so they never interleave a frame.
     host_output: Vec<u8>,
+    /// Whether tape playback is active (`tape play`).
+    pub script_mode: bool,
+    /// Whether tape playback is paused (Ctrl+P).
+    pub script_paused: bool,
+    /// The active tape player, if any.
+    pub script_player: Option<crate::tape::player::Player>,
+    /// Sleep deadline armed by a Sleep/Wait command (None = not waiting).
+    script_sleep_until: Option<std::time::Instant>,
+    /// A pending WaitUntilRegex: (compiled pattern, deadline).
+    script_wait_regex: Option<(regex::Regex, std::time::Instant)>,
+    /// Expected window count after a NewWindow/Split in daemon mode; playback
+    /// holds until the pane arrives or the deadline passes.
+    script_await_windows: usize,
+    script_await_deadline: Option<std::time::Instant>,
 }
 
 /// A dock notification.
@@ -377,6 +391,13 @@ impl Os {
             pending_agent_alerts: HashMap::new(),
             sound_cue: agent_alert::SoundCue::new(),
             host_output: Vec::new(),
+            script_mode: false,
+            script_paused: false,
+            script_player: None,
+            script_sleep_until: None,
+            script_wait_regex: None,
+            script_await_windows: 0,
+            script_await_deadline: None,
         }
     }
 
@@ -675,6 +696,178 @@ impl Os {
             .and_then(|i| self.windows.get(i))
             .map(|w| w.agent_message.as_str())
             .unwrap_or("")
+    }
+
+    // -----------------------------------------------------------------------
+    // Tape playback
+    // -----------------------------------------------------------------------
+
+    /// The playback tick, called by the event loop each iteration (Go's
+    /// script block in `update.go`). Blocks on pane readiness, WaitUntilRegex,
+    /// and Sleep deadlines; executes the next command otherwise.
+    pub fn tick_script(&mut self) {
+        if !self.script_mode || self.script_paused {
+            return;
+        }
+        // Pane readiness gate: a pane an earlier command asked for must have
+        // turned up (or timed out) before the next command runs.
+        if !self.script_pane_ready() {
+            return;
+        }
+        // WaitUntilRegex blocking.
+        if self.script_wait_regex.is_some() && !self.check_script_wait_regex() {
+            return;
+        }
+        // Sleep blocking.
+        if let Some(until) = self.script_sleep_until {
+            if std::time::Instant::now() < until {
+                return;
+            }
+            self.script_sleep_until = None;
+        }
+
+        // Decide what the current command does without holding the player
+        // borrow across execution.
+        let mut action: Option<crate::tape::command::Command> = None;
+        let mut wait_regex: Option<crate::tape::command::Command> = None;
+        {
+            let Some(player) = self.script_player.as_mut() else {
+                return;
+            };
+            if player.is_finished() {
+                return;
+            }
+            let Some(next) = player.next_command().cloned() else {
+                return;
+            };
+            match next.type_ {
+                // Sleep and its Wait alias both just delay playback.
+                crate::tape::command::CommandType::Sleep
+                | crate::tape::command::CommandType::Wait
+                    if next.delay > std::time::Duration::ZERO =>
+                {
+                    self.script_sleep_until = Some(std::time::Instant::now() + next.delay);
+                    player.advance();
+                }
+                // Arm the wait; playback blocks above until it resolves.
+                crate::tape::command::CommandType::WaitUntilRegex => {
+                    wait_regex = Some(next);
+                    player.advance();
+                }
+                _ => {
+                    player.advance();
+                    action = Some(next);
+                }
+            }
+        }
+        if let Some(cmd) = wait_regex {
+            self.start_script_wait_regex(&cmd);
+        }
+        if let Some(cmd) = action {
+            let mut ce = crate::tape::executor::CommandExecutor::new(self);
+            if let Err(e) = ce.execute(&cmd) {
+                self.notify(format!("tape: {e}"), "error");
+            }
+        }
+    }
+
+    /// Arm the pane-readiness gate after a NewWindow/Split so playback holds
+    /// until the pane actually exists (matters in daemon mode, where the pane
+    /// arrives on a later state push).
+    fn await_new_window(&mut self) {
+        self.script_await_windows = self.windows.len();
+        self.script_await_deadline =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+    }
+
+    /// Whether playback may dispatch its next command: false only while a pane
+    /// an earlier command asked for has not turned up yet. The timeout is
+    /// reported, not swallowed.
+    fn script_pane_ready(&mut self) -> bool {
+        if self.script_await_windows == 0 {
+            return true;
+        }
+        if self.windows.len() >= self.script_await_windows {
+            self.script_await_windows = 0;
+            self.script_await_deadline = None;
+            return true;
+        }
+        if let Some(deadline) = self.script_await_deadline {
+            if std::time::Instant::now() < deadline {
+                return false;
+            }
+        }
+        self.script_await_windows = 0;
+        self.script_await_deadline = None;
+        self.notify(
+            "Tape: the new pane never appeared; the rest of the tape will run in the current pane",
+            "error",
+        );
+        true
+    }
+
+    /// Arm a WaitUntilRegex condition: Args[0] is the pattern, Args[1] the
+    /// optional timeout in milliseconds (default 5000). A bad or missing
+    /// pattern is reported and the wait is skipped.
+    fn start_script_wait_regex(&mut self, cmd: &crate::tape::command::Command) {
+        let Some(pattern) = cmd.args.first() else {
+            self.notify("WaitUntilRegex: missing pattern", "error");
+            return;
+        };
+        let re = match regex::Regex::new(pattern) {
+            Ok(re) => re,
+            Err(e) => {
+                self.notify(format!("WaitUntilRegex: invalid pattern: {e}"), "error");
+                return;
+            }
+        };
+        let timeout_ms = cmd
+            .args
+            .get(1)
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&ms| ms > 0)
+            .unwrap_or(5000);
+        self.script_wait_regex =
+            Some((re, std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms)));
+    }
+
+    /// Whether a pending WaitUntilRegex condition is satisfied (match against
+    /// the focused window's screen, or deadline passed with a warning).
+    fn check_script_wait_regex(&mut self) -> bool {
+        let Some((re, deadline)) = self.script_wait_regex.clone() else {
+            return true;
+        };
+        let matched = self
+            .focused_window
+            .and_then(|i| self.windows.get(i))
+            .and_then(|w| w.emulator.lock().ok())
+            .map(|emu| re.is_match(&emu.to_string()))
+            .unwrap_or(false);
+        if matched {
+            self.script_wait_regex = None;
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            self.notify("WaitUntilRegex: timed out", "warning");
+            self.script_wait_regex = None;
+            return true;
+        }
+        false
+    }
+
+    /// True while a tape is playing (for the dock indicator).
+    pub fn script_active(&self) -> bool {
+        self.script_mode
+            && self
+                .script_player
+                .as_ref()
+                .map(|p| !p.is_finished())
+                .unwrap_or(false)
+    }
+
+    /// The current tape progress percentage, if playing.
+    pub fn script_progress(&self) -> Option<usize> {
+        self.script_player.as_ref().map(|p| p.progress())
     }
 
     // -----------------------------------------------------------------------
@@ -1574,8 +1767,9 @@ impl Os {
     pub fn content_position_at(&self, window: usize, column: i32, row: i32) -> Option<(usize, i32)> {
         let layout = self.current_layout();
         let rect = layout.get(&(window as i32))?;
-        let rel_row = (row - rect.y).max(0);
-        let rel_col = (column - rect.x).max(0);
+        // The pane border consumes the outer ring; content starts one cell in.
+        let rel_row = (row - rect.y - 1).max(0);
+        let rel_col = (column - rect.x - 1).max(0);
         let w = self.windows.get(window)?;
         let emu = w.emulator.lock().ok()?;
         let line = emu.content_index_for_view_row(rel_row);
@@ -1690,7 +1884,10 @@ impl crate::tape::executor::TapeExecutor for Os {
 
     fn create_new_window(&mut self) -> Result<(), String> {
         let shell = self.default_shell();
-        self.spawn_window(&shell, Box::new(|| {})).map(|_| ())
+        let idx = self.spawn_window(&shell, Box::new(|| {})).map_err(|e| e.to_string())?;
+        self.await_new_window();
+        let _ = idx;
+        Ok(())
     }
 
     fn create_new_window_with_name(&mut self, name: &str) -> Result<(), String> {
@@ -1699,6 +1896,7 @@ impl crate::tape::executor::TapeExecutor for Os {
             .spawn_window(&shell, Box::new(|| {}))
             .map_err(|e| e.to_string())?;
         self.rename_window(idx, name);
+        self.await_new_window();
         Ok(())
     }
 
@@ -1809,12 +2007,18 @@ impl crate::tape::executor::TapeExecutor for Os {
 
     fn split_horizontal(&mut self) -> Result<(), String> {
         let shell = self.default_shell();
-        self.split(SplitType::Horizontal, &shell, Box::new(|| {})).map(|_| ())
+        self.split(SplitType::Horizontal, &shell, Box::new(|| {}))
+            .map(|_| {
+                self.await_new_window();
+            })
     }
 
     fn split_vertical(&mut self) -> Result<(), String> {
         let shell = self.default_shell();
-        self.split(SplitType::Vertical, &shell, Box::new(|| {})).map(|_| ())
+        self.split(SplitType::Vertical, &shell, Box::new(|| {}))
+            .map(|_| {
+                self.await_new_window();
+            })
     }
 
     fn rotate_split(&mut self) -> Result<(), String> {
@@ -1901,7 +2105,10 @@ impl crate::tape::executor::TapeExecutor for Os {
 
     fn smart_split_focused(&mut self) -> Result<(), String> {
         let shell = self.default_shell();
-        self.split(SplitType::None, &shell, Box::new(|| {})).map(|_| ())
+        self.split(SplitType::None, &shell, Box::new(|| {}))
+            .map(|_| {
+                self.await_new_window();
+            })
     }
 
     fn show_command_palette(&mut self) -> Result<(), String> {
@@ -2183,11 +2390,11 @@ mod tests {
     #[test]
     fn mouse_selection_yanks_on_release() {
         let mut os = os_with_window();
-        // Click at content (line 0, col 0) then release over (0, 4).
-        // The pane rect is (0,0,80,24-dock) so screen (rect.x, rect.y) maps
-        // to content line 0.
-        os.begin_mouse_selection(0, 0, 0);
-        os.extend_mouse_selection(0, 4, 0);
+        // Click at content (line 0, col 0) then release over (0, 4). The pane
+        // rect is (0,0,80,24-dock) with a 1-cell border ring, so screen
+        // (1,1)..(5,1) maps to content cols 0..4 ("hello").
+        os.begin_mouse_selection(0, 1, 1);
+        os.extend_mouse_selection(0, 5, 1);
         assert!(os.mouse_selecting);
         assert!(!os.selection.as_ref().unwrap().is_empty());
         os.end_mouse_selection();
@@ -2199,6 +2406,175 @@ mod tests {
     impl PtySink for NullSink {
         fn write(&self, _data: &[u8]) {}
         fn resize(&self, _size: WinSize) {}
+    }
+
+    #[test]
+    fn tape_script_tick_drives_commands_in_order() {
+        use crate::tape::command::{Command, CommandType};
+        use crate::tape::player::Player;
+
+        let mut os = os_with_window();
+        let cmd = |type_: CommandType, args: &[&str]| Command {
+            type_,
+            args: args.iter().map(|s| s.to_string()).collect(),
+            delay: std::time::Duration::ZERO,
+            line: 1,
+            column: 1,
+            raw: String::new(),
+        };
+        os.script_mode = true;
+        let mut sleep = cmd(CommandType::Sleep, &["100ms"]);
+        sleep.delay = std::time::Duration::from_millis(100);
+        os.script_player = Some(Player::new(vec![
+            cmd(CommandType::Type, &["hello"]),
+            sleep,
+            cmd(CommandType::Enter, &[]),
+        ]));
+
+        // First tick executes Type (sent to the focused window) and advances.
+        os.tick_script();
+        assert_eq!(os.script_player.as_ref().unwrap().current_index(), 1);
+
+        // The tick that reaches Sleep arms the deadline and advances past it.
+        os.tick_script();
+        assert_eq!(os.script_player.as_ref().unwrap().current_index(), 2);
+        assert!(os.script_sleep_until.is_some());
+
+        // The next tick blocks while the deadline is in the future.
+        os.tick_script();
+        assert_eq!(os.script_player.as_ref().unwrap().current_index(), 2);
+
+        // Force the sleep deadline into the past; the next tick clears it and
+        // executes the Enter command.
+        os.script_sleep_until =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        os.tick_script();
+        assert!(os.script_player.as_ref().unwrap().is_finished());
+    }
+
+    #[test]
+    fn tape_script_wait_until_regex_matches_screen() {
+        use crate::tape::command::{Command, CommandType};
+        use crate::tape::player::Player;
+
+        let mut os = os_with_window(); // emulator contains "hello world"
+        let cmd = Command {
+            type_: CommandType::WaitUntilRegex,
+            args: vec!["hello".to_string()],
+            delay: std::time::Duration::ZERO,
+            line: 1,
+            column: 1,
+            raw: String::new(),
+        };
+        os.script_mode = true;
+        os.script_player = Some(Player::new(vec![cmd]));
+
+        // The first tick arms the wait without advancing past it.
+        os.tick_script();
+        assert!(os.script_wait_regex.is_some());
+        assert_eq!(os.script_player.as_ref().unwrap().current_index(), 1);
+
+        // The next tick matches the screen content and finishes.
+        os.tick_script();
+        assert!(os.script_wait_regex.is_none());
+        assert!(os.script_player.as_ref().unwrap().is_finished());
+    }
+
+    #[test]
+    fn tape_script_invalid_regex_notifies_and_skips() {
+        use crate::tape::command::{Command, CommandType};
+        use crate::tape::player::Player;
+
+        let mut os = os_with_window();
+        let cmd = Command {
+            type_: CommandType::WaitUntilRegex,
+            args: vec!["[".to_string()], // invalid regex
+            delay: std::time::Duration::ZERO,
+            line: 1,
+            column: 1,
+            raw: String::new(),
+        };
+        os.script_mode = true;
+        os.script_player = Some(Player::new(vec![cmd]));
+        os.tick_script();
+        assert!(os.script_wait_regex.is_none());
+        assert!(os.script_player.as_ref().unwrap().is_finished());
+        assert!(
+            os.notifications
+                .iter()
+                .any(|n| n.message.contains("invalid pattern")),
+            "expected an invalid-pattern notification"
+        );
+    }
+
+    #[test]
+    fn tape_script_paused_blocks_tick() {
+        use crate::tape::command::{Command, CommandType};
+        use crate::tape::player::Player;
+
+        let mut os = os_with_window();
+        let cmd = Command {
+            type_: CommandType::Enter,
+            args: vec![],
+            delay: std::time::Duration::ZERO,
+            line: 1,
+            column: 1,
+            raw: String::new(),
+        };
+        os.script_mode = true;
+        os.script_paused = true;
+        os.script_player = Some(Player::new(vec![cmd]));
+        os.tick_script();
+        assert_eq!(os.script_player.as_ref().unwrap().current_index(), 0);
+    }
+
+    #[test]
+    fn render_shows_pane_content_inside_the_border() {
+        // Regression: the pane border ring must not wipe the content drawn
+        // under it, and content must be inset by one cell.
+        use crate::app::render::render;
+        use crate::terminal::pty::WinSize;
+        use crate::terminal::window::Window;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut os = test_os();
+        let win = Window::without_pty(
+            "w0".to_string(),
+            "w0".to_string(),
+            WinSize { cols: 20, rows: 4 },
+        );
+        os.windows.push(win);
+        {
+            let w = &os.windows[0];
+            let mut emu = w.emulator.lock().unwrap();
+            emu.write(b"hello");
+        }
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+        os.sync_window_sizes();
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 25)).unwrap();
+        terminal.draw(|f| render(&os, f.buffer_mut())).unwrap();
+        let buf = terminal.backend().buffer();
+        // The border ring: row 0 is the top edge, column 0/79 are the sides.
+        assert_eq!(buf[(0, 0)].symbol(), "╭");
+        // Content starts one cell in from the border.
+        let row: String = (0..8)
+            .map(|col| {
+                let sym = buf[(col, 1)].symbol();
+                if sym == " " {
+                    ' '
+                } else {
+                    sym.chars().next().unwrap()
+                }
+            })
+            .collect();
+        assert_eq!(row, "│hello  ");
     }
 
     #[test]

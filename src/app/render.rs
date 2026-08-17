@@ -247,16 +247,22 @@ fn paint_emulator(
     rect: TuiRect,
     theme: Option<&crate::config::theme::Theme>,
 ) {
+    // The pane border consumes the outer ring; content lives one cell in.
+    let inner_x = rect.x + 1;
+    let inner_y = rect.y + 1;
+    let inner_w = rect.width.saturating_sub(2);
+    let inner_h = rect.height.saturating_sub(2);
+    if inner_w == 0 || inner_h == 0 {
+        return;
+    }
+
     let lines = emu.render_view_lines();
-    for (row_idx, row) in lines.iter().take(rect.height as usize).enumerate() {
-        let y = rect.y + row_idx as u16;
-        if y >= rect.y + rect.height {
-            break;
-        }
+    for (row_idx, row) in lines.iter().take(inner_h as usize).enumerate() {
+        let y = inner_y + row_idx as u16;
         let mut col = 0u16;
-        for (content, style) in row.iter().take(rect.width as usize) {
-            let x = rect.x + col;
-            if x >= rect.x + rect.width {
+        for (content, style) in row.iter().take(inner_w as usize) {
+            let x = inner_x + col;
+            if x >= inner_x + inner_w {
                 break;
             }
             let cell = &mut buf[(x, y)];
@@ -273,9 +279,9 @@ fn paint_emulator(
     if !emu.in_scrollback() {
         let cursor = emu.cursor_position();
         if !emu.screen().cursor.hidden {
-            let cx = rect.x + cursor.x.max(0) as u16;
-            let cy = rect.y + cursor.y.max(0) as u16;
-            if cx < rect.x + rect.width && cy < rect.y + rect.height {
+            let cx = inner_x + cursor.x.max(0) as u16;
+            let cy = inner_y + cursor.y.max(0) as u16;
+            if cx < inner_x + inner_w && cy < inner_y + inner_h {
                 let cell = &mut buf[(cx, cy)];
                 let mut style = cell.style();
                 style = style.add_modifier(Modifier::REVERSED);
@@ -297,13 +303,16 @@ pub fn paint_selection(
     };
     let (l_lo, l_hi) = sel.line_range();
     let (c_lo, c_hi) = sel.col_range();
-    for row_idx in 0..rect.height as i32 {
+    // Content is inset by the border ring (one cell in from the rect edge).
+    let inner_w = rect.width.saturating_sub(2);
+    let inner_h = rect.height.saturating_sub(2);
+    for row_idx in 0..inner_h as i32 {
         let content_line = emu.content_index_for_view_row(row_idx);
         if content_line >= l_lo && content_line <= l_hi {
-            let y = rect.y + row_idx as u16;
+            let y = rect.y + 1 + row_idx as u16;
             for col in c_lo..=c_hi {
-                let x = rect.x + col as u16;
-                if x < rect.x + rect.width && y < rect.y + rect.height {
+                let x = rect.x + 1 + col as u16;
+                if x < rect.x + 1 + inner_w && y < rect.y + 1 + inner_h {
                     let cell = &mut buf[(x, y)];
                     let style = cell.style().add_modifier(Modifier::REVERSED);
                     cell.set_style(style);
@@ -410,13 +419,15 @@ fn draw_pane_border(
                 .add_modifier(if focused { Modifier::BOLD } else { Modifier::empty() }),
         ));
     let inner = rect;
-    // Draw the block manually so we can reuse `rect` without moving it.
+    // Draw the block manually so we can reuse `rect` without moving it. Only
+    // non-space cells are copied: Block::render styles the whole area, and
+    // copying styled interior spaces would wipe the pane content drawn first.
     let mut block_buf = Buffer::empty(inner);
     block.render(inner, &mut block_buf);
     for y in 0..inner.height {
         for x in 0..inner.width {
             let src = block_buf.cell((x, y)).unwrap();
-            if src.symbol() != " " || src.style().fg.is_some() {
+            if src.symbol() != " " {
                 buf[(inner.x + x, inner.y + y)] = src.clone();
             }
         }
@@ -456,6 +467,12 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
     let mut text = format!(" {} {}:{} ", mode_name, os.current_workspace, sorted_ids.len());
     if os.prefix != Prefix::None {
         text.push_str("⌨ ");
+    }
+    // Tape playback progress indicator.
+    if os.script_active() {
+        let pct = os.script_progress().unwrap_or(0);
+        let state = if os.script_paused { "⏸" } else { "▶" };
+        text.push_str(&format!(" {state} tape {pct:>3}%"));
     }
     // Agent-state indicator for the focused pane.
     let agent = os.focused_agent_state();

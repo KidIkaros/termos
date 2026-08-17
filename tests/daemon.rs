@@ -314,7 +314,7 @@ fn daemon_set_agent_state_broadcasts_to_clients() {
     );
 
     // An attached client also sees the state in a fresh attach (WindowInfo).
-    let mut fresh = DaemonClient::connect_to(&socket).unwrap();
+    let fresh = DaemonClient::connect_to(&socket).unwrap();
     let windows = fresh.attach("agent").unwrap();
     assert_eq!(windows[0].agent_state, "needs_input");
     assert_eq!(windows[0].agent_harness, "claude-code");

@@ -84,7 +84,20 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
-        other => Err(format!("unknown command '{other}' (try: daemon, run, attach, list, kill, set-agent-state, get-agent-state, send-keys, send-text, capture-pane, wait-for, list-verbs)").into()),
+        "tape" => {
+            let sub = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            match sub {
+                "play" => {
+                    let file = args.get(3).ok_or("usage: tuios tape play <file.tape>")?;
+                    cmd_tape_play(file)
+                }
+                other => Err(format!(
+                    "unknown tape subcommand '{other}' (try: play, validate, list, show, delete, dir, exec)"
+                )
+                .into()),
+            }
+        }
+        other => Err(format!("unknown command '{other}' (try: daemon, run, attach, list, kill, set-agent-state, get-agent-state, send-keys, send-text, capture-pane, wait-for, list-verbs, tape)").into()),
     }
 }
 
@@ -141,6 +154,57 @@ fn cmd_kill(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_attach(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     run_remote_tui(name)
+}
+
+/// `tuios tape play <file.tape>` — run the TUI with the tape driving it.
+fn cmd_tape_play(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read tape file: {e}"))?;
+    let (commands, parse_errors) = tuios::tape::parser::parse_file(&content);
+    if !parse_errors.is_empty() {
+        eprintln!("Tape parsing errors:");
+        for err in &parse_errors {
+            eprintln!("  {err}");
+        }
+        return Err("failed to parse tape file".into());
+    }
+    if commands.is_empty() {
+        return Err("tape has no commands".into());
+    }
+
+    println!("Preparing tape script: {path}");
+    println!("Total commands: {}", commands.len());
+    println!("Press Ctrl+C to cancel, Ctrl+P to pause/resume playback");
+
+    let config = UserConfig::load();
+    let mut os = Os::new(config);
+    // Force animations off for deterministic playback (matching recorded
+    // tapes, which prepend DisableAnimations).
+    os.config.appearance.animations_enabled = false;
+    os.script_mode = true;
+    os.script_player = Some(tuios::tape::player::Player::new(commands));
+
+    enable_raw_mode()?;
+    let mut stdout = stdout();
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    set_os_size(&mut os);
+
+    let result = run_event_loop(&mut os, &mut terminal);
+
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        crossterm::event::DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+    result
 }
 
 /// `tuios set-agent-state <state> [-s session] [-w window] [-m message]
@@ -356,15 +420,13 @@ fn cmd_agent_verb(args: &[String], verb: Verb) -> Result<(), Box<dyn std::error:
     }
 }
 
-/// Read messages until a non-echo reply (or an error) arrives.
+/// Read until a non-echo reply (or an error) arrives.
 fn recv_reply(client: &DaemonClient) -> Result<Message, Box<dyn std::error::Error>> {
     client.set_read_timeout(Duration::from_secs(10))?;
-    loop {
-        match client.recv() {
-            Ok(Message::Error { message }) => return Err(message.into()),
-            Ok(other) => return Ok(other),
-            Err(e) => return Err(format!("no reply from daemon: {e}").into()),
-        }
+    match client.recv() {
+        Ok(Message::Error { message }) => Err(message.into()),
+        Ok(other) => Ok(other),
+        Err(e) => Err(format!("no reply from daemon: {e}").into()),
     }
 }
 
@@ -637,6 +699,7 @@ fn run_remote_event_loop(
 
         // Render + input.
         os.tick_agent_alerts();
+        os.tick_script();
         os.sync_window_sizes();
         if last_render.elapsed() >= frame_budget {
             terminal.draw(|frame| {
@@ -877,6 +940,8 @@ fn run_event_loop(
     loop {
         // Raise any agent alerts whose settle window has expired.
         os.tick_agent_alerts();
+        // Advance tape playback (blocks internally on sleeps/waits).
+        os.tick_script();
 
         // Sync window sizes to the current layout.
         os.sync_window_sizes();
