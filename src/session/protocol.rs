@@ -112,6 +112,17 @@ pub enum Message {
     },
     /// Daemon → client: the wait outcome.
     WaitResult { window: String, matched: bool },
+    /// Client → daemon: execute a tape script in a session (`tape exec`).
+    /// The daemon parses it and streams the commands to attached clients.
+    TapeExecute { session: String, script: String },
+    /// Daemon → client: one tape command from a remote `tape exec`.
+    TapeCommand {
+        index: usize,
+        total: usize,
+        command: crate::tape::command::Command,
+    },
+    /// Daemon → client: a remote tape finished.
+    TapeFinished { total: usize },
     /// Daemon → client: an error reply.
     Error { message: String },
 }

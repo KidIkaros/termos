@@ -813,6 +813,37 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                     }
                 }
             }
+            Message::TapeExecute { session, script } => {
+                // Parse the tape; broadcast each command to the session's
+                // attached clients, which run them against their app state
+                // (Go's RemoteTapeCommandMsg flow).
+                let (commands, errors) = crate::tape::parser::parse_file(&script);
+                if !errors.is_empty() || commands.is_empty() {
+                    let _ = send(&writer, &Message::Error {
+                        message: if commands.is_empty() {
+                            "tape script has no commands or contains errors".into()
+                        } else {
+                            "tape script has parsing errors".into()
+                        },
+                    });
+                    continue;
+                }
+                let total = commands.len();
+                for (i, cmd) in commands.iter().enumerate() {
+                    daemon.broadcast_event(
+                        &session,
+                        &Message::TapeCommand {
+                            index: i,
+                            total,
+                            command: cmd.clone(),
+                        },
+                    );
+                }
+                daemon.broadcast_event(&session, &Message::TapeFinished { total });
+                // Acknowledge the requesting client so `tape exec` can exit
+                // cleanly once the broadcast completes.
+                let _ = send(&writer, &Message::TapeFinished { total });
+            }
             Message::GetAgentState { session, window } => {
                 let Some(target_session) = resolve_session(&attached, &session) else {
                     let _ = send(&writer, &Message::Error {

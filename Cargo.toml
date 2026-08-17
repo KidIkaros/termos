@@ -47,5 +47,8 @@ uuid = { version = "1", features = ["v4"] }
 # Regex for the wait-for verb
 regex = "1"
 
+# SHA-256 for the tape trust store
+sha2 = "0.10"
+
 [dev-dependencies]
 tempfile = "3"

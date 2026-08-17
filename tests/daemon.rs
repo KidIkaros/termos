@@ -411,6 +411,7 @@ fn daemon_agent_verbs_work_headlessly() {
     );
 
     // get-agent-state starts at none and reflects set-agent-state.
+
     client
         .send(&Message::GetAgentState {
             session: Some("verbs".to_string()),
@@ -449,4 +450,56 @@ fn daemon_agent_verbs_work_headlessly() {
         }
     }
     assert_eq!(state, "working");
+}
+
+/// `tape exec` streams parsed commands to the session's attached clients.
+#[test]
+fn daemon_tape_exec_broadcasts_commands() {
+    isolate_state_dir();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("tuios.sock");
+
+    let daemon = Arc::new(Daemon::new());
+    let path = socket.clone();
+    std::thread::spawn(move || {
+        let _ = daemon.run(&path);
+    });
+
+    let client = loop {
+        match DaemonClient::connect_to(&socket) {
+            Ok(c) => break c,
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    client.new_session("exec", "/bin/sh").unwrap();
+    client.attach("exec").unwrap();
+
+    let reporter = DaemonClient::connect_to(&socket).unwrap();
+    reporter
+        .send(&Message::TapeExecute {
+            session: "exec".to_string(),
+            script: "Type \"hi\"\nEnter\nSleep 100ms\n".to_string(),
+        })
+        .unwrap();
+
+    client.set_read_timeout(Duration::from_secs(3)).unwrap();
+    let mut commands = 0usize;
+    let mut finished = false;
+    for _ in 0..40 {
+        match client.recv() {
+            Ok(Message::TapeCommand { index, total, .. }) => {
+                commands += 1;
+                assert!(index < total);
+            }
+            Ok(Message::TapeFinished { total }) => {
+                finished = true;
+                assert_eq!(total, 3);
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert_eq!(commands, 3, "expected 3 TapeCommand frames");
+    assert!(finished, "no TapeFinished frame");
 }

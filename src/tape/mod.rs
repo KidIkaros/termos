@@ -10,3 +10,4 @@ pub mod player;
 pub mod recorder;
 pub mod tapes;
 pub mod token;
+pub mod trust;

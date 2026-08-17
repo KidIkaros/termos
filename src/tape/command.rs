@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 /// The type of a tape command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CommandType {
     Type,
     Sleep,
@@ -75,7 +76,7 @@ impl CommandType {
 }
 
 /// A parsed tape command.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Command {
     pub type_: CommandType,
     /// Command arguments.

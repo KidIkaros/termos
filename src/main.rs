@@ -109,6 +109,26 @@ fn dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     println!("{}", dir.display());
                     Ok(())
                 }
+                "exec" => {
+                    let mut session: Option<String> = None;
+                    let mut file: Option<String> = None;
+                    let mut i = 3;
+                    while i < args.len() {
+                        match args[i].as_str() {
+                            "-s" | "--session" => {
+                                i += 1;
+                                session = args.get(i).cloned();
+                            }
+                            a if a.starts_with('-') => {
+                                return Err(format!("unknown flag '{a}'").into());
+                            }
+                            a => file = Some(a.to_string()),
+                        }
+                        i += 1;
+                    }
+                    let file = file.ok_or("usage: tuios tape exec -s <session> <file.tape>")?;
+                    cmd_tape_exec(session.as_deref(), &file)
+                }
                 other => Err(format!(
                     "unknown tape subcommand '{other}' (try: play, validate, list, show, delete, dir, exec)"
                 )
@@ -227,10 +247,88 @@ fn cmd_tape_delete(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `tuios tape exec -s <session> <file.tape>` — run a tape headlessly against
+/// a running daemon session's attached clients.
+fn cmd_tape_exec(session: Option<&str>, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let script = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read tape file: {e}"))?;
+    let (commands, errors) = tuios::tape::parser::parse_file(&script);
+    if !errors.is_empty() || commands.is_empty() {
+        return Err("tape script has no commands or contains errors".into());
+    }
+
+    let client = DaemonClient::connect()?;
+    let session = match session {
+        Some(s) => s.to_string(),
+        None => {
+            let sessions = client.list()?;
+            match sessions.len() {
+                1 => sessions[0].name.clone(),
+                0 => return Err("no sessions; create one with `tuios run`".into()),
+                _ => return Err("multiple sessions; pass -s <session>".into()),
+            }
+        }
+    };
+    client.send(&Message::TapeExecute {
+        session: session.clone(),
+        script,
+    })?;
+    client.set_read_timeout(Duration::from_secs(60))?;
+    loop {
+        match client.recv() {
+            Ok(Message::Error { message }) => return Err(message.into()),
+            Ok(Message::TapeFinished { total }) => {
+                println!("{session}: tape finished ({total} commands)");
+                return Ok(());
+            }
+            Ok(_) => continue,
+            Err(e) => return Err(format!("no reply from daemon: {e}").into()),
+        }
+    }
+}
+
+/// The trust gate for playing a tape file: trusted tapes run, denied or
+/// ineligible tapes explain why, and untrusted tapes prompt before the first
+/// run. Returns the tape content when it may run.
+fn trust_gate(path: &str) -> Result<String, String> {
+    use std::io::Write;
+    use tuios::tape::trust::Status;
+
+    let mut store = tuios::tape::trust::Store::load()?;
+    let result = store.check(path)?;
+    match result.status {
+        Status::Trusted => Ok(String::from_utf8_lossy(&result.content).into_owned()),
+        Status::Denied => Err("this tape was denied; move or rename it to run it again".into()),
+        Status::Ineligible => Err(format!("tape is ineligible: {}", result.reason)),
+        Status::Untrusted => {
+            eprintln!(
+                "This tape has not been trusted yet: {} (sha256 {})",
+                result.path, result.hash
+            );
+            eprint!("Trust and run it? [y/N/d(eny)] ");
+            std::io::stdout().flush().ok();
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer).ok();
+            match answer.trim().to_ascii_lowercase().as_str() {
+                "y" | "yes" => {
+                    store.trust(&result.path, &result.hash)?;
+                    Ok(String::from_utf8_lossy(&result.content).into_owned())
+                }
+                "d" | "deny" => {
+                    store.deny(&result.path)?;
+                    Err("tape denied".into())
+                }
+                _ => Err("aborted".into()),
+            }
+        }
+    }
+}
+
 /// `tuios tape play <file.tape>` — run the TUI with the tape driving it.
 fn cmd_tape_play(path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("failed to read tape file: {e}"))?;
+    // Trust gate: content is the exact hashed bytes, so no re-read after the
+    // check (TOCTOU-safe).
+    let content = trust_gate(path)?;
     let (commands, parse_errors) = tuios::tape::parser::parse_file(&content);
     if !parse_errors.is_empty() {
         eprintln!("Tape parsing errors:");
@@ -549,6 +647,14 @@ enum RemoteEvent {
         message: String,
         harness: String,
     },
+    /// One command from a remote `tape exec`.
+    TapeCommand {
+        index: usize,
+        total: usize,
+        command: tuios::tape::command::Command,
+    },
+    /// A remote tape finished.
+    TapeFinished { total: usize },
     /// The daemon reported an error.
     Error(String),
 }
@@ -677,6 +783,20 @@ fn spawn_reader(
                         harness,
                     });
                 }
+                Message::TapeCommand {
+                    index,
+                    total,
+                    command,
+                } => {
+                    let _ = events.send(RemoteEvent::TapeCommand {
+                        index,
+                        total,
+                        command,
+                    });
+                }
+                Message::TapeFinished { total } => {
+                    let _ = events.send(RemoteEvent::TapeFinished { total });
+                }
                 Message::Attached { windows } => {
                     let _ = events.send(RemoteEvent::Attached { windows });
                 }
@@ -757,6 +877,17 @@ fn run_remote_event_loop(
                     harness,
                 } => {
                     os.handle_agent_state_changed(&window, &state, &message, &harness);
+                }
+                RemoteEvent::TapeCommand {
+                    index,
+                    total,
+                    command,
+                } => {
+                    os.handle_remote_tape_command(index, total, &command);
+                }
+                RemoteEvent::TapeFinished { total } => {
+                    os.remote_tape_finished();
+                    os.notify(format!("tape finished ({total} commands)"), "info");
                 }
                 RemoteEvent::Attached { .. } => {} // handled by pending actions
                 RemoteEvent::ListResult { sessions } => {

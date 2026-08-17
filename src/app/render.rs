@@ -89,7 +89,15 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     render_dock(os, buf, dock_area, &sorted_ids);
 
     // Modal overlays, topmost, in priority order.
-    if os.tape_manager_open {
+    if let Some(pending) = &os.project_tape_pending {
+        let mut lines = Vec::new();
+        lines.push("A .tuios.tape was found in this directory.".into());
+        lines.push(format!("  {}", pending.path));
+        lines.push(format!("  sha256 {}", &pending.hash[..pending.hash.len().min(16)]));
+        lines.push(String::new());
+        lines.push("Trust and run it?  (y/n)".into());
+        render_overlay(buf, content_area, &lines, "Project tape");
+    } else if os.tape_manager_open {
         render_tape_manager(os, buf, content_area);
     } else if os.show_quit_confirmation {
         render_overlay(

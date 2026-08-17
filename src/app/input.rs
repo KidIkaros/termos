@@ -155,6 +155,11 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         return handle_switcher(os, key);
     }
 
+    // The project-tape trust review captures keys while pending.
+    if os.project_tape_pending.is_some() {
+        return handle_project_tape_review(os, key);
+    }
+
     // The tape manager overlay captures keys while open.
     if os.tape_manager_open {
         return handle_tape_manager(os, key);
@@ -558,10 +563,30 @@ fn handle_tape_prefix(os: &mut Os, key: &KeyEvent) -> KeyResult {
             os.open_tape_manager();
             KeyResult::Consumed
         }
+        KeyCode::Char('t') => {
+            os.prefix = Prefix::None;
+            os.review_project_tape();
+            KeyResult::Consumed
+        }
         _ => {
             os.prefix = Prefix::None;
             KeyResult::Ignored
         }
+    }
+}
+
+/// The project-tape trust review dialog: `y` trusts and plays, `n`/Esc skips.
+fn handle_project_tape_review(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            os.resolve_project_tape(true);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            os.resolve_project_tape(false);
+            KeyResult::Consumed
+        }
+        _ => KeyResult::Consumed,
     }
 }
 

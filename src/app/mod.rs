@@ -328,6 +328,19 @@ pub struct Os {
     pub tape_manager_open: bool,
     pub tape_manager_query: String,
     pub tape_manager_selected: usize,
+    /// Remote `tape exec` progress (current index, total), if one is running.
+    pub remote_tape: Option<(usize, usize)>,
+    /// A discovered project tape awaiting a trust decision (the review
+    /// dialog). `content` is the exact hashed bytes to execute on approval.
+    pub project_tape_pending: Option<ProjectTapePending>,
+}
+
+/// A discovered `.tuios.tape` waiting on the trust review.
+#[derive(Debug, Clone)]
+pub struct ProjectTapePending {
+    pub path: String,
+    pub hash: String,
+    pub content: Vec<u8>,
 }
 
 /// A dock notification.
@@ -410,6 +423,8 @@ impl Os {
             tape_manager_open: false,
             tape_manager_query: String::new(),
             tape_manager_selected: 0,
+            remote_tape: None,
+            project_tape_pending: None,
         }
     }
 
@@ -870,16 +885,41 @@ impl Os {
     /// True while a tape is playing (for the dock indicator).
     pub fn script_active(&self) -> bool {
         self.script_mode
-            && self
-                .script_player
-                .as_ref()
-                .map(|p| !p.is_finished())
-                .unwrap_or(false)
+            && (self.remote_tape.is_some()
+                || self
+                    .script_player
+                    .as_ref()
+                    .map(|p| !p.is_finished())
+                    .unwrap_or(false))
     }
 
-    /// The current tape progress percentage, if playing.
+    /// The current tape progress percentage, if playing (local player or
+    /// remote `tape exec`).
     pub fn script_progress(&self) -> Option<usize> {
+        if let Some((index, total)) = self.remote_tape {
+            return Some(if total == 0 { 100 } else { index.saturating_mul(100).checked_div(total).unwrap_or(100) });
+        }
         self.script_player.as_ref().map(|p| p.progress())
+    }
+
+    /// Handle one command from a remote `tape exec`.
+    pub fn handle_remote_tape_command(
+        &mut self,
+        index: usize,
+        total: usize,
+        command: &crate::tape::command::Command,
+    ) {
+        self.script_mode = true;
+        self.remote_tape = Some((index, total));
+        let mut ce = crate::tape::executor::CommandExecutor::new(self);
+        if let Err(e) = ce.execute(command) {
+            self.notify(format!("tape: {e}"), "error");
+        }
+    }
+
+    /// The remote tape finished.
+    pub fn remote_tape_finished(&mut self) {
+        self.remote_tape = None;
     }
 
     // -----------------------------------------------------------------------
@@ -1029,7 +1069,13 @@ impl Os {
                 return;
             }
         };
-        let (commands, errors) = crate::tape::parser::parse_file(&content);
+        self.start_script_from_content(&content);
+        self.tape_manager_open = false;
+    }
+
+    /// Load parsed tape content as the active script (with error reporting).
+    fn start_script_from_content(&mut self, content: &str) {
+        let (commands, errors) = crate::tape::parser::parse_file(content);
         if !errors.is_empty() || commands.is_empty() {
             self.notify("tape failed to parse", "error");
             return;
@@ -1037,8 +1083,77 @@ impl Os {
         self.script_mode = true;
         self.script_paused = false;
         self.script_player = Some(crate::tape::player::Player::new(commands));
-        self.tape_manager_open = false;
         self.notify("tape started", "info");
+    }
+
+    /// Discover `.tuios.tape` in the current directory and start the trust
+    /// review (`Ctrl+B T t`). Trusted tapes play immediately.
+    pub fn review_project_tape(&mut self) {
+        use crate::tape::trust::Status;
+        let path = std::env::current_dir()
+            .ok()
+            .map(|d| d.join(crate::tape::trust::TAPE_FILE_NAME));
+        let Some(path) = path else {
+            self.notify("no project tape found", "info");
+            return;
+        };
+        if !path.exists() {
+            self.notify("no .tuios.tape in this directory", "info");
+            return;
+        }
+        let path_str = path.to_string_lossy().into_owned();
+        let Ok(store) = crate::tape::trust::Store::load() else {
+            self.notify("cannot open the trust store", "error");
+            return;
+        };
+        let Ok(result) = store.check(&path_str) else {
+            self.notify("cannot read the project tape", "error");
+            return;
+        };
+        match result.status {
+            Status::Trusted => {
+                let content = String::from_utf8_lossy(&result.content).into_owned();
+                self.start_script_from_content(&content);
+            }
+            Status::Untrusted => {
+                self.project_tape_pending = Some(ProjectTapePending {
+                    path: result.path.clone(),
+                    hash: result.hash.clone(),
+                    content: result.content.clone(),
+                });
+            }
+            Status::Denied => {
+                self.notify("project tape is denied", "warning");
+            }
+            Status::Ineligible => {
+                self.notify(format!("project tape is ineligible: {}", result.reason), "error");
+            }
+        }
+    }
+
+    /// Resolve the pending trust review: `trust_it` trusts and plays the tape,
+    /// `false` leaves it untrusted and clears the dialog.
+    pub fn resolve_project_tape(&mut self, trust_it: bool) {
+        let Some(pending) = self.project_tape_pending.take() else {
+            return;
+        };
+        if !trust_it {
+            self.notify("project tape not trusted", "info");
+            return;
+        }
+        let mut store = match crate::tape::trust::Store::load() {
+            Ok(s) => s,
+            Err(e) => {
+                self.notify(format!("cannot open the trust store: {e}"), "error");
+                return;
+            }
+        };
+        if let Err(e) = store.trust(&pending.path, &pending.hash) {
+            self.notify(format!("cannot record trust: {e}"), "error");
+            return;
+        }
+        let content = String::from_utf8_lossy(&pending.content).into_owned();
+        self.start_script_from_content(&content);
     }
 
     // -----------------------------------------------------------------------
