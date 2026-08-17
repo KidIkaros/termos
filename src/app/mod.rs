@@ -333,6 +333,12 @@ pub struct Os {
     /// A discovered project tape awaiting a trust decision (the review
     /// dialog). `content` is the exact hashed bytes to execute on approval.
     pub project_tape_pending: Option<ProjectTapePending>,
+    /// Graphics passthrough: Kitty APC forwarding.
+    pub kitty_passthrough: Option<crate::graphics::kitty::KittyPassthrough>,
+    /// Graphics passthrough: Sixel forwarding.
+    pub sixel_passthrough: Option<crate::graphics::sixel::SixelPassthrough>,
+    /// Host terminal capabilities (probed at startup).
+    pub graphics_caps: crate::graphics::capability::Capabilities,
 }
 
 /// A discovered `.tuios.tape` waiting on the trust review.
@@ -425,6 +431,9 @@ impl Os {
             tape_manager_selected: 0,
             remote_tape: None,
             project_tape_pending: None,
+            kitty_passthrough: None,
+            sixel_passthrough: None,
+            graphics_caps: crate::graphics::capability::Capabilities::default(),
         }
     }
 
@@ -923,6 +932,101 @@ impl Os {
     }
 
     // -----------------------------------------------------------------------
+    // Graphics passthrough
+    // -----------------------------------------------------------------------
+
+    /// Probe the host terminal and initialize graphics passthrough. The host
+    /// output is stdout (the terminal TUIOS is running inside).
+    pub fn init_graphics(&mut self) {
+        let caps = crate::graphics::capability::Capabilities::probe();
+        self.graphics_caps = caps;
+        if caps.kitty {
+            self.kitty_passthrough = Some(crate::graphics::kitty::KittyPassthrough::new(
+                caps,
+                Box::new(std::io::stdout()),
+            ));
+        }
+        if caps.sixel {
+            self.sixel_passthrough = Some(crate::graphics::sixel::SixelPassthrough::new(
+                caps,
+                Box::new(std::io::stdout()),
+            ));
+        }
+    }
+
+    /// Drain pending APC and Sixel sequences from all windows and forward
+    /// them to the host terminal. Called once per render tick, before
+    /// drawing, so images appear in the right pane.
+    pub fn flush_graphics(&mut self) {
+        // Precompute pane origins for the current workspace layout so we
+        // don't borrow self while iterating windows.
+        let origins = self.compute_pane_origins();
+
+        let mut apc_jobs: Vec<(u32, u32, u32, Vec<u8>)> = Vec::new();
+        let mut sixel_jobs: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+        for (i, w) in self.windows.iter_mut().enumerate() {
+            let mut emu = w.emulator.lock().unwrap();
+            let apcs = emu.drain_pending_apc();
+            if !apcs.is_empty() {
+                let (px, py) = origins.get(i).copied().unwrap_or((0, 0));
+                for apc in apcs {
+                    apc_jobs.push((i as u32, px, py, apc));
+                }
+            }
+            let sixels = emu.drain_pending_sixel();
+            if !sixels.is_empty() {
+                let (px, py) = origins.get(i).copied().unwrap_or((0, 0));
+                for s in sixels {
+                    sixel_jobs.push((px, py, s));
+                }
+            }
+        }
+        for (wid, px, py, apc) in apc_jobs {
+            if let Some(kp) = &self.kitty_passthrough {
+                let payload = if apc.first() == Some(&b'G') {
+                    String::from_utf8_lossy(&apc[1..]).into_owned()
+                } else {
+                    String::from_utf8_lossy(&apc).into_owned()
+                };
+                let _ = kp.forward(wid, px, py, &payload);
+            }
+        }
+        for (px, py, s) in sixel_jobs {
+            if let Some(sp) = &self.sixel_passthrough {
+                let _ = sp.forward(px, py, &s);
+            }
+        }
+    }
+
+    /// Compute the (x, y) cell origin of each window's inner content area
+    /// on the current workspace.
+    fn compute_pane_origins(&self) -> Vec<(u32, u32)> {
+        let ws = self.current_workspace;
+        let Some(workspace) = self.workspaces.get(&ws) else {
+            return Vec::new();
+        };
+        let bounds = self.workspace_bounds(ws);
+        let rects = workspace.tree.apply_layout(bounds, 1);
+        self.windows
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                rects
+                    .get(&(i as i32))
+                    .map(|r| ((r.x + 1) as u32, (r.y + 1) as u32))
+                    .unwrap_or((0, 0))
+            })
+            .collect()
+    }
+
+    /// Clear all graphics for a window (on close or workspace switch).
+    pub fn clear_window_graphics(&self, window_id: u32) {
+        if let Some(kp) = &self.kitty_passthrough {
+            kp.clear_window(window_id);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Tape recording
     // -----------------------------------------------------------------------
 
@@ -1246,6 +1350,7 @@ impl Os {
             let ctx = self.window_hook_ctx(focused);
             self.remove_window(focused);
             self.record_action("close_window", &[]);
+            self.clear_window_graphics(focused as u32);
             self.fire_hook(hooks::Event::AfterCloseWindow, ctx);
         }
     }
@@ -2827,8 +2932,42 @@ mod tests {
     }
 
     #[test]
-    fn render_overlay_does_not_panic_on_offset_rects() {
-        // Regression: overlays narrower than the screen (which-key, switcher,
+    fn apc_sequences_are_collected_and_forwarded() {
+        // Feed a Kitty APC into the emulator; flush_graphics should drain it.
+        // We use a sink-backed passthrough so the test doesn't write to stdout.
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+        struct Sink;
+        impl std::io::Write for Sink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut os = os_with_window();
+        os.graphics_caps.kitty = true;
+        os.kitty_passthrough = Some(crate::graphics::kitty::KittyPassthrough::new(
+            os.graphics_caps,
+            Box::new(Sink),
+        ));
+        // Feed a Kitty APC: ESC _ G a=T,f=100,i=1;AAAA ESC \
+        let apc: &[u8] = b"\x1b_Ga=T,f=100,i=1;AAAA\x1b\\";
+        {
+            let w = &mut os.windows[0];
+            let mut emu = w.emulator.lock().unwrap();
+            emu.write(apc);
+            // Drain immediately from the emulator to verify it was collected.
+            let apcs = emu.drain_pending_apc();
+            assert_eq!(apcs.len(), 1, "APC not collected by emulator");
+            assert_eq!(apcs[0].first(), Some(&b'G'), "not a Kitty APC");
+        }
+        let _ = Arc::new(StdMutex::new(())); // suppress unused import warning
+    }
+
+    #[test]
+    fn render_overlay_does_not_panic_on_offset_rects() {        // Regression: overlays narrower than the screen (which-key, switcher,
         // tape manager) used absolute indexing into an offset block buffer.
         use crate::app::render::render;
         use ratatui::backend::TestBackend;

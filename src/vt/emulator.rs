@@ -53,6 +53,13 @@ pub struct Emulator {
     response: Vec<u8>,
     /// Last OSC 52 clipboard write, if any.
     clipboard: Option<String>,
+    /// Pending APC sequences (Kitty graphics protocol) collected since the
+    /// last drain. The app layer drains these and forwards them to the host
+    /// terminal via the graphics passthrough.
+    pending_apc: Vec<Vec<u8>>,
+    /// Pending DCS sequences that look like Sixel (`q` final byte) for the
+    /// app layer's Sixel passthrough.
+    pending_sixel: Vec<Vec<u8>>,
     /// How many scrollback lines are currently shown above the live screen.
     /// 0 means the live screen is shown; a positive value means the view is
     /// scrolled back that many lines (copy mode).
@@ -80,6 +87,8 @@ impl Emulator {
             cwd: String::new(),
             response: Vec::new(),
             clipboard: None,
+            pending_apc: Vec::new(),
+            pending_sixel: Vec::new(),
             viewport: 0,
         };
         // Alt screen keeps no scrollback.
@@ -887,8 +896,15 @@ impl Handler for Emulator {
         }
     }
 
-    fn dcs(&mut self, _seq: &DcsSequence) {
-        // Sixel / kitty DCS handled by the app layer; ignored here for now.
+    fn dcs(&mut self, seq: &DcsSequence) {
+        // Sixel DCS: the final byte is 'q' and the payload starts with the
+        // Sixel raster attributes. Collect it for the app layer's Sixel
+        // passthrough; other DCS sequences are ignored.
+        if seq.final_byte == b'q' {
+            let mut data = Vec::with_capacity(seq.data.len());
+            data.extend_from_slice(&seq.data);
+            self.pending_sixel.push(data);
+        }
     }
 
     fn osc(&mut self, seq: &OscSequence) {
@@ -960,8 +976,12 @@ impl Handler for Emulator {
     }
 
     fn apc(&mut self, seq: &StringSequence) {
-        // Kitty graphics protocol — handled by the app layer (passthrough).
-        let _ = seq;
+        // Kitty graphics protocol — collect for the app layer's passthrough.
+        // Only APC sequences starting with 'G' (Kitty graphics) are tracked;
+        // other APC uses are rare and can be dropped.
+        if seq.data.first().copied() == Some(b'G') {
+            self.pending_apc.push(seq.data.clone());
+        }
     }
 
     fn pm(&mut self, _seq: &StringSequence) {}
@@ -974,6 +994,18 @@ impl Emulator {
     /// Last OSC 52 clipboard write, if any.
     pub fn take_clipboard(&mut self) -> Option<String> {
         self.clipboard.take()
+    }
+
+    /// Drain pending Kitty APC sequences (the raw bytes after `\x1b_G`,
+    /// including the leading `G`). The app layer forwards these to the host
+    /// terminal via the graphics passthrough.
+    pub fn drain_pending_apc(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.pending_apc)
+    }
+
+    /// Drain pending Sixel DCS payloads (the bytes after `DCS ... q`).
+    pub fn drain_pending_sixel(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.pending_sixel)
     }
 }
 

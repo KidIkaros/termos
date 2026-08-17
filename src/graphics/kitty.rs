@@ -184,6 +184,11 @@ impl KittyPassthrough {
         self.placements.lock().unwrap().clear_window(window_id);
     }
 
+    /// True if a window has any tracked placements.
+    pub fn has_placements(&self, window_id: u32) -> bool {
+        self.placements.lock().unwrap().has_placements(window_id)
+    }
+
     /// Clear everything (host reset).
     pub fn clear_all(&self) -> std::io::Result<()> {
         self.placements.lock().unwrap().clear_all();
@@ -271,8 +276,8 @@ mod tests {
     fn clear_window_drops_placements() {
         let kp = KittyPassthrough::new(test_caps(true), Box::new(std::io::sink()));
         kp.forward(1, 0, 0, "a=T,i=1;AAAA").unwrap();
-        assert!(kp.placements.lock().unwrap().has_placements(1));
+        assert!(kp.has_placements(1));
         kp.clear_window(1);
-        assert!(!kp.placements.lock().unwrap().has_placements(1));
+        assert!(!kp.has_placements(1));
     }
 }

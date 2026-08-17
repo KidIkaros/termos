@@ -347,6 +347,7 @@ fn cmd_tape_play(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let config = UserConfig::load();
     let mut os = Os::new(config);
+    os.init_graphics();
     // Force animations off for deterministic playback (matching recorded
     // tapes, which prepend DisableAnimations).
     os.config.appearance.animations_enabled = false;
@@ -675,6 +676,7 @@ fn run_remote_tui(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     let config = UserConfig::load();
     let mut os = Os::new(config);
+    os.init_graphics();
     os.remote_session = Some(current.clone());
     os.remote_sessions = sessions.clone();
     os.fire_attached();
@@ -903,6 +905,7 @@ fn run_remote_event_loop(
         os.tick_agent_alerts();
         os.tick_script();
         os.sync_window_sizes();
+        os.flush_graphics();
         if last_render.elapsed() >= frame_budget {
             terminal.draw(|frame| {
                 render(os, frame.buffer_mut());
@@ -1076,6 +1079,7 @@ fn wait_for_list(events: &Receiver<RemoteEvent>) -> Result<Vec<SessionInfo>, Str
 fn run_local_tui() -> Result<(), Box<dyn std::error::Error>> {
     let config = UserConfig::load();
     let mut os = Os::new(config);
+    os.init_graphics();
 
     // Set up the terminal.
     enable_raw_mode()?;
@@ -1147,6 +1151,7 @@ fn run_event_loop(
 
         // Sync window sizes to the current layout.
         os.sync_window_sizes();
+        os.flush_graphics();
 
         // Render at most ~60 FPS.
         if last_render.elapsed() >= frame_budget {

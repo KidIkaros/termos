@@ -48,6 +48,9 @@ pub enum State {
     Pm,
     Sos,
     Utf8,
+    /// Inside a string sequence (OSC/DCS/APC/PM/SOS), we saw ESC and are
+    /// waiting for the `\` that completes the two-byte String Terminator.
+    StringTerminator { kind: StringKind },
 }
 
 /// A parsed CSI sequence.
@@ -180,6 +183,7 @@ impl Parser {
             State::Pm => self.pm(byte, handler),
             State::Sos => self.sos(byte, handler),
             State::Utf8 => self.utf8(byte, handler),
+            State::StringTerminator { kind } => self.string_terminator(byte, handler, kind),
         };
         self.state = next;
         next
@@ -673,11 +677,13 @@ impl Parser {
     ) -> State {
         match byte {
             0x1b => {
+                // ESC might be the start of the two-byte ST (ESC \).
+                // Transition to a special state that expects the backslash.
                 self.string_raw.push(byte);
-                self.state
+                State::StringTerminator { kind }
             }
             0x9c => {
-                // ST.
+                // Single-byte ST (C1).
                 self.dispatch_string(handler, kind);
                 State::Ground
             }
@@ -686,6 +692,7 @@ impl Parser {
                 State::Ground
             }
             0x07 => {
+                // BEL is an alternative string terminator (OSC commonly).
                 self.dispatch_string(handler, kind);
                 State::Ground
             }
@@ -693,6 +700,30 @@ impl Parser {
                 self.string_data.push(byte);
                 self.string_raw.push(byte);
                 self.state
+            }
+        }
+    }
+
+    /// Handle the byte after ESC inside a string sequence. `\` (0x5c)
+    /// completes the ST and dispatches; anything else cancels the ST and
+    /// the ESC is treated as the start of a new escape.
+    fn string_terminator<H: Handler>(
+        &mut self,
+        byte: u8,
+        handler: &mut H,
+        kind: StringKind,
+    ) -> State {
+        match byte {
+            0x5c => {
+                // ESC \ — the two-byte String Terminator.
+                self.dispatch_string(handler, kind);
+                State::Ground
+            }
+            _ => {
+                // Not ST; the string is cancelled and we re-enter the escape
+                // state for this byte.
+                self.dispatch_string(handler, kind);
+                self.escape(byte, handler)
             }
         }
     }
@@ -710,7 +741,7 @@ impl Parser {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StringKind {
+pub enum StringKind {
     Apc,
     Pm,
     Sos,
