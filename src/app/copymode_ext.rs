@@ -219,13 +219,6 @@ pub fn word_motion(line: &str, start_col: usize, motion: WordMotion) -> usize {
             | WordMotion::WordEndBig
             | WordMotion::WordEndBackwardBig
     );
-    let is_boundary = |c: char| {
-        if big {
-            c.is_whitespace()
-        } else {
-            !is_word_char(c) && !c.is_whitespace()
-        }
-    };
 
     match motion {
         WordMotion::WordForward | WordMotion::WordForwardBig => {
