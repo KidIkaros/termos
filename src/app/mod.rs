@@ -360,6 +360,11 @@ pub struct Os {
     pub tick_stats: interaction::TickStats,
     /// Active window animations (minimize/restore/snap), keyed by window id.
     animations: HashMap<i32, crate::ui::animation::Animation>,
+    /// Whether the client's pointer is a finger (per-session, set by the web
+    /// server's touch detection). Drives mobile affordances.
+    pub touch_client: bool,
+    /// Read-only mode: input is not forwarded to PTYs.
+    pub read_only: bool,
     /// Whether tape playback is active (`tape play`).
     pub script_mode: bool,
     /// Whether tape playback is paused (Ctrl+P).
@@ -494,6 +499,8 @@ impl Os {
             hold_mode: interaction::HoldMode::new(),
             tick_stats: interaction::TickStats::new(),
             animations: HashMap::new(),
+            touch_client: false,
+            read_only: false,
             script_mode: false,
             script_paused: false,
             script_player: None,

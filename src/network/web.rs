@@ -30,18 +30,44 @@ const INDEX_HTML: &str = include_str!("web/index.html");
 
 /// Web server state shared across connections.
 #[derive(Clone)]
+/// Releases a [`crate::web::ConnectionLimiter`] slot on drop.
+struct ConnectionGuard(Arc<crate::web::ConnectionLimiter>);
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+#[derive(Clone)]
 pub struct WebServerState {
     pub config: Arc<UserConfig>,
+    /// Enforces the max-connections limit across all live sockets.
+    pub limiter: Arc<crate::web::ConnectionLimiter>,
+    /// The operator's touch-mode preference (auto/on/off).
+    pub touch_mode: crate::web::TouchMode,
+    /// Read-only mode: guest input is dropped.
+    pub read_only: bool,
 }
 
 /// Run the web server on the given address.
+///
+/// `touch_mode` decides how a client's touch screen is detected, `limiter`
+/// caps concurrent connections (0 = unlimited), and `read_only` stops guest
+/// input from reaching the shells.
 pub async fn run_web_server(
     addr: &str,
     config: UserConfig,
+    touch_mode: crate::web::TouchMode,
+    max_connections: u64,
+    read_only: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = addr.parse()?;
     let state = WebServerState {
         config: Arc::new(config),
+        limiter: Arc::new(crate::web::ConnectionLimiter::new(max_connections)),
+        touch_mode,
+        read_only,
     };
 
     let app = Router::new()
@@ -62,8 +88,18 @@ async fn index() -> Html<&'static str> {
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<WebServerState>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    ws.on_upgrade(move |socket| handle_ws(socket, state))
+    let touch = crate::web::resolve_touch(
+        state.touch_mode,
+        headers
+            .get("sec-ch-ua-mobile")
+            .and_then(|v| v.to_str().ok()),
+        headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok()),
+    );
+    ws.on_upgrade(move |socket| handle_ws(socket, state, touch))
 }
 
 /// Handle a WebSocket connection: spawn a TermOS session and bridge I/O.
@@ -71,9 +107,18 @@ async fn ws_handler(
 /// The render loop draws Os state to a `CrosstermBackend<Vec<u8>>` and sends
 /// the ANSI escape sequences as JSON frames. Input from the WebSocket is
 /// parsed into crossterm `KeyEvent`s and forwarded to the Os.
-async fn handle_ws(socket: WebSocket, state: WebServerState) {
+async fn handle_ws(socket: WebSocket, state: WebServerState, touch: bool) {
+    // Enforce the connection limit: a rejected socket is simply dropped.
+    if !state.limiter.acquire() {
+        log::warn!("web: connection limit reached, rejecting");
+        return;
+    }
+    let _release = ConnectionGuard(state.limiter.clone());
+
     let mut os = Os::new((*state.config).clone());
     os.init_graphics();
+    os.touch_client = touch;
+    os.read_only = state.read_only;
 
     // Determine terminal size from env or default to 80x24.
     if let Ok((cols, rows)) = crossterm::terminal::size() {

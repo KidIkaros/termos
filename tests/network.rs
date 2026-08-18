@@ -105,7 +105,14 @@ async fn web_server_serves_index_html() {
 
     let config = UserConfig::default();
     tokio::spawn(async move {
-        let _ = run_web_server(&addr.to_string(), config).await;
+        let _ = run_web_server(
+            &addr.to_string(),
+            config,
+            termos::web::TouchMode::Auto,
+            0,
+            false,
+        )
+        .await;
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -138,7 +145,14 @@ async fn web_websocket_upgrade() {
 
     let config = UserConfig::default();
     tokio::spawn(async move {
-        let _ = run_web_server(&addr.to_string(), config).await;
+        let _ = run_web_server(
+            &addr.to_string(),
+            config,
+            termos::web::TouchMode::Auto,
+            0,
+            false,
+        )
+        .await;
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;

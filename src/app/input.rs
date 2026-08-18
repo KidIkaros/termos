@@ -271,9 +271,9 @@ fn handle_terminal_mode(os: &mut Os, key: &KeyEvent) -> KeyResult {
             _ => {}
         }
     }
-    // Everything else passes through.
+    // Everything else passes through, unless read-only mode is on.
     let data = encode_key(key);
-    if !data.is_empty() {
+    if !data.is_empty() && !os.read_only {
         os.write_to_focused(&data);
         os.record_terminal_key(key);
         KeyResult::Passthrough

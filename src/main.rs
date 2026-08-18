@@ -120,6 +120,76 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
             }
             Ok(())
         }
+        "config" => {
+            let sub = args.get(2).map(|s| s.as_str()).unwrap_or("show");
+            match termos::cli::ConfigCommand::parse(sub) {
+                Some(termos::cli::ConfigCommand::Show) => {
+                    let path = termos::cli::config_path();
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    println!("{}", termos::cli::format_config_show(&text));
+                    Ok(())
+                }
+                Some(termos::cli::ConfigCommand::Path) => {
+                    println!("{}", termos::cli::config_path().display());
+                    Ok(())
+                }
+                Some(termos::cli::ConfigCommand::Validate) => {
+                    let cfg = UserConfig::load();
+                    let result = termos::config::validation::validate_config(&cfg);
+                    if result.errors.is_empty() {
+                        println!("config OK");
+                    } else {
+                        for e in &result.errors {
+                            println!("error: {}", e.message);
+                        }
+                    }
+                    for w in &result.warnings {
+                        println!("warning: {}", w.message);
+                    }
+                    Ok(())
+                }
+                None => Err(format!("unknown config command '{sub}'").into()),
+            }
+        }
+        "keybinds" => {
+            let sub = args.get(2).map(|s| s.as_str()).unwrap_or("list");
+            match termos::cli::KeybindCommand::parse(sub) {
+                Some(termos::cli::KeybindCommand::List) => {
+                    let registry = termos::config::registry::KeybindRegistry::new();
+                    let bindings = termos::config::keybindings::get_prefix_keybindings("", false);
+                    let mut entries: Vec<termos::cli::KeybindEntry> = Vec::new();
+                    for b in bindings {
+                        entries.push(termos::cli::KeybindEntry {
+                            key: b.key.clone(),
+                            action: registry
+                                .get_action(&b.key)
+                                .unwrap_or("")
+                                .to_string(),
+                            description: b.description.clone(),
+                        });
+                    }
+                    print!("{}", termos::cli::format_keybind_list(&entries));
+                    Ok(())
+                }
+                Some(termos::cli::KeybindCommand::Describe) => {
+                    let name = args.get(3).ok_or("usage: tuios keybinds describe <action>")?;
+                    let registry = termos::config::registry::KeybindRegistry::new();
+                    let bindings = termos::config::keybindings::get_prefix_keybindings("", false);
+                    let hit = bindings
+                        .iter()
+                        .find(|b| registry.get_action(&b.key) == Some(name))
+                        .or_else(|| bindings.iter().find(|b| &b.key == name));
+                    match hit {
+                        Some(b) => {
+                            println!("{} ({})", b.description, b.key);
+                            Ok(())
+                        }
+                        None => Err(format!("unknown action or key '{name}'").into()),
+                    }
+                }
+                None => Err(format!("unknown keybinds command '{sub}'").into()),
+            }
+        }
         "tape" => {
             let sub = args.get(2).map(|s| s.as_str()).unwrap_or("");
             match sub {

@@ -50,6 +50,9 @@ struct ClientSession {
     /// The SSH channel write handle.
     terminal: TerminalHandle,
     os: Os,
+    /// The client's reported terminal capabilities (kitty/sixel/cell size),
+    /// detected from the pty-req and forwarded environment.
+    caps: Option<crate::server::ClientCapabilities>,
 }
 
 /// A write handle to the SSH channel that implements `std::io::Write` for
@@ -492,7 +495,14 @@ impl Handler for TermosSshServer {
         }
 
         let mut clients = self.clients.lock().await;
-        clients.insert(id, ClientSession { terminal, os });
+        clients.insert(
+            id,
+            ClientSession {
+                terminal,
+                os,
+                caps: None,
+            },
+        );
 
         // Spawn the render loop for this client.
         let clients_clone = self.clients.clone();
@@ -504,16 +514,27 @@ impl Handler for TermosSshServer {
     async fn pty_request(
         &mut self,
         channel: ChannelId,
-        _term: &str,
+        term: &str,
         col_width: u32,
         row_height: u32,
-        _pix_width: u32,
-        _pix_height: u32,
+        pix_width: u32,
+        pix_height: u32,
         _modes: &[(Pty, u32)],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         let mut clients = self.clients.lock().await;
         if let Some(cs) = clients.values_mut().last() {
+            // Detect the client's graphics capabilities from its pty-req and
+            // environment (kitty/sixel terminal identity, cell pixel size).
+            let environ: Vec<String> = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
+            cs.caps = Some(crate::server::build_client_capabilities(
+                term,
+                &environ,
+                col_width as i32,
+                row_height as i32,
+                pix_width as i32,
+                pix_height as i32,
+            ));
             cs.os.width = col_width as i32;
             cs.os.height = row_height as i32;
             cs.os.sync_window_sizes();
