@@ -241,6 +241,41 @@ pub fn is_kitty_shm_safe(terminal_name: &str) -> bool {
     matches!(terminal_name, "kitty" | "ghostty")
 }
 
+// ─── Host Capabilities ───────────────────────────────────────────────────
+
+/// App-level host capabilities, projected from the client's reported caps.
+#[derive(Debug, Clone, Default)]
+pub struct HostCapabilities {
+    pub kitty_graphics: bool,
+    pub kitty_file_transfer: bool,
+    pub sixel_graphics: bool,
+    pub true_color: bool,
+    pub terminal_name: String,
+    pub pixel_width: i32,
+    pub pixel_height: i32,
+    pub cell_width: i32,
+    pub cell_height: i32,
+}
+
+/// Project client capabilities onto app-level host capabilities.
+///
+/// `kitty_file_transfer` is always false: a file-medium transmission names a
+/// path on the server, which the remote client cannot read, so the passthrough
+/// must re-encode as direct.
+pub fn client_to_host_capabilities(c: &ClientCapabilities) -> HostCapabilities {
+    HostCapabilities {
+        kitty_graphics: c.kitty_graphics,
+        kitty_file_transfer: false,
+        sixel_graphics: c.sixel_graphics,
+        true_color: true,
+        terminal_name: c.terminal_name.clone(),
+        pixel_width: c.pixel_width,
+        pixel_height: c.pixel_height,
+        cell_width: c.cell_width,
+        cell_height: c.cell_height,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +410,35 @@ mod tests {
         assert!(is_kitty_shm_safe("ghostty"));
         assert!(!is_kitty_shm_safe("wezterm"));
         assert!(!is_kitty_shm_safe("xterm"));
+    }
+
+    #[test]
+    fn client_to_host_projects() {
+        let caps = ClientCapabilities {
+            terminal_name: "kitty".into(),
+            kitty_graphics: true,
+            sixel_graphics: false,
+            cell_width: 8,
+            cell_height: 16,
+            pixel_width: 640,
+            pixel_height: 384,
+        };
+        let host = client_to_host_capabilities(&caps);
+        assert!(host.kitty_graphics);
+        assert!(!host.kitty_file_transfer); // always false over SSH
+        assert!(!host.sixel_graphics);
+        assert!(host.true_color);
+        assert_eq!(host.terminal_name, "kitty");
+        assert_eq!(host.cell_width, 8);
+        assert_eq!(host.pixel_width, 640);
+    }
+
+    #[test]
+    fn client_to_host_defaults() {
+        let caps = ClientCapabilities::default();
+        let host = client_to_host_capabilities(&caps);
+        assert!(!host.kitty_graphics);
+        assert!(!host.kitty_file_transfer);
+        assert!(host.true_color);
     }
 }
