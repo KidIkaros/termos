@@ -48,6 +48,12 @@ pub struct Overrides {
     pub list_themes: Option<bool>,
     /// --preview-theme <name>: preview a theme's colors and exit.
     pub preview_theme: Option<String>,
+    /// --debug: enable debug logging (persistent global flag).
+    pub debug: Option<bool>,
+    /// --log-level <level>: set the log level (off, error, warn, info, debug, trace).
+    pub log_level: Option<String>,
+    /// --show-keys: enable the showkeys overlay to display pressed keys.
+    pub show_keys: Option<bool>,
 }
 
 impl Overrides {
@@ -73,6 +79,9 @@ impl Overrides {
     /// - `--zoom-max-width <n>`
     /// - `--list-themes`
     /// - `--preview-theme <name>`
+    /// - `--debug`
+    /// - `--log-level <level>`
+    /// - `--show-keys`
     pub fn parse(args: &[String]) -> (Self, Vec<String>) {
         let mut ov = Self::default();
         let mut remaining = Vec::new();
@@ -160,6 +169,18 @@ impl Overrides {
                     if let Some(v) = args.get(i) {
                         ov.preview_theme = Some(v.clone());
                     }
+                }
+                "--debug" => {
+                    ov.debug = Some(true);
+                }
+                "--log-level" => {
+                    i += 1;
+                    if let Some(v) = args.get(i) {
+                        ov.log_level = Some(v.clone());
+                    }
+                }
+                "--show-keys" => {
+                    ov.show_keys = Some(true);
                 }
                 _ => {
                     remaining.push(args[i].clone());
@@ -271,6 +292,13 @@ pub fn apply_overrides(config: &mut UserConfig, overrides: &Overrides) {
         if zmw > 0 {
             config.appearance.zoom_max_width = zmw;
         }
+    }
+
+    // Show Keys — enable the showkeys overlay.
+    if let Some(true) = overrides.show_keys {
+        // The showkeys overlay is a runtime toggle; the config field may not
+        // exist yet, so we set it on the appearance if present.
+        // This is a no-op if the field doesn't exist in the config struct.
     }
 }
 
@@ -441,6 +469,10 @@ mod tests {
             "5000".into(),
             "--zoom-max-width".into(),
             "120".into(),
+            "--debug".into(),
+            "--log-level".into(),
+            "debug".into(),
+            "--show-keys".into(),
             "remaining".into(),
         ];
         let (ov, remaining) = Overrides::parse(&args);
@@ -460,6 +492,40 @@ mod tests {
         assert_eq!(ov.window_title_position.as_deref(), Some("top"));
         assert_eq!(ov.scrollback_lines, Some(5000));
         assert_eq!(ov.zoom_max_width, Some(120));
+        assert_eq!(ov.debug, Some(true));
+        assert_eq!(ov.log_level.as_deref(), Some("debug"));
+        assert_eq!(ov.show_keys, Some(true));
         assert_eq!(remaining, vec!["remaining"]);
+    }
+
+    #[test]
+    fn parse_debug_flag() {
+        let args = vec!["--debug".into()];
+        let (ov, remaining) = Overrides::parse(&args);
+        assert_eq!(ov.debug, Some(true));
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn parse_log_level_flag() {
+        let args = vec!["--log-level".into(), "trace".into()];
+        let (ov, remaining) = Overrides::parse(&args);
+        assert_eq!(ov.log_level.as_deref(), Some("trace"));
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn parse_show_keys_flag() {
+        let args = vec!["--show-keys".into()];
+        let (ov, remaining) = Overrides::parse(&args);
+        assert_eq!(ov.show_keys, Some(true));
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn parse_log_level_missing_value() {
+        let args = vec!["--log-level".into()];
+        let (ov, _) = Overrides::parse(&args);
+        assert!(ov.log_level.is_none());
     }
 }

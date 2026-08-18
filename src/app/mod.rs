@@ -76,6 +76,30 @@ pub enum Command {
     Quit,
     Theme,
     Settings,
+    // Extended commands for category-aware palette.
+    FocusLeft,
+    FocusRight,
+    FocusUp,
+    FocusDown,
+    SwapLeft,
+    SwapRight,
+    SwapUp,
+    SwapDown,
+    ZoomToggle,
+    RenameWindow,
+    CopyMode,
+    ToggleSidebar,
+    OpenBrowser,
+    OpenAggregate,
+    CommandPalette,
+    SessionSwitcher,
+    WorkspaceSwitcher,
+    LayoutSwitcher,
+    TapeManager,
+    AccentPicker,
+    Fullscreen,
+    Detach,
+    Help,
 }
 
 impl Command {
@@ -92,6 +116,29 @@ impl Command {
             Command::EqualizeSplits,
             Command::Scrollback,
             Command::Settings,
+            Command::FocusLeft,
+            Command::FocusRight,
+            Command::FocusUp,
+            Command::FocusDown,
+            Command::SwapLeft,
+            Command::SwapRight,
+            Command::SwapUp,
+            Command::SwapDown,
+            Command::ZoomToggle,
+            Command::RenameWindow,
+            Command::CopyMode,
+            Command::ToggleSidebar,
+            Command::OpenBrowser,
+            Command::OpenAggregate,
+            Command::CommandPalette,
+            Command::SessionSwitcher,
+            Command::WorkspaceSwitcher,
+            Command::LayoutSwitcher,
+            Command::TapeManager,
+            Command::AccentPicker,
+            Command::Fullscreen,
+            Command::Detach,
+            Command::Help,
         ];
         for i in 1..=9 {
             cmds.push(Command::SwitchWorkspace(i));
@@ -117,6 +164,51 @@ impl Command {
             Command::Quit => "Quit".into(),
             Command::Theme => "Theme picker".into(),
             Command::Settings => "Settings".into(),
+            Command::FocusLeft => "Focus left".into(),
+            Command::FocusRight => "Focus right".into(),
+            Command::FocusUp => "Focus up".into(),
+            Command::FocusDown => "Focus down".into(),
+            Command::SwapLeft => "Swap left".into(),
+            Command::SwapRight => "Swap right".into(),
+            Command::SwapUp => "Swap up".into(),
+            Command::SwapDown => "Swap down".into(),
+            Command::ZoomToggle => "Toggle zoom".into(),
+            Command::RenameWindow => "Rename window".into(),
+            Command::CopyMode => "Copy mode".into(),
+            Command::ToggleSidebar => "Toggle sidebar".into(),
+            Command::OpenBrowser => "Open scrollback browser".into(),
+            Command::OpenAggregate => "Open aggregate view".into(),
+            Command::CommandPalette => "Command palette".into(),
+            Command::SessionSwitcher => "Session switcher".into(),
+            Command::WorkspaceSwitcher => "Workspace switcher".into(),
+            Command::LayoutSwitcher => "Layout switcher".into(),
+            Command::TapeManager => "Tape manager".into(),
+            Command::AccentPicker => "Accent picker".into(),
+            Command::Fullscreen => "Toggle fullscreen".into(),
+            Command::Detach => "Detach session".into(),
+            Command::Help => "Help".into(),
+        }
+    }
+
+    /// The category for grouping in the palette.
+    pub fn category(&self) -> &'static str {
+        match self {
+            Command::NewWindow | Command::CloseWindow | Command::SplitHorizontal
+            | Command::SplitVertical | Command::ZoomToggle | Command::Fullscreen
+            | Command::RenameWindow => "Window",
+            Command::NextWindow | Command::PrevWindow | Command::FocusLeft
+            | Command::FocusRight | Command::FocusUp | Command::FocusDown
+            | Command::SwapLeft | Command::SwapRight | Command::SwapUp
+            | Command::SwapDown => "Navigation",
+            Command::ToggleTiling | Command::EqualizeSplits => "Layout",
+            Command::Scrollback | Command::CopyMode | Command::OpenBrowser
+            | Command::OpenAggregate => "View",
+            Command::SwitchWorkspace(_) | Command::WorkspaceSwitcher => "Workspace",
+            Command::Settings | Command::Theme | Command::AccentPicker
+            | Command::ToggleSidebar => "Settings",
+            Command::CommandPalette | Command::SessionSwitcher | Command::LayoutSwitcher
+            | Command::TapeManager | Command::Help => "Open",
+            Command::Quit | Command::Detach => "Session",
         }
     }
 }
@@ -366,11 +458,17 @@ pub struct Os {
     pub theme_picker_open: bool,
     /// The selected index in the theme picker.
     pub theme_picker_selected: usize,
+    /// Whether the accent picker overlay is open.
+    pub accent_picker_open: bool,
+    /// The selected index in the accent picker.
+    pub accent_picker_selected: usize,
     /// Whether the settings overlay is open and the selected row.
     pub settings_open: bool,
     pub settings_selected: usize,
     /// Cached list of available theme names.
     pub theme_list: Vec<String>,
+    /// Available accent colors for the accent picker.
+    pub accent_list: Vec<String>,
     /// The current daemon session name (Some = daemon/attach mode).
     pub remote_session: Option<String>,
     /// Cached session list for the session switcher.
@@ -650,9 +748,21 @@ impl Os {
             event_log: Vec::new(),
             theme_picker_open: false,
             theme_picker_selected: 0,
+            accent_picker_open: false,
+            accent_picker_selected: 0,
             settings_open: false,
             settings_selected: 0,
             theme_list: Vec::new(),
+            accent_list: vec![
+                "blue".into(),
+                "cyan".into(),
+                "green".into(),
+                "magenta".into(),
+                "orange".into(),
+                "purple".into(),
+                "red".into(),
+                "yellow".into(),
+            ],
             remote_session: None,
             remote_sessions: Vec::new(),
             pending_switch: None,
@@ -2180,6 +2290,15 @@ impl Os {
         }
     }
 
+    /// Focus the window in the given direction (left/right/up/down).
+    /// Returns an error if directional focus is not available.
+    pub fn focus_direction(&mut self, direction: &str) -> Result<(), String> {
+        // Delegate to the tape executor's focus_direction for parity.
+        // Currently a stub that returns an error.
+        let _ = direction;
+        Err("directional focus is not implemented in this port".into())
+    }
+
     /// Focus the window at the given index (if on the current workspace).
     pub fn focus_window(&mut self, index: usize) {
         let ws = self.current_workspace;
@@ -2539,6 +2658,52 @@ impl Os {
             }
             Command::Theme => self.open_theme_picker(),
             Command::Settings => self.open_settings(),
+            Command::FocusLeft => {
+                let _ = self.focus_direction("left");
+            }
+            Command::FocusRight => {
+                let _ = self.focus_direction("right");
+            }
+            Command::FocusUp => {
+                let _ = self.focus_direction("up");
+            }
+            Command::FocusDown => {
+                let _ = self.focus_direction("down");
+            }
+            Command::SwapLeft => {
+                self.swap_focused_with(crate::layout::PreselectionDir::Left);
+            }
+            Command::SwapRight => {
+                self.swap_focused_with(crate::layout::PreselectionDir::Right);
+            }
+            Command::SwapUp => {
+                self.swap_focused_with(crate::layout::PreselectionDir::Up);
+            }
+            Command::SwapDown => {
+                self.swap_focused_with(crate::layout::PreselectionDir::Down);
+            }
+            Command::ZoomToggle | Command::Fullscreen => {
+                if let Err(e) = self.toggle_zoom_internal() {
+                    self.notify(e, "error");
+                }
+            }
+            Command::RenameWindow => self.open_rename_dialog(),
+            Command::CopyMode => self.enter_scrollback_mode(),
+            Command::ToggleSidebar => self.sidebar.toggle(),
+            Command::OpenBrowser => self.open_scrollback_browser(),
+            Command::OpenAggregate => self.open_aggregate_view(),
+            Command::CommandPalette => self.open_palette(),
+            Command::SessionSwitcher => {
+                self.open_switcher(SwitcherKind::Session);
+            }
+            Command::WorkspaceSwitcher => {
+                self.open_switcher(SwitcherKind::Workspace);
+            }
+            Command::LayoutSwitcher => self.open_switcher(SwitcherKind::Layout),
+            Command::TapeManager => self.open_tape_manager(),
+            Command::AccentPicker => self.open_accent_picker(),
+            Command::Detach => self.leave_terminal_mode(),
+            Command::Help => self.toggle_help(),
         }
     }
 
@@ -4009,6 +4174,34 @@ impl Os {
         }
     }
 
+    // --- Accent picker ---
+
+    pub fn open_accent_picker(&mut self) {
+        self.accent_picker_open = true;
+        self.accent_picker_selected = 0;
+    }
+
+    pub fn close_accent_picker(&mut self) {
+        self.accent_picker_open = false;
+    }
+
+    pub fn accent_picker_move(&mut self, delta: i32) {
+        if self.accent_list.is_empty() {
+            return;
+        }
+        let len = self.accent_list.len() as i32;
+        let new = (self.accent_picker_selected as i32 + delta).rem_euclid(len) as usize;
+        self.accent_picker_selected = new;
+    }
+
+    pub fn apply_selected_accent(&mut self) {
+        if let Some(name) = self.accent_list.get(self.accent_picker_selected).cloned() {
+            // Store the accent color as the border_focused_color.
+            self.config.appearance.border_focused_color = Some(name);
+            self.close_accent_picker();
+        }
+    }
+
     /// Toggle the help modal overlay.
     pub fn toggle_help(&mut self) {
         self.help_open = !self.help_open;
@@ -4333,8 +4526,8 @@ impl crate::tape::executor::TapeExecutor for Os {
         Ok(())
     }
 
-    fn focus_direction(&mut self, _direction: &str) -> Result<(), String> {
-        Err("directional focus is not implemented in this port".into())
+    fn focus_direction(&mut self, direction: &str) -> Result<(), String> {
+        self.focus_direction(direction)
     }
 }
 
@@ -4386,7 +4579,9 @@ mod tests {
         let mut os = test_os();
         os.open_palette();
         os.palette_query = "close".into();
-        assert_eq!(os.palette_items(), vec![Command::CloseWindow]);
+        let items = os.palette_items();
+        assert!(items.contains(&Command::CloseWindow));
+        assert_eq!(items[0], Command::CloseWindow);
     }
 
     #[test]

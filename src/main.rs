@@ -42,13 +42,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (overrides, remaining) = Overrides::parse(&raw_args[1..]);
 
     // Initialize logging: daemon modes write to a file, everything else to stderr.
+    // `--debug` and `--log-level` override the default filter.
     let is_daemon = remaining
         .first()
         .is_some_and(|c| c == "daemon" || c == "start-server");
-    if is_daemon {
-        init_daemon_logging();
+    let log_filter = if let Some(ref level) = overrides.log_level {
+        level.clone()
+    } else if overrides.debug == Some(true) {
+        "debug".to_string()
+    } else if is_daemon {
+        "info".to_string()
     } else {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+        String::from("warn")
+    };
+    if is_daemon {
+        init_daemon_logging(&log_filter);
+    } else {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&log_filter))
+            .init();
     }
 
     // Write a crash report on panic (Go's WriteCrashLog), so a malformed
@@ -89,7 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Initialize logging for daemon mode — writes to a file in the state directory.
-fn init_daemon_logging() {
+fn init_daemon_logging(filter: &str) {
     let dir = dirs::state_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
         .join("termos");
@@ -101,13 +112,13 @@ fn init_daemon_logging() {
         .open(&log_path);
     match file {
         Ok(f) => {
-            env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(filter))
                 .target(env_logger::Target::Pipe(Box::new(f)))
                 .init();
         }
         Err(_) => {
             // Fallback to stderr if the log file can't be opened.
-            env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(filter))
                 .init();
         }
     }
@@ -138,10 +149,11 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
         "daemon" => {
             // `daemon --no-restore` skips auto-restoring saved sessions
             // (mirrors Go's daemon flag; `tuios resurrect` restores on demand).
-            let no_restore = args.get(2).map(|a| a == "--no-restore").unwrap_or(false);
+            // `daemon --log-level <level>` sets the debug log level.
+            let daemon_opts = termos::cli::parse_daemon_args(&args[2..])?;
             let daemon = Arc::new(Daemon::new());
             daemon.load_hooks(&UserConfig::load().hooks);
-            if !no_restore {
+            if !daemon_opts.no_restore {
                 daemon.restore_saved();
             } else {
                 eprintln!("termos daemon: --no-restore set, skipping session restore");
@@ -475,6 +487,9 @@ fn print_help() {
     println!("    --show-ram                 Show RAM usage in the dock");
     println!("    --shared-borders           Share borders between adjacent tiled windows");
     println!("    --zoom-max-width <n>       Max width in cells for zoom mode (0 = fullscreen)");
+    println!("    --debug                    Enable debug logging");
+    println!("    --log-level <level>        Set log level (off, error, warn, info, debug, trace)");
+    println!("    --show-keys                Enable the showkeys overlay");
     println!("    --help, -h                 Print this help");
     println!("    --version, -v              Print version");
     println!("    --skill                    Print the agent skill document");
@@ -1840,30 +1855,16 @@ fn cmd_kill_server() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_session_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut session: Option<String> = None;
-    let mut json = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-s" | "--session" => {
-                i += 1;
-                session = args.get(i).cloned();
-            }
-            "--json" => json = true,
-            a if a.starts_with('-') => return Err(format!("unknown flag '{a}'").into()),
-            a => session = Some(a.to_string()),
-        }
-        i += 1;
-    }
+    let opts = termos::cli::parse_session_info_args(args);
     let client = DaemonClient::connect()?;
     let sessions = client.list()?;
-    let target = match session {
+    let target = match opts.session {
         Some(n) => sessions.into_iter().find(|s| s.name == n),
         None => sessions.into_iter().next(),
     };
     match target {
         Some(s) => {
-            if json {
+            if opts.json {
                 let val = serde_json::json!({
                     "name": s.name,
                     "id": s.id,
@@ -1887,30 +1888,16 @@ fn cmd_session_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_list_windows(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut session: Option<String> = None;
-    let mut json = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-s" | "--session" => {
-                i += 1;
-                session = args.get(i).cloned();
-            }
-            "--json" => json = true,
-            a if a.starts_with('-') => return Err(format!("unknown flag '{a}'").into()),
-            a => session = Some(a.to_string()),
-        }
-        i += 1;
-    }
+    let opts = termos::cli::parse_session_info_args(args);
     let client = DaemonClient::connect()?;
     let sessions = client.list()?;
-    let target = match session {
+    let target = match opts.session {
         Some(n) => sessions.into_iter().find(|s| s.name == n),
         None => sessions.into_iter().next(),
     };
     match target {
         Some(s) => {
-            if json {
+            if opts.json {
                 let val = serde_json::json!({
                     "session": s.name,
                     "windows": s.windows,
@@ -2066,75 +2053,20 @@ fn resolve_session_name(client: &DaemonClient, session: &Option<String>) -> Resu
     }
 }
 
-/// Parse common `-s/--session` and `--json` flags from args, returning
-/// (session, json, remaining_positional).
-fn parse_session_json_args(args: &[String]) -> (Option<String>, bool, Vec<String>) {
-    let mut session: Option<String> = None;
-    let mut json = false;
-    let mut positional = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-s" | "--session" => {
-                i += 1;
-                session = args.get(i).cloned();
-            }
-            "--json" => json = true,
-            a if a.starts_with('-') && a != "-" => {
-                // Skip unknown flags silently for forward-compat.
-            }
-            a => positional.push(a.to_string()),
-        }
-        i += 1;
-    }
-    (session, json, positional)
-}
-
 /// `tuios ssh` — SSH server mode (requires the `network` feature).
 #[cfg(feature = "network")]
 fn cmd_ssh(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut host = "0.0.0.0".to_string();
-    let mut port = "22".to_string();
-    let mut key_path: Option<String> = None;
-    let mut default_session: Option<String> = None;
-    let mut ephemeral = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--host" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    host = v.clone();
-                }
-            }
-            "--port" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    port = v.clone();
-                }
-            }
-            "--key-path" => {
-                i += 1;
-                key_path = args.get(i).cloned();
-            }
-            "--default-session" => {
-                i += 1;
-                default_session = args.get(i).cloned();
-            }
-            "--ephemeral" => ephemeral = true,
-            other => return Err(format!("unknown ssh flag '{other}'").into()),
-        }
-        i += 1;
-    }
-    let _ = default_session;
-    let _ = ephemeral;
+    let opts = termos::cli::parse_ssh_args(args)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let _ = &opts.default_session;
+    let _ = opts.ephemeral;
 
     let config = UserConfig::load();
     let server = termos::network::ssh::TermosSshServer::new(config);
-    let addr = format!("{host}:{port}");
+    let addr = format!("{}:{}", opts.host, opts.port);
     let cfg = termos::network::ssh::SshServerConfig {
         addr,
-        host_key_path: key_path,
+        host_key_path: opts.key_path,
     };
     // The SSH server runs a tokio runtime internally.
     let rt = tokio::runtime::Runtime::new()?;
@@ -2149,11 +2081,11 @@ fn cmd_ssh(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 /// `tuios new-window [name]` — create a new window in a session.
 fn cmd_new_window(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let (session, json, positional) = parse_session_json_args(args);
-    let name = positional.first().cloned().unwrap_or_default();
+    let opts = termos::cli::parse_new_window_args(args);
+    let name = opts.name.unwrap_or_default();
 
     let client = DaemonClient::connect()?;
-    let session = resolve_session_name(&client, &session)?;
+    let session = resolve_session_name(&client, &opts.session)?;
 
     client.send(&Message::NewWindowInSession {
         session: Some(session.clone()),
@@ -2161,7 +2093,7 @@ fn cmd_new_window(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     })?;
     match recv_reply(&client)? {
         Message::NewWindowResult { window } => {
-            if json {
+            if opts.json {
                 let val = serde_json::json!({
                     "window_id": window.id,
                     "title": window.title,
@@ -2181,58 +2113,31 @@ fn cmd_new_window(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 /// `tuios run-command <cmd> [args]` — execute a tape command remotely.
 fn cmd_run_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut session: Option<String> = None;
-    let mut json = false;
-    let mut list = false;
-    let mut positional: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-s" | "--session" => {
-                i += 1;
-                session = args.get(i).cloned();
-            }
-            "--json" => json = true,
-            "--list" => list = true,
-            a if a.starts_with('-') && a != "-" => {
-                // Skip unknown flags.
-            }
-            a => positional.push(a.to_string()),
-        }
-        i += 1;
-    }
+    let opts = termos::cli::parse_run_command_args(args);
 
-    if list {
+    if opts.list {
         // List available tape commands.
-        let commands = [
-            "NewWindow", "CloseWindow", "SwitchWorkspace", "NextWorkspace",
-            "PrevWorkspace", "ToggleTiling", "SetDockbarPosition", "SetBorderStyle",
-            "DisableAnimations", "EnableAnimations", "FocusWindow", "NextWindow",
-            "PrevWindow", "SplitHorizontal", "SplitVertical", "Type", "Press",
-            "Wait", "Sleep", "Screenshot",
-        ];
-        for c in commands {
+        for c in termos::cli::AVAILABLE_RUN_COMMANDS {
             println!("{c}");
         }
         return Ok(());
     }
 
-    let command = positional
-        .first()
+    let command = opts
+        .command
         .ok_or("usage: tuios run-command <command> [args...] (use --list for available commands)")?;
-    let cmd_args = &positional[1..];
 
     let client = DaemonClient::connect()?;
-    let session = resolve_session_name(&client, &session)?;
+    let session = resolve_session_name(&client, &opts.session)?;
 
     client.send(&Message::RunCommand {
         session: Some(session.clone()),
         command: command.clone(),
-        args: cmd_args.to_vec(),
+        args: opts.args.clone(),
     })?;
     match recv_reply(&client)? {
         Message::RunCommandResult { result } => {
-            if json {
+            if opts.json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
                 println!("{}", serde_json::to_string(&result)?);
@@ -2246,16 +2151,13 @@ fn cmd_run_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 /// `tuios set-config <path> <value>` — set a runtime config option.
 fn cmd_set_config(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let (session, _json, positional) = parse_session_json_args(args);
-    let path = positional
-        .first()
-        .ok_or("usage: tuios set-config <path> <value>")?;
-    let value = positional
-        .get(1)
-        .ok_or("usage: tuios set-config <path> <value>")?;
+    let opts = termos::cli::parse_set_config_args(args)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let path = opts.path.unwrap();
+    let value = opts.value.unwrap();
 
     let client = DaemonClient::connect()?;
-    let session = resolve_session_name(&client, &session)?;
+    let session = resolve_session_name(&client, &opts.session)?;
 
     client.send(&Message::SetConfig {
         session: Some(session),
@@ -2273,13 +2175,12 @@ fn cmd_set_config(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 /// `tuios get-config <path>` — read a runtime config option.
 fn cmd_get_config(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let (session, _json, positional) = parse_session_json_args(args);
-    let path = positional
-        .first()
-        .ok_or("usage: tuios get-config <path>")?;
+    let opts = termos::cli::parse_get_config_args(args)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let path = opts.path.unwrap();
 
     let client = DaemonClient::connect()?;
-    let session = resolve_session_name(&client, &session)?;
+    let session = resolve_session_name(&client, &opts.session)?;
 
     client.send(&Message::GetConfig {
         session: Some(session),
@@ -2297,45 +2198,16 @@ fn cmd_get_config(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 /// `tuios explain-agent-screen` — explain screen rule matching.
 fn cmd_explain_agent_screen(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut session: Option<String> = None;
-    let mut window: Option<String> = None;
-    let mut harness = String::new();
-    let mut lines: i32 = 0;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-s" | "--session" => {
-                i += 1;
-                session = args.get(i).cloned();
-            }
-            "-w" | "--window" => {
-                i += 1;
-                window = args.get(i).cloned();
-            }
-            "--harness" => {
-                i += 1;
-                harness = args.get(i).cloned().unwrap_or_default();
-            }
-            "--lines" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    lines = v.parse().unwrap_or(0);
-                }
-            }
-            "--json" => {}
-            _ => {}
-        }
-        i += 1;
-    }
+    let opts = termos::cli::parse_explain_agent_screen_args(args);
 
     let client = DaemonClient::connect()?;
-    let session = resolve_session_name(&client, &session)?;
+    let session = resolve_session_name(&client, &opts.session)?;
 
     client.send(&Message::ExplainAgentScreen {
         session: Some(session),
-        window,
-        harness,
-        lines,
+        window: opts.window,
+        harness: opts.harness,
+        lines: opts.lines,
     })?;
     match recv_reply(&client)? {
         Message::ExplainResult { explanation } => {
@@ -2349,17 +2221,13 @@ fn cmd_explain_agent_screen(args: &[String]) -> Result<(), Box<dyn std::error::E
 
 /// `tuios set-workspace-name <workspace> [name]` — name a workspace.
 fn cmd_set_workspace_name(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let (session, _json, positional) = parse_session_json_args(args);
-    let workspace_str = positional
-        .first()
-        .ok_or("usage: tuios set-workspace-name <workspace> [name]")?;
-    let workspace: i32 = workspace_str
-        .parse()
-        .map_err(|_| format!("workspace must be a number, got {workspace_str:?}"))?;
-    let name = positional.get(1).cloned().unwrap_or_default();
+    let opts = termos::cli::parse_set_workspace_name_args(args)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let workspace = opts.workspace.unwrap();
+    let name = opts.name;
 
     let client = DaemonClient::connect()?;
-    let session = resolve_session_name(&client, &session)?;
+    let session = resolve_session_name(&client, &opts.session)?;
 
     client.send(&Message::SetWorkspaceName {
         session: Some(session),
@@ -2381,19 +2249,18 @@ fn cmd_set_workspace_name(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
 /// `tuios get-window [id-or-name]` — get detailed window info.
 fn cmd_get_window(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let (session, json, positional) = parse_session_json_args(args);
-    let window = positional.first().cloned();
+    let opts = termos::cli::parse_get_window_args(args);
 
     let client = DaemonClient::connect()?;
-    let session = resolve_session_name(&client, &session)?;
+    let session = resolve_session_name(&client, &opts.session)?;
 
     client.send(&Message::GetWindow {
         session: Some(session.clone()),
-        window,
+        window: opts.window,
     })?;
     match recv_reply(&client)? {
         Message::WindowDetail { detail } => {
-            if json {
+            if opts.json {
                 println!("{}", serde_json::to_string_pretty(&detail)?);
             } else {
                 // Print as labelled lines.
@@ -2511,33 +2378,25 @@ fn cmd_keybinds_list_custom() -> Result<(), Box<dyn std::error::Error>> {
 
 /// `tuios completion <shell>` — generate shell completion scripts.
 fn cmd_completion(shell: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let shell = termos::cli::CompletionShell::parse(shell)
+        .ok_or_else(|| format!("unsupported shell '{shell}' (try: bash, zsh, fish)"))?;
     let completions = match shell {
-        "bash" => generate_bash_completions(),
-        "zsh" => generate_zsh_completions(),
-        "fish" => generate_fish_completions(),
-        other => return Err(format!("unsupported shell '{other}' (try: bash, zsh, fish)").into()),
+        termos::cli::CompletionShell::Bash => generate_bash_completions(),
+        termos::cli::CompletionShell::Zsh => generate_zsh_completions(),
+        termos::cli::CompletionShell::Fish => generate_fish_completions(),
     };
     print!("{completions}");
     Ok(())
 }
 
 fn generate_bash_completions() -> String {
-    let commands = [
-        "daemon", "run", "new", "attach", "list", "ls", "kill", "resurrect",
-        "start-server", "kill-server", "session-info", "list-windows",
-        "set-session-name", "set-session-accent", "logs", "layout", "config",
-        "keybinds", "tape", "set-agent-state", "get-agent-state", "send-keys",
-        "send-text", "capture-pane", "wait-for", "list-verbs", "ssh",
-        "new-window", "run-command", "set-config", "get-config",
-        "explain-agent-screen", "set-workspace-name", "get-window", "completion",
-    ];
     let mut out = String::new();
     out.push_str("# Bash completion for termos\n");
     out.push_str("_termos() {\n");
     out.push_str("    local cur prev cmds\n");
     out.push_str("    cur=${COMP_WORDS[COMP_CWORD]}\n");
     out.push_str("    cmds=\"");
-    out.push_str(&commands.join(" "));
+    out.push_str(&termos::cli::COMPLETION_COMMANDS.join(" "));
     out.push_str("\"\n");
     out.push_str("    if [ $COMP_CWORD -eq 1 ]; then\n");
     out.push_str("        COMPREPLY=( $(compgen -W \"$cmds\" -- \"$cur\") )\n");
@@ -2549,21 +2408,12 @@ fn generate_bash_completions() -> String {
 }
 
 fn generate_zsh_completions() -> String {
-    let commands = [
-        "daemon", "run", "new", "attach", "list", "ls", "kill", "resurrect",
-        "start-server", "kill-server", "session-info", "list-windows",
-        "set-session-name", "set-session-accent", "logs", "layout", "config",
-        "keybinds", "tape", "set-agent-state", "get-agent-state", "send-keys",
-        "send-text", "capture-pane", "wait-for", "list-verbs", "ssh",
-        "new-window", "run-command", "set-config", "get-config",
-        "explain-agent-screen", "set-workspace-name", "get-window", "completion",
-    ];
     let mut out = String::new();
     out.push_str("#compdef termos\n");
     out.push_str("_termos() {\n");
     out.push_str("    local -a commands\n");
     out.push_str("    commands=(\n");
-    for c in &commands {
+    for c in termos::cli::COMPLETION_COMMANDS {
         out.push_str(&format!("        '{c}'\n"));
     }
     out.push_str("    )\n");
@@ -2577,18 +2427,9 @@ fn generate_zsh_completions() -> String {
 }
 
 fn generate_fish_completions() -> String {
-    let commands = [
-        "daemon", "run", "new", "attach", "list", "ls", "kill", "resurrect",
-        "start-server", "kill-server", "session-info", "list-windows",
-        "set-session-name", "set-session-accent", "logs", "layout", "config",
-        "keybinds", "tape", "set-agent-state", "get-agent-state", "send-keys",
-        "send-text", "capture-pane", "wait-for", "list-verbs", "ssh",
-        "new-window", "run-command", "set-config", "get-config",
-        "explain-agent-screen", "set-workspace-name", "get-window", "completion",
-    ];
     let mut out = String::new();
     out.push_str("# Fish completion for termos\n");
-    for c in &commands {
+    for c in termos::cli::COMPLETION_COMMANDS {
         out.push_str(&format!("complete -c termos -n '__fish_use_subcommand' -a {c}\n"));
     }
     out

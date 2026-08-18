@@ -118,6 +118,27 @@ impl PtyWriter {
             libc::ioctl(self.file.as_raw_fd(), libc::TIOCSWINSZ, &ws);
         }
     }
+
+    /// Set the PTY window size including pixel dimensions (TIOCSWINSZ ioctl).
+    /// This enables applications like `kitten icat` to query the terminal
+    /// size in pixels via XTWINOPS / TIOCGWINSZ.
+    pub fn set_pixel_size(&self, cols: u16, rows: u16, xpixel: u16, ypixel: u16) {
+        let ws = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: xpixel,
+            ws_ypixel: ypixel,
+        };
+        unsafe {
+            libc::ioctl(self.file.as_raw_fd(), libc::TIOCSWINSZ, &ws);
+        }
+    }
+
+    /// The raw file descriptor of the PTY master. Used for `tcgetpgrp` to
+    /// detect the foreground process group.
+    pub fn raw_fd(&self) -> std::os::unix::io::RawFd {
+        self.file.as_raw_fd()
+    }
 }
 
 /// The write half of a window's I/O: send input and resize toward the shell.
@@ -126,6 +147,10 @@ impl PtyWriter {
 pub trait PtySink: Send {
     fn write(&self, data: &[u8]);
     fn resize(&self, size: WinSize);
+    /// Set pixel dimensions on the PTY (TIOCSWINSZ with xpixel/ypixel).
+    /// Default is a no-op — remote sinks forward resize as a protocol message
+    /// that does not carry pixel dimensions.
+    fn set_pixel_size(&self, _cols: u16, _rows: u16, _xpixel: u16, _ypixel: u16) {}
 }
 
 impl PtySink for PtyWriter {
@@ -136,20 +161,41 @@ impl PtySink for PtyWriter {
     fn resize(&self, size: WinSize) {
         PtyWriter::resize(self, size);
     }
+
+    fn set_pixel_size(&self, cols: u16, rows: u16, xpixel: u16, ypixel: u16) {
+        PtyWriter::set_pixel_size(self, cols, rows, xpixel, ypixel);
+    }
 }
 
 /// Handle to the child shell process. Sends SIGHUP and reaps on drop.
+/// Also retains a dup of the PTY master fd for `tcgetpgrp` queries
+/// (foreground-process detection) that need the controlling terminal.
 pub struct PtyHandle {
     child_pid: Pid,
+    master_fd: Option<std::os::fd::OwnedFd>,
 }
 
 impl PtyHandle {
-    fn new(child_pid: Pid) -> Self {
-        PtyHandle { child_pid }
+    fn new(child_pid: Pid, master_fd: std::os::fd::OwnedFd) -> Self {
+        PtyHandle {
+            child_pid,
+            master_fd: Some(master_fd),
+        }
     }
 
     pub fn pid(&self) -> i32 {
         self.child_pid.as_raw()
+    }
+
+    /// The raw fd of the PTY master, for `tcgetpgrp` / foreground-process
+    /// detection. Returns `None` after `close()` or for remote windows.
+    pub fn master_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        self.master_fd.as_ref().map(|fd| fd.as_raw_fd())
+    }
+
+    /// Drop the master fd, closing the PTY master. Called on window close.
+    pub fn close(&mut self) {
+        self.master_fd.take();
     }
 }
 
@@ -300,7 +346,14 @@ pub fn spawn_pty(
             std::thread::spawn(move || reader_thread(reader_fd, tx, wake, reading_clone));
 
             let writer = PtyWriter { file: writer_file };
-            let handle = PtyHandle::new(child);
+            // Dup the master fd for the handle so it can answer tcgetpgrp
+            // queries without sharing the reader's Arc<OwnedFd>.
+            let handle_fd_raw = unsafe { libc::dup(master_fd.as_raw_fd()) };
+            if handle_fd_raw < 0 {
+                return Err(nix::errno::Errno::last().into());
+            }
+            let handle_fd = unsafe { OwnedFd::from_raw_fd(handle_fd_raw) };
+            let handle = PtyHandle::new(child, handle_fd);
             Ok((writer, handle, PtyReader { rx, reading }))
         }
     }

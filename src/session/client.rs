@@ -32,6 +32,9 @@ impl DaemonClient {
         };
         client.send(&Message::Hello {
             name: "tuios-client".to_string(),
+            codec: None,
+            cols: None,
+            rows: None,
         })?;
         match client.recv()? {
             Message::Welcome { .. } => Ok(client),

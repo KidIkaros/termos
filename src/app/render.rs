@@ -254,6 +254,25 @@ pub fn render(os: &Os, buf: &mut Buffer) {
             &lines,
             "Theme  (j/k: select, Enter: apply, Esc: cancel)",
         );
+    } else if os.accent_picker_open {
+        let lines: Vec<String> = os
+            .accent_list
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                if i == os.accent_picker_selected {
+                    format!("> {}", name)
+                } else {
+                    format!("  {}", name)
+                }
+            })
+            .collect();
+        render_overlay(
+            buf,
+            content_area,
+            &lines,
+            "Accent  (j/k: select, Enter: apply, Esc: cancel)",
+        );
     } else if os.help_open {
         render_help_modal(os, buf, content_area);
     } else if os.scrollback_mode {
@@ -279,6 +298,7 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         && !os.switcher_open
         && !os.scrollback_mode
         && !os.theme_picker_open
+        && !os.accent_picker_open
     {
         render_showkeys(buf, content_area, &os.last_key_chord);
     }
@@ -365,7 +385,10 @@ fn render_showkeys(buf: &mut Buffer, area: TuiRect, chord: &str) {
 /// commands, the selected one highlighted.
 pub fn render_palette(os: &Os, buf: &mut Buffer, area: TuiRect) {
     let items = os.palette_items();
-    let rows: Vec<(String, String)> = items.iter().map(|c| (c.label(), String::new())).collect();
+    let rows: Vec<(String, String)> = items
+        .iter()
+        .map(|c| (c.label(), c.category().to_string()))
+        .collect();
     render_list_overlay(
         buf,
         area,

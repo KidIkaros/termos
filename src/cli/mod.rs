@@ -323,6 +323,876 @@ pub fn parse_run_args(args: &[String]) -> RunOptions {
     opts
 }
 
+// ─── SSH Command ──────────────────────────────────────────────────────────
+
+/// Options for the `ssh` command.
+#[derive(Debug, Clone)]
+pub struct SshOptions {
+    pub host: String,
+    pub port: String,
+    pub key_path: Option<String>,
+    pub default_session: Option<String>,
+    pub ephemeral: bool,
+}
+
+impl Default for SshOptions {
+    fn default() -> Self {
+        Self {
+            host: "localhost".to_string(),
+            port: "2222".to_string(),
+            key_path: None,
+            default_session: None,
+            ephemeral: false,
+        }
+    }
+}
+
+/// Parse `ssh` command arguments.
+pub fn parse_ssh_args(args: &[String]) -> Result<SshOptions, String> {
+    let mut opts = SshOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--host" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    opts.host = v.clone();
+                }
+            }
+            "--port" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    opts.port = v.clone();
+                }
+            }
+            "--key-path" => {
+                i += 1;
+                opts.key_path = args.get(i).cloned();
+            }
+            "--default-session" => {
+                i += 1;
+                opts.default_session = args.get(i).cloned();
+            }
+            "--ephemeral" => opts.ephemeral = true,
+            other => return Err(format!("unknown ssh flag '{other}'")),
+        }
+        i += 1;
+    }
+    Ok(opts)
+}
+
+// ─── New-Window Command ───────────────────────────────────────────────────
+
+/// Options for the `new-window` command.
+#[derive(Debug, Clone, Default)]
+pub struct NewWindowOptions {
+    pub session: Option<String>,
+    pub name: Option<String>,
+    pub json: bool,
+}
+
+/// Parse `new-window` command arguments.
+pub fn parse_new_window_args(args: &[String]) -> NewWindowOptions {
+    let mut opts = NewWindowOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                opts.session = args.get(i).cloned();
+            }
+            "--json" => opts.json = true,
+            a if a.starts_with('-') && a != "-" => {}
+            a => {
+                if opts.name.is_none() {
+                    opts.name = Some(a.to_string());
+                }
+            }
+        }
+        i += 1;
+    }
+    opts
+}
+
+// ─── Run-Command Command ──────────────────────────────────────────────────
+
+/// Options for the `run-command` command.
+#[derive(Debug, Clone, Default)]
+pub struct RunCommandOptions {
+    pub session: Option<String>,
+    pub json: bool,
+    pub list: bool,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+}
+
+/// Parse `run-command` arguments.
+pub fn parse_run_command_args(args: &[String]) -> RunCommandOptions {
+    let mut opts = RunCommandOptions::default();
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                opts.session = args.get(i).cloned();
+            }
+            "--json" => opts.json = true,
+            "--list" => opts.list = true,
+            a if a.starts_with('-') && a != "-" => {}
+            a => positional.push(a.to_string()),
+        }
+        i += 1;
+    }
+    opts.command = positional.first().cloned();
+    opts.args = positional.into_iter().skip(1).collect();
+    opts
+}
+
+/// List of available tape commands for `run-command --list`.
+pub const AVAILABLE_RUN_COMMANDS: &[&str] = &[
+    "NewWindow",
+    "CloseWindow",
+    "NextWindow",
+    "PrevWindow",
+    "FocusWindow",
+    "RenameWindow",
+    "MinimizeWindow",
+    "RestoreWindow",
+    "TerminalMode",
+    "WindowManagementMode",
+    "ToggleTiling",
+    "EnableTiling",
+    "DisableTiling",
+    "SnapLeft",
+    "SnapRight",
+    "SnapFullscreen",
+    "Split",
+    "RotateSplit",
+    "EqualizeSplits",
+    "SwitchWorkspace",
+    "MoveToWorkspace",
+    "MoveAndFollowWorkspace",
+    "EnableAnimations",
+    "DisableAnimations",
+    "ToggleAnimations",
+    "SetDockbarPosition",
+    "SetBorderStyle",
+    "SetTheme",
+    "ShowNotification",
+    "FocusDirection",
+];
+
+// ─── Set-Config / Get-Config Commands ─────────────────────────────────────
+
+/// Options for the `set-config` command.
+#[derive(Debug, Clone, Default)]
+pub struct SetConfigOptions {
+    pub session: Option<String>,
+    pub path: Option<String>,
+    pub value: Option<String>,
+}
+
+/// Parse `set-config` arguments.
+pub fn parse_set_config_args(args: &[String]) -> Result<SetConfigOptions, String> {
+    let mut opts = SetConfigOptions::default();
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                opts.session = args.get(i).cloned();
+            }
+            a if a.starts_with('-') && a != "-" => {}
+            a => positional.push(a.to_string()),
+        }
+        i += 1;
+    }
+    opts.path = positional.first().cloned();
+    opts.value = positional.get(1).cloned();
+    if opts.path.is_none() {
+        return Err("usage: tuios set-config <path> <value>".into());
+    }
+    if opts.value.is_none() {
+        return Err("usage: tuios set-config <path> <value>".into());
+    }
+    Ok(opts)
+}
+
+/// Options for the `get-config` command.
+#[derive(Debug, Clone, Default)]
+pub struct GetConfigOptions {
+    pub session: Option<String>,
+    pub path: Option<String>,
+}
+
+/// Parse `get-config` arguments.
+pub fn parse_get_config_args(args: &[String]) -> Result<GetConfigOptions, String> {
+    let mut opts = GetConfigOptions::default();
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                opts.session = args.get(i).cloned();
+            }
+            a if a.starts_with('-') && a != "-" => {}
+            a => positional.push(a.to_string()),
+        }
+        i += 1;
+    }
+    opts.path = positional.first().cloned();
+    if opts.path.is_none() {
+        return Err("usage: tuios get-config <path>".into());
+    }
+    Ok(opts)
+}
+
+/// Valid config paths for `set-config` / `get-config`.
+pub const VALID_CONFIG_PATHS: &[&str] = &[
+    "dockbar_position",
+    "border_style",
+    "animations",
+    "hide_window_buttons",
+];
+
+/// Valid values for a given config path (for completion / validation).
+pub fn config_path_values(path: &str) -> Option<&'static [&'static str]> {
+    match path {
+        "dockbar_position" | "appearance.dockbar_position" => {
+            Some(&["top", "bottom", "hidden"])
+        }
+        "border_style" | "appearance.border_style" => Some(&[
+            "rounded",
+            "normal",
+            "thick",
+            "double",
+            "hidden",
+            "block",
+            "ascii",
+        ]),
+        "animations" | "appearance.animations_enabled" | "animations_enabled" => {
+            Some(&["true", "false", "toggle", "on", "off"])
+        }
+        "hide_window_buttons" | "appearance.hide_window_buttons" => {
+            Some(&["true", "false"])
+        }
+        _ => None,
+    }
+}
+
+// ─── Explain-Agent-Screen Command ─────────────────────────────────────────
+
+/// Options for the `explain-agent-screen` command.
+#[derive(Debug, Clone, Default)]
+pub struct ExplainAgentScreenOptions {
+    pub session: Option<String>,
+    pub window: Option<String>,
+    pub harness: String,
+    pub lines: i32,
+}
+
+/// Parse `explain-agent-screen` arguments.
+pub fn parse_explain_agent_screen_args(args: &[String]) -> ExplainAgentScreenOptions {
+    let mut opts = ExplainAgentScreenOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                opts.session = args.get(i).cloned();
+            }
+            "-w" | "--window" => {
+                i += 1;
+                opts.window = args.get(i).cloned();
+            }
+            "--harness" => {
+                i += 1;
+                opts.harness = args.get(i).cloned().unwrap_or_default();
+            }
+            "--lines" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    opts.lines = v.parse().unwrap_or(0);
+                }
+            }
+            "--json" => {}
+            _ => {}
+        }
+        i += 1;
+    }
+    opts
+}
+
+// ─── Set-Workspace-Name Command ───────────────────────────────────────────
+
+/// Options for the `set-workspace-name` command.
+#[derive(Debug, Clone, Default)]
+pub struct SetWorkspaceNameOptions {
+    pub session: Option<String>,
+    pub workspace: Option<i32>,
+    pub name: String,
+}
+
+/// Parse `set-workspace-name` arguments.
+pub fn parse_set_workspace_name_args(
+    args: &[String],
+) -> Result<SetWorkspaceNameOptions, String> {
+    let mut opts = SetWorkspaceNameOptions::default();
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                opts.session = args.get(i).cloned();
+            }
+            "--json" => {}
+            a if a.starts_with('-') && a != "-" => {}
+            a => positional.push(a.to_string()),
+        }
+        i += 1;
+    }
+    let workspace_str = positional
+        .first()
+        .ok_or("usage: tuios set-workspace-name <workspace> [name]")?;
+    opts.workspace = Some(
+        workspace_str
+            .parse()
+            .map_err(|_| format!("workspace must be a number, got {workspace_str:?}"))?,
+    );
+    opts.name = positional.get(1).cloned().unwrap_or_default();
+    Ok(opts)
+}
+
+// ─── Get-Window Command ───────────────────────────────────────────────────
+
+/// Options for the `get-window` command.
+#[derive(Debug, Clone, Default)]
+pub struct GetWindowOptions {
+    pub session: Option<String>,
+    pub window: Option<String>,
+    pub json: bool,
+}
+
+/// Parse `get-window` arguments.
+pub fn parse_get_window_args(args: &[String]) -> GetWindowOptions {
+    let mut opts = GetWindowOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                opts.session = args.get(i).cloned();
+            }
+            "--json" => opts.json = true,
+            a if a.starts_with('-') && a != "-" => {}
+            a => {
+                if opts.window.is_none() {
+                    opts.window = Some(a.to_string());
+                }
+            }
+        }
+        i += 1;
+    }
+    opts
+}
+
+// ─── Capture-Pane Command ─────────────────────────────────────────────────
+
+/// Options for the `capture-pane` command.
+#[derive(Debug, Clone, Default)]
+pub struct CapturePaneOptions {
+    pub session: Option<String>,
+    pub window: Option<String>,
+    pub scrollback: bool,
+    pub ansi: bool,
+    pub lines: i32,
+}
+
+/// Parse `capture-pane` arguments.
+pub fn parse_capture_pane_args(args: &[String]) -> CapturePaneOptions {
+    let mut opts = CapturePaneOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                opts.session = args.get(i).cloned();
+            }
+            "-w" | "--window" => {
+                i += 1;
+                opts.window = args.get(i).cloned();
+            }
+            "-S" | "--scrollback" => opts.scrollback = true,
+            "--ansi" => opts.ansi = true,
+            "--lines" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    opts.lines = v.parse().unwrap_or(0);
+                }
+            }
+            a if a.starts_with('-') && a != "-" => {}
+            _ => {}
+        }
+        i += 1;
+    }
+    opts
+}
+
+// ─── Wait-For Command ─────────────────────────────────────────────────────
+
+/// The condition a `wait-for` command waits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitCondition {
+    /// The named session exists.
+    SessionExists,
+    /// The window printed something matching `--pattern`.
+    WindowOutput,
+    /// The window's shell exited.
+    WindowExit,
+    /// The window printed nothing for `--idle` milliseconds.
+    WindowIdle,
+}
+
+impl WaitCondition {
+    /// Parse from a string.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "session-exists" => Some(Self::SessionExists),
+            "window-output" => Some(Self::WindowOutput),
+            "window-exit" => Some(Self::WindowExit),
+            "window-idle" => Some(Self::WindowIdle),
+            _ => None,
+        }
+    }
+
+    /// All valid condition names, for display.
+    pub const NAMES: &'static [&'static str] = &[
+        "session-exists",
+        "window-output",
+        "window-exit",
+        "window-idle",
+    ];
+}
+
+/// Options for the `wait-for` command.
+#[derive(Debug, Clone)]
+pub struct WaitForOptions {
+    pub session: Option<String>,
+    pub window: Option<String>,
+    pub condition: Option<WaitCondition>,
+    /// Regex pattern for `window-output`.
+    pub pattern: Option<String>,
+    /// Milliseconds of silence that count as idle (for `window-idle`).
+    pub idle_ms: u64,
+    /// Milliseconds to wait before giving up.
+    pub timeout_ms: u64,
+    pub json: bool,
+}
+
+impl Default for WaitForOptions {
+    fn default() -> Self {
+        Self {
+            session: None,
+            window: None,
+            condition: None,
+            pattern: None,
+            idle_ms: 0,
+            timeout_ms: 30_000,
+            json: false,
+        }
+    }
+}
+
+/// Parse `wait-for` arguments.
+///
+/// Accepts both the Go-style interface (a condition positional + `--pattern`)
+/// and the legacy Rust interface (a regex positional), for backward compat.
+pub fn parse_wait_for_args(args: &[String]) -> Result<WaitForOptions, String> {
+    let mut opts = WaitForOptions::default();
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                opts.session = args.get(i).cloned();
+            }
+            "-w" | "--window" => {
+                i += 1;
+                opts.window = args.get(i).cloned();
+            }
+            "--pattern" => {
+                i += 1;
+                opts.pattern = args.get(i).cloned();
+            }
+            "--idle" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    opts.idle_ms = v.parse().unwrap_or(0);
+                }
+            }
+            "--timeout" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    opts.timeout_ms = v.parse().unwrap_or(30_000);
+                }
+            }
+            "--json" => opts.json = true,
+            a if a.starts_with('-') && a != "-" => {
+                return Err(format!("unknown flag '{a}'"));
+            }
+            a => positional.push(a.to_string()),
+        }
+        i += 1;
+    }
+
+    // The first positional is either a named condition (Go-style) or a
+    // bare regex (legacy Rust-style). If it parses as a condition, treat it
+    // as such; otherwise treat it as a pattern for the default
+    // `window-output` condition.
+    if let Some(first) = positional.first() {
+        if let Some(cond) = WaitCondition::parse(first) {
+            opts.condition = Some(cond);
+            // A second positional, if present, is also a pattern.
+            if let Some(second) = positional.get(1) {
+                opts.pattern = Some(second.clone());
+            }
+        } else {
+            // Legacy: bare regex → window-output with that pattern.
+            opts.condition = Some(WaitCondition::WindowOutput);
+            opts.pattern = Some(first.clone());
+        }
+    }
+
+    if opts.condition.is_none() {
+        return Err("usage: tuios wait-for <condition> [--pattern P] [--idle N] [--timeout N]".into());
+    }
+
+    // `window-output` requires a pattern.
+    if opts.condition == Some(WaitCondition::WindowOutput) && opts.pattern.is_none() {
+        return Err("wait-for window-output requires --pattern".into());
+    }
+
+    Ok(opts)
+}
+
+// ─── Send-Keys Command ────────────────────────────────────────────────────
+
+/// Options for the `send-keys` command.
+#[derive(Debug, Clone, Default)]
+pub struct SendKeysOptions {
+    pub session: Option<String>,
+    pub window: Option<String>,
+    pub literal: bool,
+    pub raw: bool,
+    pub keys: Vec<String>,
+}
+
+/// Parse `send-keys` arguments.
+pub fn parse_send_keys_args(args: &[String]) -> Result<SendKeysOptions, String> {
+    let mut opts = SendKeysOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                opts.session = args.get(i).cloned();
+            }
+            "-w" | "--window" => {
+                i += 1;
+                opts.window = args.get(i).cloned();
+            }
+            "-l" | "--literal" => opts.literal = true,
+            "-r" | "--raw" => opts.raw = true,
+            a if a.starts_with('-') && a != "-" => {
+                return Err(format!("unknown flag '{a}'"));
+            }
+            a => opts.keys.push(a.to_string()),
+        }
+        i += 1;
+    }
+    if opts.keys.is_empty() {
+        return Err("usage: tuios send-keys <key> [key...] (e.g. \"ctrl+b\" \"c\", \"enter\")".into());
+    }
+    Ok(opts)
+}
+
+// ─── Send-Text Command ────────────────────────────────────────────────────
+
+/// Options for the `send-text` command.
+#[derive(Debug, Clone, Default)]
+pub struct SendTextOptions {
+    pub session: Option<String>,
+    pub window: Option<String>,
+    pub text: String,
+}
+
+/// Parse `send-text` arguments.
+pub fn parse_send_text_args(args: &[String]) -> Result<SendTextOptions, String> {
+    let mut opts = SendTextOptions::default();
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                opts.session = args.get(i).cloned();
+            }
+            "-w" | "--window" => {
+                i += 1;
+                opts.window = args.get(i).cloned();
+            }
+            a if a.starts_with('-') && a != "-" => {
+                return Err(format!("unknown flag '{a}'"));
+            }
+            a => positional.push(a.to_string()),
+        }
+        i += 1;
+    }
+    opts.text = positional.join(" ");
+    if opts.text.is_empty() {
+        return Err("usage: tuios send-text <text>".into());
+    }
+    Ok(opts)
+}
+
+// ─── Set-Agent-State Command ──────────────────────────────────────────────
+
+/// Options for the `set-agent-state` command.
+#[derive(Debug, Clone, Default)]
+pub struct SetAgentStateOptions {
+    pub session: Option<String>,
+    pub window: Option<String>,
+    pub state: Option<String>,
+    pub message: String,
+    pub source: String,
+    pub harness: String,
+}
+
+/// Parse `set-agent-state` arguments.
+pub fn parse_set_agent_state_args(args: &[String]) -> Result<SetAgentStateOptions, String> {
+    let mut opts = SetAgentStateOptions::default();
+    let mut i = 0;
+    // The first positional is the state.
+    let mut state_set = false;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                opts.session = args.get(i).cloned();
+            }
+            "-w" | "--window" => {
+                i += 1;
+                opts.window = args.get(i).cloned();
+            }
+            "-m" | "--message" => {
+                i += 1;
+                opts.message = args.get(i).cloned().unwrap_or_default();
+            }
+            "--harness" => {
+                i += 1;
+                opts.harness = args.get(i).cloned().unwrap_or_default();
+            }
+            "--source" => {
+                i += 1;
+                opts.source = args.get(i).cloned().unwrap_or_default();
+            }
+            other => {
+                if !other.starts_with('-') && !state_set {
+                    opts.state = Some(other.to_string());
+                    state_set = true;
+                } else if other.starts_with('-') && other != "-" {
+                    return Err(format!("unknown flag '{other}'"));
+                }
+            }
+        }
+        i += 1;
+    }
+    if opts.state.is_none() {
+        return Err(
+            "usage: tuios set-agent-state <state> [-s session] [-w window] [-m message] [--source S] [--harness H]"
+                .into(),
+        );
+    }
+    Ok(opts)
+}
+
+// ─── Get-Agent-State Command ──────────────────────────────────────────────
+
+/// Options for the `get-agent-state` command.
+#[derive(Debug, Clone, Default)]
+pub struct GetAgentStateOptions {
+    pub session: Option<String>,
+    pub window: Option<String>,
+    pub json: bool,
+}
+
+/// Parse `get-agent-state` arguments.
+pub fn parse_get_agent_state_args(args: &[String]) -> GetAgentStateOptions {
+    let mut opts = GetAgentStateOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                opts.session = args.get(i).cloned();
+            }
+            "-w" | "--window" => {
+                i += 1;
+                opts.window = args.get(i).cloned();
+            }
+            "--json" => opts.json = true,
+            a if a.starts_with('-') && a != "-" => {}
+            _ => {}
+        }
+        i += 1;
+    }
+    opts
+}
+
+// ─── Session-Info / List-Windows Commands ─────────────────────────────────
+
+/// Options for `session-info` and `list-windows` commands.
+#[derive(Debug, Clone, Default)]
+pub struct SessionInfoOptions {
+    pub session: Option<String>,
+    pub json: bool,
+}
+
+/// Parse `session-info` / `list-windows` arguments.
+pub fn parse_session_info_args(args: &[String]) -> SessionInfoOptions {
+    let mut opts = SessionInfoOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                opts.session = args.get(i).cloned();
+            }
+            "--json" => opts.json = true,
+            a if a.starts_with('-') && a != "-" => {}
+            a => {
+                if opts.session.is_none() {
+                    opts.session = Some(a.to_string());
+                }
+            }
+        }
+        i += 1;
+    }
+    opts
+}
+
+// ─── Completion Command ───────────────────────────────────────────────────
+
+/// Supported shells for `termos completion <shell>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+impl CompletionShell {
+    /// Parse from a string.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "bash" => Some(Self::Bash),
+            "zsh" => Some(Self::Zsh),
+            "fish" => Some(Self::Fish),
+            _ => None,
+        }
+    }
+}
+
+/// All subcommand names, for shell completion generation.
+pub const COMPLETION_COMMANDS: &[&str] = &[
+    "daemon",
+    "run",
+    "new",
+    "attach",
+    "list",
+    "ls",
+    "kill",
+    "resurrect",
+    "start-server",
+    "kill-server",
+    "session-info",
+    "list-windows",
+    "set-session-name",
+    "set-session-accent",
+    "logs",
+    "layout",
+    "config",
+    "keybinds",
+    "tape",
+    "set-agent-state",
+    "get-agent-state",
+    "send-keys",
+    "send-text",
+    "capture-pane",
+    "wait-for",
+    "list-verbs",
+    "ssh",
+    "new-window",
+    "run-command",
+    "set-config",
+    "get-config",
+    "explain-agent-screen",
+    "set-workspace-name",
+    "get-window",
+    "completion",
+];
+
+// ─── Log Level ────────────────────────────────────────────────────────────
+
+/// Valid log level names, in increasing verbosity.
+pub const LOG_LEVELS: &[&str] = &["off", "error", "warn", "info", "debug", "trace"];
+
+/// Validate a log level string.
+pub fn is_valid_log_level(s: &str) -> bool {
+    LOG_LEVELS.contains(&s)
+}
+
+// ─── Daemon Command ───────────────────────────────────────────────────────
+
+/// Options for the `daemon` command.
+#[derive(Debug, Clone, Default)]
+pub struct DaemonOptions {
+    pub log_level: Option<String>,
+    pub no_restore: bool,
+}
+
+/// Parse `daemon` command arguments.
+pub fn parse_daemon_args(args: &[String]) -> Result<DaemonOptions, String> {
+    let mut opts = DaemonOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--log-level" => {
+                i += 1;
+                let level = args
+                    .get(i)
+                    .ok_or("--log-level requires a value")?;
+                if !is_valid_log_level(level) {
+                    return Err(format!(
+                        "invalid log level '{level}' (valid: {})",
+                        LOG_LEVELS.join(", ")
+                    ));
+                }
+                opts.log_level = Some(level.clone());
+            }
+            "--no-restore" => opts.no_restore = true,
+            other => return Err(format!("unknown daemon flag '{other}'")),
+        }
+        i += 1;
+    }
+    Ok(opts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +1329,457 @@ mod tests {
         let opts = parse_run_args(&args);
         assert!(opts.detach);
         assert_eq!(opts.command, Some("htop".into()));
+    }
+
+    // ─── New CLI parsing tests ────────────────────────────────────────────
+
+    #[test]
+    fn parse_ssh_args_defaults() {
+        let opts = parse_ssh_args(&[]).unwrap();
+        assert_eq!(opts.host, "localhost");
+        assert_eq!(opts.port, "2222");
+        assert!(!opts.ephemeral);
+    }
+
+    #[test]
+    fn parse_ssh_args_custom() {
+        let args = vec![
+            "--host".into(),
+            "0.0.0.0".into(),
+            "--port".into(),
+            "2222".into(),
+            "--key-path".into(),
+            "/tmp/key".into(),
+            "--default-session".into(),
+            "work".into(),
+            "--ephemeral".into(),
+        ];
+        let opts = parse_ssh_args(&args).unwrap();
+        assert_eq!(opts.host, "0.0.0.0");
+        assert_eq!(opts.port, "2222");
+        assert_eq!(opts.key_path.as_deref(), Some("/tmp/key"));
+        assert_eq!(opts.default_session.as_deref(), Some("work"));
+        assert!(opts.ephemeral);
+    }
+
+    #[test]
+    fn parse_ssh_args_unknown_flag() {
+        let args = vec!["--bogus".into()];
+        assert!(parse_ssh_args(&args).is_err());
+    }
+
+    #[test]
+    fn parse_new_window_args_basic() {
+        let args = vec!["build".into()];
+        let opts = parse_new_window_args(&args);
+        assert_eq!(opts.name.as_deref(), Some("build"));
+        assert!(!opts.json);
+    }
+
+    #[test]
+    fn parse_new_window_args_json() {
+        let args = vec!["--json".into(), "-s".into(), "work".into()];
+        let opts = parse_new_window_args(&args);
+        assert!(opts.json);
+        assert_eq!(opts.session.as_deref(), Some("work"));
+        assert!(opts.name.is_none());
+    }
+
+    #[test]
+    fn parse_run_command_args_basic() {
+        let args = vec!["NewWindow".into(), "My Window".into()];
+        let opts = parse_run_command_args(&args);
+        assert_eq!(opts.command.as_deref(), Some("NewWindow"));
+        assert_eq!(opts.args, vec!["My Window"]);
+        assert!(!opts.list);
+        assert!(!opts.json);
+    }
+
+    #[test]
+    fn parse_run_command_args_list() {
+        let args = vec!["--list".into()];
+        let opts = parse_run_command_args(&args);
+        assert!(opts.list);
+        assert!(opts.command.is_none());
+    }
+
+    #[test]
+    fn parse_run_command_args_json() {
+        let args = vec!["--json".into(), "SwitchWorkspace".into(), "2".into()];
+        let opts = parse_run_command_args(&args);
+        assert!(opts.json);
+        assert_eq!(opts.command.as_deref(), Some("SwitchWorkspace"));
+        assert_eq!(opts.args, vec!["2"]);
+    }
+
+    #[test]
+    fn parse_set_config_args_ok() {
+        let args = vec!["border_style".into(), "rounded".into()];
+        let opts = parse_set_config_args(&args).unwrap();
+        assert_eq!(opts.path.as_deref(), Some("border_style"));
+        assert_eq!(opts.value.as_deref(), Some("rounded"));
+    }
+
+    #[test]
+    fn parse_set_config_args_missing_value() {
+        let args = vec!["border_style".into()];
+        assert!(parse_set_config_args(&args).is_err());
+    }
+
+    #[test]
+    fn parse_set_config_args_missing_path() {
+        assert!(parse_set_config_args(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_get_config_args_ok() {
+        let args = vec!["border_style".into()];
+        let opts = parse_get_config_args(&args).unwrap();
+        assert_eq!(opts.path.as_deref(), Some("border_style"));
+    }
+
+    #[test]
+    fn parse_get_config_args_missing() {
+        assert!(parse_get_config_args(&[]).is_err());
+    }
+
+    #[test]
+    fn config_path_values_known() {
+        assert!(config_path_values("dockbar_position").is_some());
+        assert!(config_path_values("border_style").is_some());
+        assert!(config_path_values("animations").is_some());
+        assert!(config_path_values("hide_window_buttons").is_some());
+        assert!(config_path_values("unknown").is_none());
+    }
+
+    #[test]
+    fn test_parse_explain_agent_screen_args() {
+        let args = vec![
+            "-s".into(),
+            "work".into(),
+            "-w".into(),
+            "build".into(),
+            "--harness".into(),
+            "claude-code".into(),
+            "--lines".into(),
+            "20".into(),
+        ];
+        let opts = parse_explain_agent_screen_args(&args);
+        assert_eq!(opts.session.as_deref(), Some("work"));
+        assert_eq!(opts.window.as_deref(), Some("build"));
+        assert_eq!(opts.harness, "claude-code");
+        assert_eq!(opts.lines, 20);
+    }
+
+    #[test]
+    fn parse_set_workspace_name_args_ok() {
+        let args = vec!["2".into(), "review".into()];
+        let opts = parse_set_workspace_name_args(&args).unwrap();
+        assert_eq!(opts.workspace, Some(2));
+        assert_eq!(opts.name, "review");
+    }
+
+    #[test]
+    fn parse_set_workspace_name_args_clear() {
+        let args = vec!["3".into()];
+        let opts = parse_set_workspace_name_args(&args).unwrap();
+        assert_eq!(opts.workspace, Some(3));
+        assert_eq!(opts.name, "");
+    }
+
+    #[test]
+    fn parse_set_workspace_name_args_invalid() {
+        let args = vec!["abc".into()];
+        assert!(parse_set_workspace_name_args(&args).is_err());
+    }
+
+    #[test]
+    fn parse_set_workspace_name_args_missing() {
+        assert!(parse_set_workspace_name_args(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_get_window_args_basic() {
+        let args = vec!["Server".into()];
+        let opts = parse_get_window_args(&args);
+        assert_eq!(opts.window.as_deref(), Some("Server"));
+        assert!(!opts.json);
+    }
+
+    #[test]
+    fn parse_get_window_args_json() {
+        let args = vec!["--json".into(), "-s".into(), "work".into()];
+        let opts = parse_get_window_args(&args);
+        assert!(opts.json);
+        assert_eq!(opts.session.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn test_parse_capture_pane_args() {
+        let args = vec![
+            "-w".into(),
+            "build".into(),
+            "-S".into(),
+            "--lines".into(),
+            "40".into(),
+            "--ansi".into(),
+        ];
+        let opts = parse_capture_pane_args(&args);
+        assert_eq!(opts.window.as_deref(), Some("build"));
+        assert!(opts.scrollback);
+        assert!(opts.ansi);
+        assert_eq!(opts.lines, 40);
+    }
+
+    #[test]
+    fn wait_condition_parse() {
+        assert_eq!(
+            WaitCondition::parse("session-exists"),
+            Some(WaitCondition::SessionExists)
+        );
+        assert_eq!(
+            WaitCondition::parse("window-output"),
+            Some(WaitCondition::WindowOutput)
+        );
+        assert_eq!(
+            WaitCondition::parse("window-exit"),
+            Some(WaitCondition::WindowExit)
+        );
+        assert_eq!(
+            WaitCondition::parse("window-idle"),
+            Some(WaitCondition::WindowIdle)
+        );
+        assert_eq!(WaitCondition::parse("bogus"), None);
+    }
+
+    #[test]
+    fn parse_wait_for_args_condition_with_pattern() {
+        let args = vec![
+            "window-output".into(),
+            "-w".into(),
+            "build".into(),
+            "--pattern".into(),
+            "BUILD OK".into(),
+        ];
+        let opts = parse_wait_for_args(&args).unwrap();
+        assert_eq!(opts.condition, Some(WaitCondition::WindowOutput));
+        assert_eq!(opts.pattern.as_deref(), Some("BUILD OK"));
+        assert_eq!(opts.window.as_deref(), Some("build"));
+    }
+
+    #[test]
+    fn parse_wait_for_args_legacy_regex() {
+        let args = vec!["BUILD OK".into()];
+        let opts = parse_wait_for_args(&args).unwrap();
+        assert_eq!(opts.condition, Some(WaitCondition::WindowOutput));
+        assert_eq!(opts.pattern.as_deref(), Some("BUILD OK"));
+    }
+
+    #[test]
+    fn parse_wait_for_args_idle() {
+        let args = vec![
+            "window-idle".into(),
+            "-w".into(),
+            "build".into(),
+            "--idle".into(),
+            "2000".into(),
+        ];
+        let opts = parse_wait_for_args(&args).unwrap();
+        assert_eq!(opts.condition, Some(WaitCondition::WindowIdle));
+        assert_eq!(opts.idle_ms, 2000);
+    }
+
+    #[test]
+    fn parse_wait_for_args_timeout() {
+        let args = vec![
+            "window-exit".into(),
+            "--timeout".into(),
+            "600000".into(),
+        ];
+        let opts = parse_wait_for_args(&args).unwrap();
+        assert_eq!(opts.condition, Some(WaitCondition::WindowExit));
+        assert_eq!(opts.timeout_ms, 600000);
+    }
+
+    #[test]
+    fn parse_wait_for_args_json() {
+        let args = vec!["session-exists".into(), "--json".into()];
+        let opts = parse_wait_for_args(&args).unwrap();
+        assert_eq!(opts.condition, Some(WaitCondition::SessionExists));
+        assert!(opts.json);
+    }
+
+    #[test]
+    fn parse_wait_for_args_missing_condition() {
+        assert!(parse_wait_for_args(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_wait_for_args_output_needs_pattern() {
+        let args = vec!["window-output".into()];
+        assert!(parse_wait_for_args(&args).is_err());
+    }
+
+    #[test]
+    fn parse_send_keys_args_basic() {
+        let args = vec!["ctrl+b".into(), "q".into()];
+        let opts = parse_send_keys_args(&args).unwrap();
+        assert_eq!(opts.keys, vec!["ctrl+b", "q"]);
+    }
+
+    #[test]
+    fn parse_send_keys_args_literal() {
+        let args = vec!["--literal".into(), "--raw".into(), "echo hello".into()];
+        let opts = parse_send_keys_args(&args).unwrap();
+        assert!(opts.literal);
+        assert!(opts.raw);
+        assert_eq!(opts.keys, vec!["echo hello"]);
+    }
+
+    #[test]
+    fn parse_send_keys_args_empty() {
+        assert!(parse_send_keys_args(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_send_text_args_basic() {
+        let args = vec!["hello".into(), "world".into()];
+        let opts = parse_send_text_args(&args).unwrap();
+        assert_eq!(opts.text, "hello world");
+    }
+
+    #[test]
+    fn parse_send_text_args_empty() {
+        assert!(parse_send_text_args(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_set_agent_state_args_basic() {
+        let args = vec!["working".into()];
+        let opts = parse_set_agent_state_args(&args).unwrap();
+        assert_eq!(opts.state.as_deref(), Some("working"));
+    }
+
+    #[test]
+    fn parse_set_agent_state_args_full() {
+        let args = vec![
+            "needs_input".into(),
+            "-s".into(),
+            "work".into(),
+            "-w".into(),
+            "build".into(),
+            "-m".into(),
+            "awaiting approval".into(),
+            "--harness".into(),
+            "claude-code".into(),
+            "--source".into(),
+            "report".into(),
+        ];
+        let opts = parse_set_agent_state_args(&args).unwrap();
+        assert_eq!(opts.state.as_deref(), Some("needs_input"));
+        assert_eq!(opts.session.as_deref(), Some("work"));
+        assert_eq!(opts.window.as_deref(), Some("build"));
+        assert_eq!(opts.message, "awaiting approval");
+        assert_eq!(opts.harness, "claude-code");
+        assert_eq!(opts.source, "report");
+    }
+
+    #[test]
+    fn parse_set_agent_state_args_missing() {
+        assert!(parse_set_agent_state_args(&[]).is_err());
+    }
+
+    #[test]
+    fn test_parse_get_agent_state_args() {
+        let args = vec!["-w".into(), "build".into(), "--json".into()];
+        let opts = parse_get_agent_state_args(&args);
+        assert_eq!(opts.window.as_deref(), Some("build"));
+        assert!(opts.json);
+    }
+
+    #[test]
+    fn test_parse_session_info_args() {
+        let args = vec!["work".into(), "--json".into()];
+        let opts = parse_session_info_args(&args);
+        assert_eq!(opts.session.as_deref(), Some("work"));
+        assert!(opts.json);
+    }
+
+    #[test]
+    fn completion_shell_parse() {
+        assert_eq!(CompletionShell::parse("bash"), Some(CompletionShell::Bash));
+        assert_eq!(CompletionShell::parse("zsh"), Some(CompletionShell::Zsh));
+        assert_eq!(CompletionShell::parse("fish"), Some(CompletionShell::Fish));
+        assert_eq!(CompletionShell::parse("bogus"), None);
+    }
+
+    #[test]
+    fn log_level_validation() {
+        assert!(is_valid_log_level("debug"));
+        assert!(is_valid_log_level("trace"));
+        assert!(is_valid_log_level("off"));
+        assert!(!is_valid_log_level("verbose"));
+        assert!(!is_valid_log_level(""));
+    }
+
+    #[test]
+    fn parse_daemon_args_defaults() {
+        let opts = parse_daemon_args(&[]).unwrap();
+        assert!(!opts.no_restore);
+        assert!(opts.log_level.is_none());
+    }
+
+    #[test]
+    fn parse_daemon_args_log_level() {
+        let args = vec!["--log-level".into(), "debug".into()];
+        let opts = parse_daemon_args(&args).unwrap();
+        assert_eq!(opts.log_level.as_deref(), Some("debug"));
+    }
+
+    #[test]
+    fn parse_daemon_args_no_restore() {
+        let args = vec!["--no-restore".into()];
+        let opts = parse_daemon_args(&args).unwrap();
+        assert!(opts.no_restore);
+    }
+
+    #[test]
+    fn parse_daemon_args_invalid_log_level() {
+        let args = vec!["--log-level".into(), "bogus".into()];
+        assert!(parse_daemon_args(&args).is_err());
+    }
+
+    #[test]
+    fn parse_daemon_args_unknown_flag() {
+        let args = vec!["--bogus".into()];
+        assert!(parse_daemon_args(&args).is_err());
+    }
+
+    #[test]
+    fn available_run_commands_not_empty() {
+        assert!(!AVAILABLE_RUN_COMMANDS.is_empty());
+        assert!(AVAILABLE_RUN_COMMANDS.contains(&"NewWindow"));
+        assert!(AVAILABLE_RUN_COMMANDS.contains(&"SwitchWorkspace"));
+    }
+
+    #[test]
+    fn completion_commands_contains_new_commands() {
+        assert!(COMPLETION_COMMANDS.contains(&"ssh"));
+        assert!(COMPLETION_COMMANDS.contains(&"new-window"));
+        assert!(COMPLETION_COMMANDS.contains(&"run-command"));
+        assert!(COMPLETION_COMMANDS.contains(&"set-config"));
+        assert!(COMPLETION_COMMANDS.contains(&"get-config"));
+        assert!(COMPLETION_COMMANDS.contains(&"explain-agent-screen"));
+        assert!(COMPLETION_COMMANDS.contains(&"set-workspace-name"));
+        assert!(COMPLETION_COMMANDS.contains(&"get-window"));
+        assert!(COMPLETION_COMMANDS.contains(&"completion"));
+    }
+
+    #[test]
+    fn valid_config_paths_known() {
+        assert!(VALID_CONFIG_PATHS.contains(&"dockbar_position"));
+        assert!(VALID_CONFIG_PATHS.contains(&"border_style"));
+        assert!(VALID_CONFIG_PATHS.contains(&"animations"));
+        assert!(VALID_CONFIG_PATHS.contains(&"hide_window_buttons"));
     }
 }

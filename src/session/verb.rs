@@ -715,6 +715,39 @@ impl VerbRegistry {
             },
         );
 
+        // diagnose
+        entries.insert(
+            "diagnose".to_string(),
+            VerbEntry {
+                description: "Report daemon health: session count, client count, uptime, memory usage, and per-session detail.".into(),
+                params: vec![],
+                examples: vec![r#"{"id":1,"verb":"diagnose"}"#.into()],
+                handler: Arc::new(|_params| {
+                    Err(VerbError::new(ERR_INTERNAL, "diagnose requires a daemon connection"))
+                }),
+            },
+        );
+
+        // headless-command
+        entries.insert(
+            "headless-command".to_string(),
+            VerbEntry {
+                description: "Execute a command without a TUI (headless). Supported: list-sessions, list-windows, capture-pane, send-text, kill-session, diagnose.".into(),
+                params: vec![
+                    VerbParam { name: "command".into(), ty: "string".into(), required: true, description: "The headless command to execute.".into(), accepted: vec![], default: String::new() },
+                    VerbParam { name: "args".into(), ty: "[]string".into(), required: false, description: "Arguments for the command.".into(), accepted: vec![], default: String::new() },
+                    session_param(),
+                ],
+                examples: vec![
+                    r#"{"id":1,"verb":"headless-command","params":{"command":"list-sessions"}}"#.into(),
+                    r#"{"id":1,"verb":"headless-command","params":{"command":"capture-pane","session":"work","args":["w0"]}}"#.into(),
+                ],
+                handler: Arc::new(|_params| {
+                    Err(VerbError::new(ERR_INTERNAL, "headless-command requires a daemon connection"))
+                }),
+            },
+        );
+
         Self { entries }
     }
 
@@ -933,6 +966,8 @@ mod tests {
         assert!(names.contains(&"set-agent-state".to_string()));
         assert!(names.contains(&"subscribe".to_string()));
         assert!(names.contains(&"unsubscribe".to_string()));
+        assert!(names.contains(&"diagnose".to_string()));
+        assert!(names.contains(&"headless-command".to_string()));
     }
 
     #[test]

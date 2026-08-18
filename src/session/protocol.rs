@@ -1,6 +1,12 @@
 //! The daemon/client wire protocol — ported from TUIOS `internal/session`
 //! (`protocol.go`, `codec.go`), using the JSON codec with a length-prefixed
 //! frame.
+//!
+//! Codec negotiation: a client may request `"json"` or `"binary"` in its
+//! `Hello` message. The daemon echoes the negotiated codec back in `Welcome`.
+//! The default (and currently only implemented) codec is JSON with a
+//! length-prefixed frame; `"binary"` is accepted for compatibility but uses
+//! the same JSON framing underneath.
 
 use std::io::{self, Read, Write};
 
@@ -14,16 +20,68 @@ pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// The protocol version string.
 pub const VERSION: &str = "0.1.0";
 
+/// The codec types a client may negotiate. The daemon always answers with the
+/// codec it will use for this connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Codec {
+    /// JSON with a length-prefixed (u32 BE) frame — the default.
+    #[default]
+    Json,
+    /// Binary (gob in Go). Accepted for compatibility; uses JSON framing in
+    /// this port since there is no gob equivalent in Rust.
+    Binary,
+}
+
+impl Codec {
+    /// Parse a codec name string (case-insensitive).
+    pub fn parse(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "binary" | "gob" => Self::Binary,
+            _ => Self::Json,
+        }
+    }
+
+    /// The wire string for this codec.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Binary => "binary",
+        }
+    }
+}
+
+/// Negotiate the codec for a connection given the client's preference. The
+/// daemon supports JSON; binary is accepted but mapped to JSON framing.
+pub fn negotiate_codec(preferred: Option<&str>) -> Codec {
+    match preferred {
+        Some(s) => Codec::parse(s),
+        None => Codec::Json,
+    }
+}
+
 /// A single control message between the client and daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum Message {
-    /// Client → daemon: handshake.
-    Hello { name: String },
-    /// Daemon → client: handshake reply + current sessions.
+    /// Client → daemon: handshake. `codec` requests a codec (json/binary);
+    /// `cols`/`rows` report the client's terminal dimensions for multi-client
+    /// size calculation.
+    Hello {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codec: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cols: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rows: Option<u16>,
+    },
+    /// Daemon → client: handshake reply + current sessions + negotiated codec.
     Welcome {
         version: String,
         sessions: Vec<SessionInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codec: Option<String>,
     },
     /// Client → daemon: request the session list.
     List,
@@ -203,6 +261,77 @@ pub enum Message {
     },
     /// Daemon → client: the screen-rule explanation.
     ExplainResult { explanation: serde_json::Value },
+    /// Daemon → client: the session was resized to the minimum dimensions
+    /// across all attached clients (multi-client sync).
+    SessionResize {
+        session: String,
+        cols: u16,
+        rows: u16,
+        client_count: usize,
+    },
+    /// Client → daemon: report this client's current terminal dimensions so
+    /// the daemon can recalculate the effective (minimum) session size.
+    NotifySize { cols: u16, rows: u16 },
+    /// Daemon → client: a PTY output chunk with a sequence number, so a
+    /// reconnecting client can resume from its last-seen position.
+    PtyOutputSequenced {
+        window: String,
+        seq: u64,
+        data: Vec<u8>,
+    },
+    /// Client → daemon: attach to a session and resume from a given output
+    /// sequence number. The daemon replays buffered output from that position.
+    AttachResume {
+        name: String,
+        #[serde(default)]
+        seq: u64,
+    },
+    /// Daemon → client: the resume position acknowledged + window list + the
+    /// current output sequence (so the client knows the tail position).
+    AttachedResume {
+        windows: Vec<WindowInfo>,
+        seq: u64,
+    },
+    /// Client → daemon: request a daemon health diagnosis (headless).
+    Diagnose,
+    /// Daemon → client: the daemon diagnosis report.
+    Diagnosis { report: DaemonReport },
+    /// Client → daemon: execute a headless command (no TUI required).
+    HeadlessCommand {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+    },
+    /// Daemon → client: the headless command result.
+    HeadlessResult { result: serde_json::Value },
+}
+
+/// A daemon health report (the `diagnose` verb / `Diagnose` message).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonReport {
+    /// Number of live sessions.
+    pub session_count: usize,
+    /// Number of attached clients across all sessions.
+    pub client_count: usize,
+    /// Daemon uptime in seconds.
+    pub uptime_secs: u64,
+    /// Daemon process resident memory in bytes (best-effort, 0 if unknown).
+    pub memory_bytes: u64,
+    /// Protocol version string.
+    pub version: String,
+    /// Per-session detail.
+    pub sessions: Vec<SessionReport>,
+}
+
+/// Per-session detail in a [`DaemonReport`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionReport {
+    pub name: String,
+    pub windows: usize,
+    pub clients: usize,
+    pub restored: bool,
 }
 
 /// Write a length-prefixed (u32 BE) JSON frame.
@@ -273,6 +402,7 @@ mod tests {
                 windows: 2,
                 restored: false,
             }],
+            codec: Some("json".to_string()),
         };
         match round_trip(msg) {
             Message::Welcome { sessions, .. } => {
@@ -355,5 +485,112 @@ mod tests {
         let mut buf = vec![0u8, 0, 0, 10, b'{', b'"'];
         let mut cursor = io::Cursor::new(&mut buf);
         assert!(read_message(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn codec_parse_and_str() {
+        assert_eq!(Codec::parse("json"), Codec::Json);
+        assert_eq!(Codec::parse("JSON"), Codec::Json);
+        assert_eq!(Codec::parse("binary"), Codec::Binary);
+        assert_eq!(Codec::parse("gob"), Codec::Binary);
+        assert_eq!(Codec::parse("unknown"), Codec::Json);
+        assert_eq!(Codec::Json.as_str(), "json");
+        assert_eq!(Codec::Binary.as_str(), "binary");
+    }
+
+    #[test]
+    fn negotiate_defaults_to_json() {
+        assert_eq!(negotiate_codec(None), Codec::Json);
+        assert_eq!(negotiate_codec(Some("binary")), Codec::Binary);
+        assert_eq!(negotiate_codec(Some("json")), Codec::Json);
+    }
+
+    #[test]
+    fn hello_with_codec_round_trips() {
+        let msg = Message::Hello {
+            name: "cli".to_string(),
+            codec: Some("json".to_string()),
+            cols: Some(120),
+            rows: Some(40),
+        };
+        match round_trip(msg) {
+            Message::Hello {
+                name,
+                codec,
+                cols,
+                rows,
+            } => {
+                assert_eq!(name, "cli");
+                assert_eq!(codec.as_deref(), Some("json"));
+                assert_eq!(cols, Some(120));
+                assert_eq!(rows, Some(40));
+            }
+            other => panic!("wrong message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_resize_round_trips() {
+        let msg = Message::SessionResize {
+            session: "work".into(),
+            cols: 80,
+            rows: 24,
+            client_count: 2,
+        };
+        match round_trip(msg) {
+            Message::SessionResize {
+                session,
+                cols,
+                rows,
+                client_count,
+            } => {
+                assert_eq!(session, "work");
+                assert_eq!(cols, 80);
+                assert_eq!(rows, 24);
+                assert_eq!(client_count, 2);
+            }
+            other => panic!("wrong message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diagnosis_round_trips() {
+        let report = DaemonReport {
+            session_count: 2,
+            client_count: 3,
+            uptime_secs: 100,
+            memory_bytes: 1024,
+            version: VERSION.to_string(),
+            sessions: vec![SessionReport {
+                name: "dev".into(),
+                windows: 1,
+                clients: 2,
+                restored: false,
+            }],
+        };
+        let msg = Message::Diagnosis { report };
+        match round_trip(msg) {
+            Message::Diagnosis { report } => {
+                assert_eq!(report.session_count, 2);
+                assert_eq!(report.client_count, 3);
+                assert_eq!(report.sessions[0].name, "dev");
+            }
+            other => panic!("wrong message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_resume_round_trips() {
+        let msg = Message::AttachResume {
+            name: "work".into(),
+            seq: 42,
+        };
+        match round_trip(msg) {
+            Message::AttachResume { name, seq } => {
+                assert_eq!(name, "work");
+                assert_eq!(seq, 42);
+            }
+            other => panic!("wrong message: {other:?}"),
+        }
     }
 }

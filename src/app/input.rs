@@ -182,6 +182,9 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
     if os.theme_picker_open {
         return handle_theme_picker(os, key);
     }
+    if os.accent_picker_open {
+        return handle_accent_picker(os, key);
+    }
     if os.help_open {
         return handle_help_modal(os, key);
     }
@@ -1329,6 +1332,29 @@ fn handle_theme_picker(os: &mut Os, key: &KeyEvent) -> KeyResult {
         }
         KeyCode::Down | KeyCode::Char('j') => {
             os.theme_picker_move(1);
+            KeyResult::Consumed
+        }
+        _ => KeyResult::Consumed,
+    }
+}
+
+/// Handle key input while the accent picker overlay is open.
+fn handle_accent_picker(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            os.close_accent_picker();
+            KeyResult::Consumed
+        }
+        KeyCode::Enter => {
+            os.apply_selected_accent();
+            KeyResult::Consumed
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            os.accent_picker_move(-1);
+            KeyResult::Consumed
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            os.accent_picker_move(1);
             KeyResult::Consumed
         }
         _ => KeyResult::Consumed,

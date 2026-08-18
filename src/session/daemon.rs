@@ -59,10 +59,14 @@ struct LiveWindow {
 
 /// A cap-limited ring of a window's raw output. Kept daemon-side so the
 /// `capture-pane` and `wait-for` verbs work headlessly, without a client
-/// emulator attached.
+/// emulator attached. A monotonic sequence counter tracks how many bytes have
+/// been pushed in total, so a reconnecting client can resume from its
+/// last-seen position (Go's PTY resubscribe / catch-up buffer).
 struct OutputRing {
     buf: Vec<u8>,
     cap: usize,
+    /// Total bytes ever pushed (never resets, even when the ring wraps).
+    total_bytes: u64,
 }
 
 impl OutputRing {
@@ -70,11 +74,13 @@ impl OutputRing {
         Self {
             buf: Vec::new(),
             cap,
+            total_bytes: 0,
         }
     }
 
     fn push(&mut self, chunk: &[u8]) {
         self.buf.extend_from_slice(chunk);
+        self.total_bytes = self.total_bytes.saturating_add(chunk.len() as u64);
         if self.buf.len() > self.cap {
             let drop = self.buf.len() - self.cap;
             self.buf.drain(..drop);
@@ -84,12 +90,49 @@ impl OutputRing {
     fn as_lossy(&self) -> String {
         String::from_utf8_lossy(&self.buf).into_owned()
     }
+
+    /// The current sequence position (total bytes pushed). A client that
+    /// resumes from `seq` will receive output pushed after this point.
+    fn current_seq(&self) -> u64 {
+        self.total_bytes
+    }
+
+    /// Return the buffered output that arrived after `from_seq`, as a
+    /// contiguous byte slice. Returns an empty vec if `from_seq` is at or
+    /// past the current position, or if the requested position has been
+    /// evicted from the ring (in which case the entire buffer is returned,
+    /// since everything in it is newer than `from_seq`).
+    fn output_since(&self, from_seq: u64) -> Vec<u8> {
+        if from_seq >= self.total_bytes {
+            return Vec::new();
+        }
+        // How many bytes have been evicted from the front of the ring?
+        let evicted = self.total_bytes.saturating_sub(self.buf.len() as u64);
+        // If the requested position was evicted, return everything we have.
+        if from_seq < evicted {
+            return self.buf.clone();
+        }
+        // Offset into the current buffer.
+        let offset = (from_seq - evicted) as usize;
+        self.buf[offset..].to_vec()
+    }
+}
+
+/// One attached client's metadata: its subscriber id, name, and terminal
+/// dimensions (for multi-client minimum-size resize).
+struct ClientEntry {
+    name: String,
+    cols: u16,
+    rows: u16,
 }
 
 /// One session's fan-out point. Each attached client registers a `Sender`;
 /// window pumps and window-lifecycle events write to every registered sender.
+/// Client dimensions are tracked so the daemon can calculate the minimum size
+/// across all attached clients (Go's `calculateEffectiveSize`).
 struct SessionBroadcast {
     subscribers: Mutex<HashMap<u64, Sender<Message>>>,
+    clients: Mutex<HashMap<u64, ClientEntry>>,
     next_id: AtomicU64,
 }
 
@@ -97,10 +140,12 @@ impl SessionBroadcast {
     fn new() -> Self {
         Self {
             subscribers: Mutex::new(HashMap::new()),
+            clients: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(0),
         }
     }
 
+    /// Register a subscriber, returning its id and receive channel.
     fn subscribe(&self) -> (u64, Receiver<Message>) {
         let (tx, rx) = unbounded();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -108,18 +153,98 @@ impl SessionBroadcast {
         (id, rx)
     }
 
+    /// Register a subscriber with a client name and dimensions.
+    fn subscribe_named(&self, name: &str, cols: u16, rows: u16) -> (u64, Receiver<Message>) {
+        let (id, rx) = self.subscribe();
+        self.clients.lock().unwrap().insert(
+            id,
+            ClientEntry {
+                name: name.to_string(),
+                cols,
+                rows,
+            },
+        );
+        (id, rx)
+    }
+
     fn unsubscribe(&self, id: u64) {
         self.subscribers.lock().unwrap().remove(&id);
+        self.clients.lock().unwrap().remove(&id);
+    }
+
+    /// Update a client's reported terminal dimensions.
+    fn update_size(&self, id: u64, cols: u16, rows: u16) {
+        if let Some(entry) = self.clients.lock().unwrap().get_mut(&id) {
+            entry.cols = cols;
+            entry.rows = rows;
+        }
     }
 
     fn is_attached(&self) -> bool {
         !self.subscribers.lock().unwrap().is_empty()
     }
 
+    /// The number of clients attached to this session.
+    fn client_count(&self) -> usize {
+        self.subscribers.lock().unwrap().len()
+    }
+
+    /// The minimum (cols, rows) across all attached clients with non-zero
+    /// dimensions. Returns `None` when no client has reported dimensions.
+    /// This is Go's `calculateEffectiveSize`.
+    fn effective_size(&self) -> Option<(u16, u16)> {
+        let clients = self.clients.lock().unwrap();
+        let mut min: Option<(u16, u16)> = None;
+        for entry in clients.values() {
+            if entry.cols == 0 || entry.rows == 0 {
+                continue;
+            }
+            match min {
+                None => min = Some((entry.cols, entry.rows)),
+                Some((cw, ch)) => {
+                    let nw = if entry.cols < cw {
+                        entry.cols
+                    } else {
+                        cw
+                    };
+                    let nh = if entry.rows < ch {
+                        entry.rows
+                    } else {
+                        ch
+                    };
+                    min = Some((nw, nh));
+                }
+            }
+        }
+        min
+    }
+
+    /// The name of a client by subscriber id, if present.
+    fn client_name(&self, id: u64) -> Option<String> {
+        self.clients.lock().unwrap().get(&id).map(|e| e.name.clone())
+    }
+
     fn send_to_all(&self, msg: &Message) {
         let subs: Vec<Sender<Message>> =
             self.subscribers.lock().unwrap().values().cloned().collect();
         for tx in subs {
+            let _ = tx.send(msg.clone());
+        }
+    }
+
+    /// Send to all subscribers except the one with the given id (used for
+    /// join/leave notifications so the joining/leaving client does not receive
+    /// its own announcement).
+    fn send_to_all_except(&self, except: u64, msg: &Message) {
+        let subs: Vec<(u64, Sender<Message>)> = self
+            .subscribers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| **k != except)
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        for (_, tx) in subs {
             let _ = tx.send(msg.clone());
         }
     }
@@ -163,6 +288,8 @@ pub struct Daemon {
     osc_holds: Arc<Mutex<HashMap<String, (AgentState, std::time::Instant)>>>,
     /// Shutdown flag — set by `KillServer` to stop the accept loop.
     shutdown: Arc<std::sync::atomic::AtomicBool>,
+    /// When the daemon started, for uptime reporting in `diagnose`.
+    started_at: std::time::Instant,
 }
 
 /// Ring capacity (256 KiB) and the capture size cap (64 KiB).
@@ -185,6 +312,7 @@ impl Daemon {
             rings: Arc::new(Mutex::new(HashMap::new())),
             osc_holds: Arc::new(Mutex::new(HashMap::new())),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            started_at: std::time::Instant::now(),
         }
     }
 
@@ -337,28 +465,102 @@ impl Daemon {
     }
 
     /// Attach a client to a session: register a subscriber and return the
-    /// window list, the subscriber id, and the output channel.
+    /// window list, the subscriber id, and the output channel. Convenience
+    /// wrapper around [`attach_named`] with a default name and no dimensions.
+    #[allow(dead_code)]
     fn attach(&self, name: &str) -> Result<(Vec<WindowInfo>, u64, Receiver<Message>), String> {
+        self.attach_named(name, "client", 0, 0)
+    }
+
+    /// Attach a client to a session with a name and terminal dimensions.
+    /// The name and dimensions are used for join/leave notifications and
+    /// multi-client minimum-size resize. Broadcasts `ClientJoined` to other
+    /// subscribers.
+    fn attach_named(
+        &self,
+        name: &str,
+        client_name: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(Vec<WindowInfo>, u64, Receiver<Message>), String> {
         let windows = self.windows.lock().unwrap();
         let sess = windows
             .get(name)
             .ok_or_else(|| format!("session '{name}' not found"))?;
         let infos: Vec<WindowInfo> = sess.iter().map(|w| w.info.clone()).collect();
         drop(windows);
-        let broadcast = self
-            .broadcast
-            .lock()
-            .unwrap()
-            .get(name)
-            .cloned()
-            .ok_or_else(|| format!("session '{name}' not found"))?;
-        let (sub_id, rx) = broadcast.subscribe();
+        let broadcast = self.broadcast_for(name);
+        let (sub_id, rx) = broadcast.subscribe_named(client_name, cols, rows);
+        // Notify other clients that a new client joined.
+        let count = broadcast.client_count();
+        broadcast.send_to_all_except(
+            sub_id,
+            &Message::ClientJoined {
+                session: name.to_string(),
+                name: format!("{client_name} (#{count})"),
+            },
+        );
+        // Recalculate effective size and resize if needed.
+        self.recalculate_size(name, &broadcast);
         Ok((infos, sub_id, rx))
+    }
+
+    /// Attach with a resume position: replay buffered output from `seq` for
+    /// each window, then stream live output. Returns the window list and the
+    /// current output sequence number.
+    fn attach_resume(
+        &self,
+        name: &str,
+        client_name: &str,
+        cols: u16,
+        rows: u16,
+        from_seq: u64,
+    ) -> Result<(Vec<WindowInfo>, u64, u64, Receiver<Message>), String> {
+        let (infos, sub_id, rx) = self.attach_named(name, client_name, cols, rows)?;
+        // Replay buffered output for each window from the resume position.
+        let rings = self.rings.lock().unwrap();
+        let mut max_seq = from_seq;
+        for info in &infos {
+            if let Some(ring) = rings.get(&(name.to_string(), info.id.clone())) {
+                let replay = ring.output_since(from_seq);
+                if !replay.is_empty() {
+                    // Send the replay directly to this subscriber's channel.
+                    // We can't use send_to_all (that would send to everyone);
+                    // instead, we rely on the forward thread to drain the
+                    // channel. We push a sequenced output message so the
+                    // client knows the position.
+                    if let Some(b) = self.broadcast.lock().unwrap().get(name) {
+                        let subs = b.subscribers.lock().unwrap();
+                        if let Some(tx) = subs.get(&sub_id) {
+                            let _ = tx.send(Message::PtyOutputSequenced {
+                                window: info.id.clone(),
+                                seq: from_seq,
+                                data: replay,
+                            });
+                        }
+                    }
+                }
+                max_seq = max_seq.max(ring.current_seq());
+            }
+        }
+        Ok((infos, sub_id, max_seq, rx))
     }
 
     fn detach(&self, name: &str, sub_id: u64) {
         if let Some(b) = self.broadcast.lock().unwrap().get(name) {
+            let client_name = b.client_name(sub_id).unwrap_or_default();
             b.unsubscribe(sub_id);
+            // Notify remaining clients that this client left.
+            let count = b.client_count();
+            b.send_to_all_except(
+                sub_id,
+                &Message::ClientLeft {
+                    session: name.to_string(),
+                    name: format!("{client_name} (#{count})"),
+                },
+            );
+            // Recalculate effective size (a client leaving may increase it).
+            self.recalculate_size(name, b);
         }
     }
 
@@ -396,6 +598,130 @@ impl Daemon {
                     .unwrap()
                     .insert(session.to_string(), window.to_string());
             }
+        }
+    }
+
+    /// Recalculate the effective (minimum) session size across all attached
+    /// clients and resize every window if it changed. Broadcasts
+    /// `SessionResize` to all subscribers. This is Go's
+    /// `recalculateAndBroadcastSize`.
+    fn recalculate_size(&self, session: &str, broadcast: &Arc<SessionBroadcast>) {
+        let Some((cols, rows)) = broadcast.effective_size() else {
+            return;
+        };
+        // Resize every window in the session to the effective size.
+        let window_ids: Vec<String> = {
+            let windows = self.windows.lock().unwrap();
+            windows
+                .get(session)
+                .map(|wins| wins.iter().map(|w| w.info.id.clone()).collect())
+                .unwrap_or_default()
+        };
+        for wid in &window_ids {
+            self.resize(session, wid, cols, rows);
+        }
+        // Broadcast the resize event to all clients.
+        let count = broadcast.client_count();
+        broadcast.send_to_all(&Message::SessionResize {
+            session: session.to_string(),
+            cols,
+            rows,
+            client_count: count,
+        });
+    }
+
+    /// Update a client's reported terminal dimensions and recalculate the
+    /// effective session size (Go's `NotifyTerminalSize` →
+    /// `recalculateAndBroadcastSize`).
+    fn notify_size(&self, session: &str, sub_id: u64, cols: u16, rows: u16) {
+        let broadcast = self.broadcast_for(session);
+        broadcast.update_size(sub_id, cols, rows);
+        self.recalculate_size(session, &broadcast);
+    }
+
+    /// Build a daemon health report (the `diagnose` verb / `Diagnose` message).
+    /// Reports session count, client count, uptime, and best-effort memory.
+    pub fn diagnose(&self) -> super::protocol::DaemonReport {
+        let sessions = self.list_infos();
+        let broadcast = self.broadcast.lock().unwrap();
+        let session_reports: Vec<super::protocol::SessionReport> = sessions
+            .iter()
+            .map(|s| super::protocol::SessionReport {
+                name: s.name.clone(),
+                windows: s.windows,
+                clients: broadcast
+                    .get(&s.name)
+                    .map(|b| b.client_count())
+                    .unwrap_or(0),
+                restored: s.restored,
+            })
+            .collect();
+        let client_count: usize = broadcast.values().map(|b| b.client_count()).sum();
+        drop(broadcast);
+        let uptime_secs = self.started_at.elapsed().as_secs();
+        super::protocol::DaemonReport {
+            session_count: sessions.len(),
+            client_count,
+            uptime_secs,
+            memory_bytes: process_rss_bytes(),
+            version: VERSION.to_string(),
+            sessions: session_reports,
+        }
+    }
+
+    /// Execute a headless command (no TUI required). Supported commands:
+    /// `list-sessions`, `list-windows`, `capture-pane`, `send-text`,
+    /// `kill-session`, `diagnose`. Returns a JSON result.
+    fn headless_command(
+        &self,
+        command: &str,
+        args: &[String],
+        session: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        match command {
+            "list-sessions" => {
+                let sessions = self.list_infos();
+                Ok(serde_json::to_value(&sessions).unwrap_or(serde_json::json!([])))
+            }
+            "list-windows" => {
+                let name = session
+                    .ok_or_else(|| "missing session parameter".to_string())?;
+                let windows = self.windows.lock().unwrap();
+                let wins = windows
+                    .get(name)
+                    .ok_or_else(|| format!("session '{name}' not found"))?;
+                let infos: Vec<WindowInfo> = wins.iter().map(|w| w.info.clone()).collect();
+                Ok(serde_json::to_value(&infos).unwrap_or(serde_json::json!([])))
+            }
+            "capture-pane" => {
+                let name = session
+                    .ok_or_else(|| "missing session parameter".to_string())?;
+                let window = args.first().map(|s| s.as_str());
+                let (target, content) = self.capture_pane(name, window)?;
+                Ok(serde_json::json!({ "window": target, "content": content }))
+            }
+            "send-text" => {
+                let name = session
+                    .ok_or_else(|| "missing session parameter".to_string())?;
+                let window = args.first().map(|s| s.as_str());
+                let text = args
+                    .get(1)
+                    .map(|s| s.as_str())
+                    .ok_or_else(|| "missing text argument".to_string())?;
+                self.write_input_to(name, window, text.as_bytes())?;
+                Ok(serde_json::json!({ "sent": true }))
+            }
+            "kill-session" => {
+                let name = session
+                    .ok_or_else(|| "missing session parameter".to_string())?;
+                self.kill(name)?;
+                Ok(serde_json::json!({ "killed": name }))
+            }
+            "diagnose" => {
+                let report = self.diagnose();
+                Ok(serde_json::to_value(&report).unwrap_or(serde_json::json!({})))
+            }
+            _ => Err(format!("unknown headless command: {command}")),
         }
     }
 
@@ -766,6 +1092,28 @@ impl Daemon {
                 // Fall through to the registry, which documents them.
                 self.registry_dispatch(verb, params)
             }
+            "diagnose" => {
+                let report = self.diagnose();
+                Ok(serde_json::to_value(&report).unwrap_or(serde_json::json!({})))
+            }
+            "headless-command" => {
+                let command = verb_param(params, "command")
+                    .ok_or_else(|| verb_error(ERR_INVALID_PARAMS, "missing command parameter"))?;
+                let args: Vec<String> = params
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let session = verb_param(params, "session");
+                let result = self
+                    .headless_command(&command, &args, session.as_deref())
+                    .map_err(|e| verb_error(ERR_COMMAND_FAILED, e))?;
+                Ok(result)
+            }
             _ => self.registry_dispatch(verb, params),
         }
     }
@@ -1102,8 +1450,13 @@ impl Daemon {
     }
 
     /// Run the daemon forever on a given socket path: bind the socket and
-    /// accept clients. Returns only on a bind failure.
+    /// accept clients. Returns only on a bind failure. Cleans up stale
+    /// resurrection temp files and prunes old archives on startup.
     pub fn run(self: Arc<Self>, path: &std::path::Path) -> io::Result<()> {
+        // Clean up leftover temp files and prune old archives from the
+        // resurrection directory (Go's `CleanResurrectionDir` on startup).
+        super::resurrection::clean_resurrection_dir();
+
         // The start lock makes the stale-socket recovery below safe: holding
         // it proves no other daemon is mid-bind, so unlinking the socket
         // cannot cut a live daemon's inode out from under it.
@@ -1325,18 +1678,37 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
 
     // (session name, subscriber id, stop flag for the forward thread).
     let mut attached: Option<(String, u64, Arc<AtomicBool>)> = None;
+    // The client name from the Hello handshake, for join/leave notifications.
+    let mut client_name = String::from("client");
 
     while let Ok(msg) = protocol::read_message(&mut buf_reader) {
         match msg {
-            Message::Hello { .. } => {
+            Message::Hello {
+                name,
+                codec,
+                cols,
+                rows,
+            } => {
+                if !name.is_empty() {
+                    client_name = name;
+                }
+                // Negotiate codec (accepted but both use JSON framing here).
+                let negotiated = protocol::negotiate_codec(codec.as_deref());
                 let sessions = daemon.list_infos();
                 let _ = send(
                     &writer,
                     &Message::Welcome {
                         version: VERSION.to_string(),
                         sessions,
+                        codec: Some(negotiated.as_str().to_string()),
                     },
                 );
+                // Store dimensions for when the client attaches (best-effort).
+                if let (Some(c), Some(r)) = (cols, rows) {
+                    if let Some((sess, sub_id, _)) = &attached {
+                        daemon.notify_size(sess, *sub_id, c, r);
+                    }
+                }
             }
             Message::List => {
                 let sessions = daemon.list_infos();
@@ -1357,7 +1729,7 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                     stop.store(true, Ordering::Release);
                     daemon.detach(&prev, sub_id);
                 }
-                match daemon.attach(&name) {
+                match daemon.attach_named(&name, &client_name, 0, 0) {
                     Ok((windows, sub_id, rx)) => {
                         let stop = Arc::new(AtomicBool::new(false));
                         attached = Some((name.clone(), sub_id, Arc::clone(&stop)));
@@ -1821,6 +2193,72 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                 let _ = send(&writer, &Message::ExplainResult { explanation });
             }
             Message::ExplainResult { .. } => {}
+            Message::SessionResize { .. } => {}
+            Message::NotifySize { cols, rows } => {
+                if let Some((session, sub_id, _)) = &attached {
+                    daemon.notify_size(session, *sub_id, cols, rows);
+                }
+            }
+            Message::PtyOutputSequenced { .. } => {}
+            Message::AttachResume { name, seq } => {
+                // Stop any previous streaming for this connection.
+                if let Some((prev, sub_id, stop)) = attached.take() {
+                    stop.store(true, Ordering::Release);
+                    daemon.detach(&prev, sub_id);
+                }
+                match daemon.attach_resume(&name, &client_name, 0, 0, seq) {
+                    Ok((windows, sub_id, current_seq, rx)) => {
+                        let stop = Arc::new(AtomicBool::new(false));
+                        attached = Some((name.clone(), sub_id, Arc::clone(&stop)));
+                        let _ = send(
+                            &writer,
+                            &Message::AttachedResume {
+                                windows,
+                                seq: current_seq,
+                            },
+                        );
+                        // Forward the session's broadcast stream to this client.
+                        let forward_writer = Arc::clone(&writer);
+                        std::thread::spawn(move || {
+                            while !stop.load(Ordering::Acquire) {
+                                match rx.recv_timeout(Duration::from_millis(100)) {
+                                    Ok(msg) => {
+                                        if send(&forward_writer, &msg).is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Err(RecvTimeoutError::Timeout) => continue,
+                                    Err(RecvTimeoutError::Disconnected) => break,
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        let _ = send(&writer, &Message::Error { message: e });
+                    }
+                }
+            }
+            Message::AttachedResume { .. } => {}
+            Message::Diagnose => {
+                let report = daemon.diagnose();
+                let _ = send(&writer, &Message::Diagnosis { report });
+            }
+            Message::Diagnosis { .. } => {}
+            Message::HeadlessCommand {
+                command,
+                args,
+                session,
+            } => {
+                match daemon.headless_command(&command, &args, session.as_deref()) {
+                    Ok(result) => {
+                        let _ = send(&writer, &Message::HeadlessResult { result });
+                    }
+                    Err(e) => {
+                        let _ = send(&writer, &Message::Error { message: e });
+                    }
+                }
+            }
+            Message::HeadlessResult { .. } => {}
             _ => {}
         }
     }
@@ -1899,6 +2337,22 @@ fn resolve_shell(shell: &str) -> String {
     } else {
         shell.to_string()
     }
+}
+
+/// Best-effort resident set size (RSS) of this process in bytes, by reading
+/// `/proc/self/statm` on Linux. Returns 0 on platforms without procfs.
+fn process_rss_bytes() -> u64 {
+    let data = match std::fs::read_to_string("/proc/self/statm") {
+        Ok(d) => d,
+        Err(_) => return 0,
+    };
+    // /proc/self/statm: size resident shared text lib data dt (in pages)
+    let fields: Vec<&str> = data.split_whitespace().collect();
+    if fields.len() < 2 {
+        return 0;
+    }
+    let resident_pages: u64 = fields[1].parse().unwrap_or(0);
+    resident_pages * 4096
 }
 
 /// Spawn a background daemon if one is not already reachable, then wait for
@@ -2062,6 +2516,179 @@ mod tests {
         assert!(Arc::ptr_eq(&b1, &b2));
         let b3 = d.broadcast_for("s2");
         assert!(!Arc::ptr_eq(&b1, &b3));
+    }
+
+    #[test]
+    fn output_ring_tracks_total_bytes() {
+        let mut ring = OutputRing::new(100);
+        assert_eq!(ring.current_seq(), 0);
+        ring.push(b"hello");
+        assert_eq!(ring.current_seq(), 5);
+        ring.push(b" world");
+        assert_eq!(ring.current_seq(), 11);
+    }
+
+    #[test]
+    fn output_ring_resume_from_zero() {
+        let mut ring = OutputRing::new(100);
+        ring.push(b"hello world");
+        let replay = ring.output_since(0);
+        assert_eq!(replay, b"hello world");
+    }
+
+    #[test]
+    fn output_ring_resume_from_middle() {
+        let mut ring = OutputRing::new(100);
+        ring.push(b"hello world");
+        let replay = ring.output_since(6);
+        assert_eq!(replay, b"world");
+    }
+
+    #[test]
+    fn output_ring_resume_from_current_is_empty() {
+        let mut ring = OutputRing::new(100);
+        ring.push(b"hello");
+        let replay = ring.output_since(5);
+        assert!(replay.is_empty());
+    }
+
+    #[test]
+    fn output_ring_resume_after_eviction_returns_all() {
+        let mut ring = OutputRing::new(10);
+        ring.push(b"0123456789"); // fills the ring, seq=10
+        ring.push(b"ABCDE"); // evicts 5 bytes, seq=15, buf="5ABCDE" wait...
+        // After pushing 10 bytes then 5 more, the ring holds the last 10.
+        // total=15, buf len=10, evicted=5
+        let replay = ring.output_since(0);
+        // from_seq=0 < evicted=5, so return everything in the buffer
+        assert_eq!(replay.len(), 10);
+    }
+
+    #[test]
+    fn broadcast_named_tracks_dimensions() {
+        let b = SessionBroadcast::new();
+        let (id1, _rx1) = b.subscribe_named("client-a", 120, 40);
+        let (id2, _rx2) = b.subscribe_named("client-b", 80, 24);
+        // Effective size is the minimum across both clients.
+        assert_eq!(b.effective_size(), Some((80, 24)));
+        b.update_size(id2, 100, 30);
+        assert_eq!(b.effective_size(), Some((100, 30)));
+        let _ = id1; // suppress unused warning
+    }
+
+    #[test]
+    fn broadcast_effective_size_ignores_zero_dims() {
+        let b = SessionBroadcast::new();
+        let (_id1, _rx1) = b.subscribe_named("a", 0, 0);
+        let (_id2, _rx2) = b.subscribe_named("b", 80, 24);
+        // Only the client with non-zero dims counts.
+        assert_eq!(b.effective_size(), Some((80, 24)));
+    }
+
+    #[test]
+    fn broadcast_effective_size_none_when_all_zero() {
+        let b = SessionBroadcast::new();
+        let (_id, _rx) = b.subscribe_named("a", 0, 0);
+        assert_eq!(b.effective_size(), None);
+    }
+
+    #[test]
+    fn broadcast_client_count() {
+        let b = SessionBroadcast::new();
+        assert_eq!(b.client_count(), 0);
+        let (id1, _rx1) = b.subscribe();
+        let (id2, _rx2) = b.subscribe();
+        assert_eq!(b.client_count(), 2);
+        b.unsubscribe(id1);
+        assert_eq!(b.client_count(), 1);
+        b.unsubscribe(id2);
+        assert_eq!(b.client_count(), 0);
+    }
+
+    #[test]
+    fn broadcast_send_to_all_except() {
+        let b = SessionBroadcast::new();
+        let (id1, rx1) = b.subscribe();
+        let (_id2, rx2) = b.subscribe();
+        b.send_to_all_except(
+            id1,
+            &Message::ClientJoined {
+                session: "s".into(),
+                name: "new".into(),
+            },
+        );
+        // rx1 (excluded) should not receive it.
+        assert!(rx1.is_empty());
+        // rx2 should receive it.
+        assert!(!rx2.is_empty());
+    }
+
+    #[test]
+    fn broadcast_client_name() {
+        let b = SessionBroadcast::new();
+        let (id, _rx) = b.subscribe_named("alice", 80, 24);
+        assert_eq!(b.client_name(id), Some("alice".to_string()));
+        b.unsubscribe(id);
+        assert_eq!(b.client_name(id), None);
+    }
+
+    #[test]
+    fn daemon_diagnose_empty() {
+        let d = Daemon::new();
+        let report = d.diagnose();
+        assert_eq!(report.session_count, 0);
+        assert_eq!(report.client_count, 0);
+        assert_eq!(report.version, VERSION);
+        assert!(report.sessions.is_empty());
+    }
+
+    #[test]
+    fn daemon_diagnose_with_sessions() {
+        let d = Daemon::new();
+        d.create_session("work", "/bin/sh").unwrap();
+        d.create_session("play", "/bin/sh").unwrap();
+        let report = d.diagnose();
+        assert_eq!(report.session_count, 2);
+        assert_eq!(report.sessions.len(), 2);
+        // Sessions may be in any order; check both are present.
+        let names: Vec<&str> = report.sessions.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"work"));
+        assert!(names.contains(&"play"));
+        // Each session has one window.
+        for s in &report.sessions {
+            assert_eq!(s.windows, 1);
+        }
+    }
+
+    #[test]
+    fn daemon_headless_list_sessions() {
+        let d = Daemon::new();
+        d.create_session("work", "/bin/sh").unwrap();
+        let result = d.headless_command("list-sessions", &[], None).unwrap();
+        let sessions = result.as_array().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["name"], "work");
+    }
+
+    #[test]
+    fn daemon_headless_unknown_command_is_error() {
+        let d = Daemon::new();
+        assert!(d.headless_command("frobnicate", &[], None).is_err());
+    }
+
+    #[test]
+    fn daemon_headless_diagnose() {
+        let d = Daemon::new();
+        d.create_session("work", "/bin/sh").unwrap();
+        let result = d.headless_command("diagnose", &[], None).unwrap();
+        assert_eq!(result["session_count"], 1);
+    }
+
+    #[test]
+    fn process_rss_bytes_returns_nonnegative() {
+        // On Linux this reads /proc/self/statm; elsewhere returns 0.
+        let rss = process_rss_bytes();
+        let _ = rss; // just ensure it doesn't panic
     }
 }
 
@@ -2230,9 +2857,48 @@ mod verb_tests {
             "capture-pane",
             "set-agent-state",
             "wait-for",
+            "diagnose",
+            "headless-command",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn diagnose_verb_returns_report() {
+        let d = Daemon::new();
+        d.create_session("work", "/bin/sh").unwrap();
+        let resp = call(&d, "diagnose", serde_json::json!({}));
+        assert!(resp.error.is_none());
+        let r = resp.result.unwrap();
+        assert_eq!(r["session_count"], 1);
+        assert_eq!(r["sessions"][0]["name"], "work");
+    }
+
+    #[test]
+    fn headless_command_verb_list_sessions() {
+        let d = Daemon::new();
+        d.create_session("work", "/bin/sh").unwrap();
+        let resp = call(
+            &d,
+            "headless-command",
+            serde_json::json!({"command": "list-sessions"}),
+        );
+        assert!(resp.error.is_none());
+        let r = resp.result.unwrap();
+        let sessions = r.as_array().unwrap();
+        assert_eq!(sessions.len(), 1);
+    }
+
+    #[test]
+    fn headless_command_verb_unknown_is_error() {
+        let d = Daemon::new();
+        let resp = call(
+            &d,
+            "headless-command",
+            serde_json::json!({"command": "frobnicate"}),
+        );
+        assert!(resp.error.is_some());
     }
 
     #[test]

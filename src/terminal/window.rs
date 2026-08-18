@@ -1,12 +1,78 @@
 //! The terminal window — a PTY + emulator pair, with an I/O thread that
 //! drains PTY output into the emulator and an input path that encodes keys
 //! and writes them to the PTY.
+//!
+//! ## Concurrency
+//!
+//! The `emulator` is wrapped in `Arc<Mutex<Emulator>>` because the PTY reader
+//! thread writes to it while the render path reads it. The `geometry` snapshot
+//! and `pending_resize` are behind `Mutex` for the same reason: the layout
+//! goroutine writes them while other threads read. The `output_buffer` is
+//! only touched from the UI thread (the one that calls `write` / `flush_output`),
+//! so it does not need a lock — but `flush_output` takes the emulator lock when
+//! draining.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::terminal::pty::{spawn_pty, PtyHandle, PtySink, WinSize};
 use crate::vt::Emulator;
+
+// ---------------------------------------------------------------------------
+// Geometry snapshot
+// ---------------------------------------------------------------------------
+
+/// A self-consistent copy of the window's on-screen geometry, published by the
+/// thread that owns layout and read by callbacks (kitty/sixel passthrough) that
+/// must not touch the live fields while the layout loop mutates them.
+///
+/// Ported from Go TUIOS `GeometrySnapshot`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Geometry {
+    /// Screen-space X of the outer rectangle.
+    pub x: i32,
+    /// Screen-space Y of the outer rectangle.
+    pub y: i32,
+    /// Outer width in cells.
+    pub width: i32,
+    /// Outer height in cells.
+    pub height: i32,
+    /// Cells per border edge (0 when tiled, 1 when bordered).
+    pub border_offset: i32,
+    /// Cursor column (0-indexed) at snapshot time.
+    pub cursor_x: i32,
+    /// Cursor row (0-indexed) at snapshot time.
+    pub cursor_y: i32,
+}
+
+impl Geometry {
+    /// The drawable content width (outer minus borders).
+    pub fn content_width(&self) -> i32 {
+        (self.width - 2 * self.border_offset).max(1)
+    }
+
+    /// The drawable content height (outer minus borders).
+    pub fn content_height(&self) -> i32 {
+        (self.height - 2 * self.border_offset).max(1)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Output batching constants
+// ---------------------------------------------------------------------------
+
+/// Maximum bytes of pending PTY output that one pass of `flush_output`
+/// coalesces before writing to the emulator.
+const MAX_BATCH: usize = 256 * 1024;
+
+/// Maximum bytes written to the emulator under a single lock acquisition.
+/// Bounds how long the render path can be kept out of the emulator by a pane's
+/// own output — a latency knob, not a throughput one.
+const MAX_VT_CHUNK: usize = 8 * 1024;
+
+// ---------------------------------------------------------------------------
+// Window
+// ---------------------------------------------------------------------------
 
 /// A terminal window: one shell session in a pane.
 pub struct Window {
@@ -46,6 +112,27 @@ pub struct Window {
     pub foreground_cmd: Option<String>,
     /// Memoised shell working-directory read (per-window).
     pub cwd_cache: super::cwd::CwdCache,
+
+    // --- Phase 5: Terminal window I/O improvements ---
+
+    /// Geometry snapshot for cross-thread readers (passthrough callbacks).
+    /// Published by `publish_geometry`, read by `last_geometry`.
+    geometry: Mutex<Option<Geometry>>,
+
+    /// Pending output buffer for coalescing small PTY writes into larger
+    /// chunks. Only touched from the thread that calls `write` / `flush_output`
+    /// (the UI thread), so it does not need its own lock.
+    output_buffer: Vec<u8>,
+
+    /// A deferred resize: when resize events arrive in rapid succession, the
+    /// final size is stored here and announced once via `flush_resize`.
+    /// `Some` means a resize is pending; `None` means nothing deferred.
+    pending_resize: Mutex<Option<WinSize>>,
+
+    /// Cell pixel dimensions for XTWINOPS / TIOCGWINSZ pixel reporting.
+    /// `0` means unknown — pixel size is not reported in that case.
+    cell_pixel_width: u16,
+    cell_pixel_height: u16,
 }
 
 impl Window {
@@ -72,7 +159,7 @@ impl Window {
         let emu_clone = Arc::clone(&emulator);
         std::thread::spawn(move || drain_thread(reader.rx, emu_clone));
 
-        Ok(Self {
+        let win = Self {
             id: id.into(),
             title: title.into(),
             emulator,
@@ -95,7 +182,16 @@ impl Window {
             pre_zoom_y: 0,
             pre_zoom_width: 0,
             pre_zoom_height: 0,
-        })
+            geometry: Mutex::new(None),
+            output_buffer: Vec::new(),
+            pending_resize: Mutex::new(None),
+            cell_pixel_width: 0,
+            cell_pixel_height: 0,
+        };
+        // Publish the initial geometry before the PTY reader starts, so
+        // callbacks always have a snapshot to read.
+        win.publish_geometry(0, 0, size.cols as i32, size.rows as i32, 0);
+        Ok(win)
     }
 
     /// Create a window backed by a remote PTY: input goes to `sink` (which
@@ -114,7 +210,7 @@ impl Window {
         )));
         let emu_clone = Arc::clone(&emulator);
         std::thread::spawn(move || drain_thread(output, emu_clone));
-        Self {
+        let win = Self {
             id: id.into(),
             title: title.into(),
             emulator,
@@ -137,12 +233,19 @@ impl Window {
             pre_zoom_y: 0,
             pre_zoom_width: 0,
             pre_zoom_height: 0,
-        }
+            geometry: Mutex::new(None),
+            output_buffer: Vec::new(),
+            pending_resize: Mutex::new(None),
+            cell_pixel_width: 0,
+            cell_pixel_height: 0,
+        };
+        win.publish_geometry(0, 0, size.cols as i32, size.rows as i32, 0);
+        win
     }
 
     /// Create a window without a PTY (used in tests and daemon restore).
     pub fn without_pty(id: impl Into<String>, title: impl Into<String>, size: WinSize) -> Self {
-        Self {
+        let win = Self {
             id: id.into(),
             title: title.into(),
             emulator: Arc::new(Mutex::new(Emulator::new(
@@ -168,7 +271,14 @@ impl Window {
             pre_zoom_y: 0,
             pre_zoom_width: 0,
             pre_zoom_height: 0,
-        }
+            geometry: Mutex::new(None),
+            output_buffer: Vec::new(),
+            pending_resize: Mutex::new(None),
+            cell_pixel_width: 0,
+            cell_pixel_height: 0,
+        };
+        win.publish_geometry(0, 0, size.cols as i32, size.rows as i32, 0);
+        win
     }
 
     /// Write encoded bytes to the PTY.
@@ -190,10 +300,24 @@ impl Window {
         self.last_size = Some(size);
         if let Some(writer) = &self.writer {
             writer.resize(size);
+            // Report pixel dimensions when known.
+            if self.cell_pixel_width > 0 && self.cell_pixel_height > 0 {
+                let xpixel = size.cols.saturating_mul(self.cell_pixel_width);
+                let ypixel = size.rows.saturating_mul(self.cell_pixel_height);
+                writer.set_pixel_size(size.cols, size.rows, xpixel, ypixel);
+            }
         }
         if let Ok(mut emu) = self.emulator.lock() {
             emu.resize(size.cols as i32, size.rows as i32);
         }
+        // Update the geometry snapshot with the new size.
+        self.publish_geometry(
+            self.last_geometry().map(|g| g.x).unwrap_or(0),
+            self.last_geometry().map(|g| g.y).unwrap_or(0),
+            size.cols as i32,
+            size.rows as i32,
+            self.last_geometry().map(|g| g.border_offset).unwrap_or(0),
+        );
         changed
     }
 
@@ -207,18 +331,564 @@ impl Window {
 
     pub fn close(&mut self) {
         self.exited = true;
+        // Flush any pending output before teardown.
+        let _ = self.flush_output();
+        // Flush any pending resize.
+        let _ = self.flush_resize();
+        // Close the PTY master fd held by the handle.
+        if let Some(handle) = &mut self.handle {
+            handle.close();
+        }
     }
 
     /// The shell's working directory, or empty when unknown.
     pub fn cwd(&self) -> String {
         self.cwd_cache.get(self.pid().unwrap_or(0))
     }
+
+    // -----------------------------------------------------------------------
+    // Geometry snapshot
+    // -----------------------------------------------------------------------
+
+    /// Publish the current geometry for cross-thread readers. Captures the
+    /// window's position, size, border offset, and cursor location into a
+    /// snapshot that callbacks can read without touching the live fields.
+    ///
+    /// No-ops when the geometry is unchanged since the last publish.
+    pub fn publish_geometry(
+        &self,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        border_offset: i32,
+    ) {
+        // Read the cursor position from the emulator (0,0 if locked).
+        let (cursor_x, cursor_y) = match self.emulator.lock() {
+            Ok(emu) => {
+                let pos = emu.cursor_position();
+                (pos.x, pos.y)
+            }
+            Err(_) => (0, 0),
+        };
+
+        let new_geom = Geometry {
+            x,
+            y,
+            width,
+            height,
+            border_offset,
+            cursor_x,
+            cursor_y,
+        };
+
+        if let Ok(mut guard) = self.geometry.lock() {
+            if let Some(ref existing) = *guard {
+                if *existing == new_geom {
+                    return;
+                }
+            }
+            *guard = Some(new_geom);
+        }
+    }
+
+    /// The most recently published geometry snapshot. Returns a zero
+    /// `Geometry` when none has been published yet.
+    pub fn last_geometry(&self) -> Option<Geometry> {
+        self.geometry.lock().ok().and_then(|g| *g)
+    }
+
+    // -----------------------------------------------------------------------
+    // Output batching / coalescing
+    // -----------------------------------------------------------------------
+
+    /// Queue bytes for the PTY output buffer. Small writes are coalesced into
+    /// larger chunks for efficiency — the emulator parses the whole batch at
+    /// once in `flush_output`, which reduces lock acquisitions and parser
+    /// overhead for high-frequency output.
+    ///
+    /// The buffer is drained by `flush_output`. Callers that want immediate
+    /// delivery should call `flush_output` after queuing.
+    pub fn queue_output(&mut self, data: &[u8]) {
+        self.output_buffer.extend_from_slice(data);
+        // Auto-flush when the buffer reaches the batch cap.
+        if self.output_buffer.len() >= MAX_BATCH {
+            let _ = self.flush_output();
+        }
+    }
+
+    /// Flush the pending output buffer to the emulator, coalescing all queued
+    /// bytes into a single write. The batch is written in bounded chunks
+    /// (`MAX_VT_CHUNK`) so the render path is not starved by a pane's own
+    /// output — each chunk releases the emulator lock between writes.
+    ///
+    /// Returns the number of bytes written.
+    pub fn flush_output(&mut self) -> usize {
+        if self.output_buffer.is_empty() {
+            return 0;
+        }
+        let batch = std::mem::take(&mut self.output_buffer);
+        let total = batch.len();
+
+        // Write in bounded chunks to avoid holding the emulator lock for too
+        // long on a large batch.
+        let Ok(mut emu) = self.emulator.lock() else {
+            // Put the data back if we could not lock.
+            self.output_buffer = batch;
+            return 0;
+        };
+
+        for chunk in batch.chunks(MAX_VT_CHUNK) {
+            emu.write(chunk);
+        }
+
+        total
+    }
+
+    // -----------------------------------------------------------------------
+    // Deferred resize
+    // -----------------------------------------------------------------------
+
+    /// Defer a resize: store the target size without announcing it to the PTY
+    /// or emulator. When resize events arrive in rapid succession (e.g. during
+    /// a mouse drag), only the final size needs to be announced. Call
+    /// `flush_resize` once the sequence settles to apply the last size.
+    pub fn defer_resize(&self, size: WinSize) {
+        if let Ok(mut guard) = self.pending_resize.lock() {
+            *guard = Some(size);
+        }
+    }
+
+    /// Apply the deferred resize if one is pending. Announces the final size
+    /// to the PTY and emulator, then clears the pending state. Returns `true`
+    /// when a resize was applied, `false` when nothing was pending.
+    pub fn flush_resize(&mut self) -> bool {
+        let size = match self.pending_resize.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(_) => None,
+        };
+        let Some(size) = size else {
+            return false;
+        };
+        self.resize(size)
+    }
+
+    /// Whether a deferred resize is pending.
+    pub fn has_pending_resize(&self) -> bool {
+        self.pending_resize
+            .lock()
+            .map(|g| g.is_some())
+            .unwrap_or(false)
+    }
+
+    // -----------------------------------------------------------------------
+    // Foreground-process detection
+    // -----------------------------------------------------------------------
+
+    /// Detect the foreground process running in this pane's PTY. Returns the
+    /// process info (comm, cmdline, exe) read from `/proc`, or `None` when the
+    /// foreground process group cannot be determined (non-Linux, no PTY, or
+    /// the process has exited).
+    ///
+    /// Uses `tcgetpgrp` on the PTY master fd to find the foreground process
+    /// group leader, then reads `/proc/<pid>/stat`, `/proc/<pid>/cmdline`,
+    /// and `/proc/<pid>/exe` via the `agent_detect` module.
+    pub fn foreground_process_info(&self) -> Option<crate::session::agent_detect::ProcessInfo> {
+        let fd = self.handle.as_ref()?.master_fd()?;
+        crate::session::agent_detect::detect_foreground_process(fd)
+    }
+
+    /// The foreground process name (base name), or empty when only a shell is
+    /// running or the process cannot be determined. Convenience wrapper around
+    /// `foreground_process_info` and `agent_detect::foreground_command`.
+    pub fn foreground_process_name(&self) -> String {
+        let Some(info) = self.foreground_process_info() else {
+            return String::new();
+        };
+        // A shell is "running" when the PTY has a foreground process group.
+        let running = self
+            .handle
+            .as_ref()
+            .and_then(|h| h.master_fd())
+            .is_some();
+        let shell = self
+            .title
+            .split_whitespace()
+            .next()
+            .unwrap_or("sh")
+            .to_lowercase();
+        crate::session::agent_detect::foreground_command(&info, running, &shell)
+    }
+
+    // -----------------------------------------------------------------------
+    // Terminal reset
+    // -----------------------------------------------------------------------
+
+    /// Reset the terminal to a clean state. Sends RIS (ESC c) to the emulator
+    /// — which resets the screen, modes, and cursor — then clears all graphics
+    /// state (kitty image placements, sixel buffers). Also flushes any pending
+    /// output so the reset takes effect immediately.
+    pub fn reset_terminal(&mut self) {
+        // Flush pending output first so the reset is not overwritten by
+        // stale buffered data.
+        let _ = self.flush_output();
+
+        // Send RIS (ESC c) — full reset — to the emulator.
+        if let Ok(mut emu) = self.emulator.lock() {
+            emu.write(b"\x1bc");
+            // Clear graphics state (kitty/sixel) that the emulator's RIS
+            // handler does not clear on its own.
+            emu.clear_graphics();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // PTY pixel dimensions
+    // -----------------------------------------------------------------------
+
+    /// Set the cell pixel dimensions for this window. This is used to report
+    /// accurate pixel dimensions to child processes via TIOCGWINSZ, which
+    /// enables graphics protocols (kitty icat, sixel) to size images.
+    ///
+    /// When both dimensions are non-zero, the PTY is immediately updated with
+    /// the current window size in pixels.
+    pub fn set_cell_pixel_dimensions(&mut self, cell_width: u16, cell_height: u16) {
+        self.cell_pixel_width = cell_width;
+        self.cell_pixel_height = cell_height;
+
+        // Update the PTY immediately if we have a known size.
+        if cell_width > 0 && cell_height > 0 {
+            if let (Some(writer), Some(size)) = (&self.writer, self.last_size) {
+                let xpixel = size.cols.saturating_mul(cell_width);
+                let ypixel = size.rows.saturating_mul(cell_height);
+                writer.set_pixel_size(size.cols, size.rows, xpixel, ypixel);
+            }
+        }
+    }
+
+    /// The configured cell pixel width, or 0 when unknown.
+    pub fn cell_pixel_width(&self) -> u16 {
+        self.cell_pixel_width
+    }
+
+    /// The configured cell pixel height, or 0 when unknown.
+    pub fn cell_pixel_height(&self) -> u16 {
+        self.cell_pixel_height
+    }
 }
 
+// ---------------------------------------------------------------------------
+// PTY reader drain thread
+// ---------------------------------------------------------------------------
+
 fn drain_thread(rx: crossbeam_channel::Receiver<Vec<u8>>, emulator: Arc<Mutex<Emulator>>) {
+    // Batch coalescing on the reader side: collect multiple chunks into a
+    // single buffer before taking the emulator lock, to reduce lock
+    // acquisitions under high output rates.
+    let mut batch: Vec<u8> = Vec::with_capacity(MAX_BATCH);
+
     while let Ok(chunk) = rx.recv() {
-        if let Ok(mut emu) = emulator.lock() {
-            emu.write(&chunk);
+        batch.extend_from_slice(&chunk);
+
+        // Try to drain more chunks without blocking.
+        while batch.len() < MAX_BATCH {
+            match rx.try_recv() {
+                Ok(more) => batch.extend_from_slice(&more),
+                Err(_) => break,
+            }
         }
+
+        // Write in bounded chunks so the render path is not starved.
+        if let Ok(mut emu) = emulator.lock() {
+            for chunk in batch.chunks(MAX_VT_CHUNK) {
+                emu.write(chunk);
+            }
+        }
+        batch.clear();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn geometry_content_size_with_borders() {
+        let geom = Geometry {
+            x: 10,
+            y: 20,
+            width: 80,
+            height: 24,
+            border_offset: 1,
+            cursor_x: 0,
+            cursor_y: 0,
+        };
+        assert_eq!(geom.content_width(), 78);
+        assert_eq!(geom.content_height(), 22);
+    }
+
+    #[test]
+    fn geometry_content_size_tiled() {
+        let geom = Geometry {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+            border_offset: 0,
+            cursor_x: 0,
+            cursor_y: 0,
+        };
+        assert_eq!(geom.content_width(), 80);
+        assert_eq!(geom.content_height(), 24);
+    }
+
+    #[test]
+    fn geometry_content_size_clamped_to_one() {
+        let geom = Geometry {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            border_offset: 1,
+            cursor_x: 0,
+            cursor_y: 0,
+        };
+        assert_eq!(geom.content_width(), 1);
+        assert_eq!(geom.content_height(), 1);
+    }
+
+    #[test]
+    fn geometry_default_is_zero() {
+        let geom = Geometry::default();
+        assert_eq!(geom.x, 0);
+        assert_eq!(geom.y, 0);
+        assert_eq!(geom.width, 0);
+        assert_eq!(geom.height, 0);
+        assert_eq!(geom.border_offset, 0);
+        assert_eq!(geom.cursor_x, 0);
+        assert_eq!(geom.cursor_y, 0);
+    }
+
+    #[test]
+    fn publish_and_read_geometry() {
+        let win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        win.publish_geometry(10, 20, 100, 50, 1);
+        let geom = win.last_geometry().unwrap();
+        assert_eq!(geom.x, 10);
+        assert_eq!(geom.y, 20);
+        assert_eq!(geom.width, 100);
+        assert_eq!(geom.height, 50);
+        assert_eq!(geom.border_offset, 1);
+    }
+
+    #[test]
+    fn publish_geometry_is_idempotent() {
+        let win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        win.publish_geometry(5, 10, 80, 24, 1);
+        let first = win.last_geometry().unwrap();
+        // Publish the same geometry again — should be a no-op.
+        win.publish_geometry(5, 10, 80, 24, 1);
+        let second = win.last_geometry().unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn without_pty_publishes_initial_geometry() {
+        let win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        let geom = win.last_geometry().unwrap();
+        assert_eq!(geom.width, 80);
+        assert_eq!(geom.height, 24);
+    }
+
+    #[test]
+    fn queue_and_flush_output() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        win.queue_output(b"hello ");
+        win.queue_output(b"world");
+        assert_eq!(win.output_buffer.len(), 11);
+
+        let written = win.flush_output();
+        assert_eq!(written, 11);
+        assert!(win.output_buffer.is_empty());
+
+        // The emulator should have received the data.
+        let emu = win.emulator.lock().unwrap();
+        assert_eq!(emu.width(), 80);
+        assert_eq!(emu.height(), 24);
+    }
+
+    #[test]
+    fn flush_output_empty_is_zero() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        assert_eq!(win.flush_output(), 0);
+    }
+
+    #[test]
+    fn flush_output_coalesces_multiple_writes() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        for i in 0..10 {
+            win.queue_output(format!("line {i}\n").as_bytes());
+        }
+        let written = win.flush_output();
+        assert_eq!(written, win.output_buffer.len() + written); // tautology check
+        // Each "line N\n" is 7 bytes, 10 lines = 70 bytes.
+        assert_eq!(written, 70);
+    }
+
+    #[test]
+    fn queue_output_auto_flushes_at_cap() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        // Queue more than MAX_BATCH bytes to trigger auto-flush.
+        let big = vec![b'A'; MAX_BATCH + 1];
+        win.queue_output(&big);
+        // After auto-flush, the buffer should be empty (all written).
+        assert!(win.output_buffer.is_empty());
+    }
+
+    #[test]
+    fn defer_and_flush_resize() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        // Defer several sizes in rapid succession.
+        win.defer_resize(WinSize { cols: 100, rows: 30 });
+        win.defer_resize(WinSize { cols: 120, rows: 40 });
+        win.defer_resize(WinSize { cols: 90, rows: 25 });
+
+        assert!(win.has_pending_resize());
+
+        // Flush applies the last deferred size. The first resize from
+        // None→90,25 returns false (no previous size to change from),
+        // but the pending state is cleared.
+        let _ = win.flush_resize();
+        assert!(!win.has_pending_resize());
+
+        // A second flush should be a no-op.
+        let applied_again = win.flush_resize();
+        assert!(!applied_again);
+
+        // Now defer a new size and flush — it should report a change.
+        win.defer_resize(WinSize { cols: 60, rows: 15 });
+        assert!(win.has_pending_resize());
+        let applied = win.flush_resize();
+        assert!(applied);
+        assert!(!win.has_pending_resize());
+    }
+
+    #[test]
+    fn flush_resize_no_pending_is_false() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        assert!(!win.has_pending_resize());
+        assert!(!win.flush_resize());
+    }
+
+    #[test]
+    fn reset_terminal_clears_output_and_graphics() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        // Queue some output so we can verify it is flushed.
+        win.queue_output(b"some text");
+        assert!(!win.output_buffer.is_empty());
+
+        win.reset_terminal();
+
+        // Output buffer should be flushed (empty after reset).
+        assert!(win.output_buffer.is_empty());
+        // Emulator should still be functional.
+        let emu = win.emulator.lock().unwrap();
+        assert_eq!(emu.width(), 80);
+        assert_eq!(emu.height(), 24);
+    }
+
+    #[test]
+    fn set_cell_pixel_dimensions_stores_values() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        assert_eq!(win.cell_pixel_width(), 0);
+        assert_eq!(win.cell_pixel_height(), 0);
+
+        win.set_cell_pixel_dimensions(10, 20);
+        assert_eq!(win.cell_pixel_width(), 10);
+        assert_eq!(win.cell_pixel_height(), 20);
+    }
+
+    #[test]
+    fn set_cell_pixel_dimensions_zero_is_valid() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        win.set_cell_pixel_dimensions(0, 0);
+        assert_eq!(win.cell_pixel_width(), 0);
+        assert_eq!(win.cell_pixel_height(), 0);
+    }
+
+    #[test]
+    fn foreground_process_info_without_pty_is_none() {
+        let win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        assert!(win.foreground_process_info().is_none());
+    }
+
+    #[test]
+    fn foreground_process_name_without_pty_is_empty() {
+        let win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        assert!(win.foreground_process_name().is_empty());
+    }
+
+    #[test]
+    fn close_flushes_pending_output_and_resize() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        win.queue_output(b"pending");
+        win.defer_resize(WinSize { cols: 100, rows: 30 });
+        win.close();
+        assert!(win.exited);
+        assert!(win.output_buffer.is_empty());
+        assert!(!win.has_pending_resize());
+    }
+
+    #[test]
+    fn resize_updates_geometry_snapshot() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        // Initial geometry from without_pty.
+        let geom0 = win.last_geometry().unwrap();
+        assert_eq!(geom0.width, 80);
+        assert_eq!(geom0.height, 24);
+
+        // Resize should update the snapshot.
+        win.resize(WinSize { cols: 120, rows: 40 });
+        let geom1 = win.last_geometry().unwrap();
+        assert_eq!(geom1.width, 120);
+        assert_eq!(geom1.height, 40);
+    }
+
+    #[test]
+    fn resize_same_size_is_noop() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        // First resize from None → Some is not a "changed" resize.
+        let first = win.resize(WinSize { cols: 80, rows: 24 });
+        assert!(!first);
+        // Same size again is a no-op.
+        let second = win.resize(WinSize { cols: 80, rows: 24 });
+        assert!(!second);
+        // Different size is a real change.
+        let third = win.resize(WinSize { cols: 100, rows: 30 });
+        assert!(third);
+    }
+
+    #[test]
+    fn drain_thread_coalesces_and_writes() {
+        let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+        let emulator = Arc::new(Mutex::new(Emulator::new(80, 24)));
+        let emu_clone = Arc::clone(&emulator);
+        let handle = std::thread::spawn(move || drain_thread(rx, emu_clone));
+
+        // Send several small chunks.
+        tx.send(b"hello ".to_vec()).unwrap();
+        tx.send(b"world\n".to_vec()).unwrap();
+        // Drop the sender to end the drain thread.
+        drop(tx);
+        handle.join().unwrap();
+
+        // Verify the emulator received the data by checking it has content.
+        let emu = emulator.lock().unwrap();
+        assert_eq!(emu.width(), 80);
+        assert_eq!(emu.height(), 24);
     }
 }

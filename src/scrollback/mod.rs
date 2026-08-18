@@ -6,6 +6,8 @@
 //! a vim-navigable browser over the blocks: Commands, JSON, or file-path
 //! modes.
 
+pub mod browser;
+
 use crate::vt::semantic_markers::{SemanticMarker, SemanticMarkerType};
 
 /// One command and its output extracted from scrollback.

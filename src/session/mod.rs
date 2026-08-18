@@ -30,7 +30,7 @@ pub use model::{
     validate_session_name, Session, SessionConfig, SessionInfo, SessionState, WindowInfo,
     WindowState,
 };
-pub use protocol::Message;
+pub use protocol::{negotiate_codec, Codec, DaemonReport, Message, SessionReport};
 pub use remote::RemoteSink;
 pub use resurrection::{
     clean_resurrection_dir, list_resurrectable_infos, list_resurrectable_sessions,
