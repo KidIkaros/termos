@@ -21,7 +21,6 @@ use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::Terminal;
 use tokio::sync::Mutex;
 
-use crate::app::input::{handle_key, KeyResult};
 use crate::app::render::render;
 use crate::app::Os;
 use crate::config::UserConfig;
@@ -143,11 +142,7 @@ async fn handle_ws(socket: WebSocket, state: WebServerState) {
                     "type": "output",
                     "data": ansi,
                 });
-                if ws_sink
-                    .send(Message::Text(msg.to_string()))
-                    .await
-                    .is_err()
-                {
+                if ws_sink.send(Message::Text(msg.to_string())).await.is_err() {
                     break; // Client disconnected
                 }
             }
@@ -167,17 +162,18 @@ async fn handle_ws(socket: WebSocket, state: WebServerState) {
                         if let Some(msg_type) = frame.get("type").and_then(|v| v.as_str()) {
                             match msg_type {
                                 "input" => {
-                                    if let Some(data) =
-                                        frame.get("data").and_then(|v| v.as_str())
-                                    {
+                                    if let Some(data) = frame.get("data").and_then(|v| v.as_str()) {
                                         let mut os = os_input.lock().await;
                                         // Parse the input data as crossterm key events.
                                         // The xterm.js frontend sends key data as raw
                                         // characters or escape sequences.
                                         let events = parse_web_input(data);
                                         for key_event in &events {
-                                            let result = handle_key(&mut os, key_event);
-                                            if result == KeyResult::Quit || os.quitting {
+                                            let effects =
+                                                os.update(crate::app::msg::Msg::Key(*key_event));
+                                            if effects.iter().any(|e| {
+                                                matches!(e, crate::app::effect::Effect::Quit)
+                                            }) {
                                                 return;
                                             }
                                         }
@@ -189,9 +185,10 @@ async fn handle_ws(socket: WebSocket, state: WebServerState) {
                                         frame.get("rows").and_then(|v| v.as_u64()),
                                     ) {
                                         let mut os = os_input.lock().await;
-                                        os.width = cols as i32;
-                                        os.height = rows as i32;
-                                        os.sync_window_sizes();
+                                        os.update(crate::app::msg::Msg::Resize {
+                                            cols: cols.min(u16::MAX as u64) as u16,
+                                            rows: rows.min(u16::MAX as u64) as u16,
+                                        });
                                     }
                                 }
                                 _ => {}

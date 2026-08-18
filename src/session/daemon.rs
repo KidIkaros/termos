@@ -1106,12 +1106,19 @@ mod tests {
     fn resolve_session_explicit_name() {
         let attached = None;
         let session = Some("my-session".into());
-        assert_eq!(resolve_session(&attached, &session), Some("my-session".into()));
+        assert_eq!(
+            resolve_session(&attached, &session),
+            Some("my-session".into())
+        );
     }
 
     #[test]
     fn resolve_session_from_attached() {
-        let attached = Some(("attached-session".into(), 1, Arc::new(AtomicBool::new(true))));
+        let attached = Some((
+            "attached-session".into(),
+            1,
+            Arc::new(AtomicBool::new(true)),
+        ));
         let session = None;
         assert_eq!(
             resolve_session(&attached, &session),
@@ -1141,7 +1148,9 @@ mod tests {
     #[test]
     fn default_socket_path_is_set() {
         let path = default_socket_path();
-        assert!(path.to_string_lossy().contains("termos") || path.to_string_lossy().contains("tuios"));
+        assert!(
+            path.to_string_lossy().contains("termos") || path.to_string_lossy().contains("tuios")
+        );
     }
 
     #[test]

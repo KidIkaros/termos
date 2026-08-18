@@ -814,7 +814,8 @@ mod tests {
         let (mut rec, sends) = Recording::new();
         {
             let mut ce = CommandExecutor::new(&mut rec);
-            ce.execute(&cmd(CommandType::KeyCombo, &["Ctrl+6"])).unwrap();
+            ce.execute(&cmd(CommandType::KeyCombo, &["Ctrl+6"]))
+                .unwrap();
         }
         assert_eq!(sends.borrow()[0].1, vec![0x16]);
     }
@@ -824,7 +825,8 @@ mod tests {
         let (mut rec, sends) = Recording::new();
         {
             let mut ce = CommandExecutor::new(&mut rec);
-            ce.execute(&cmd(CommandType::KeyCombo, &["Ctrl+]"])).unwrap();
+            ce.execute(&cmd(CommandType::KeyCombo, &["Ctrl+]"]))
+                .unwrap();
         }
         // ] is not a letter/digit, so it's sent as-is
         assert_eq!(sends.borrow()[0].1, vec![b']']);
@@ -842,8 +844,7 @@ mod tests {
             let (mut rec, sends) = Recording::new();
             {
                 let mut ce = CommandExecutor::new(&mut rec);
-                ce.execute(&cmd(CommandType::KeyCombo, &[combo]))
-                    .unwrap();
+                ce.execute(&cmd(CommandType::KeyCombo, &[combo])).unwrap();
             }
             assert_eq!(sends.borrow()[0].1, expected, "combo {combo}");
         }
@@ -863,7 +864,9 @@ mod tests {
     fn split_direction_variants() {
         let (mut rec, _) = Recording::new();
         let mut ce = CommandExecutor::new(&mut rec);
-        assert!(ce.execute(&cmd(CommandType::Split, &["horizontal"])).is_ok());
+        assert!(ce
+            .execute(&cmd(CommandType::Split, &["horizontal"]))
+            .is_ok());
         assert!(ce.execute(&cmd(CommandType::Split, &["h"])).is_ok());
         assert!(ce.execute(&cmd(CommandType::Split, &["vertical"])).is_ok());
         assert!(ce.execute(&cmd(CommandType::Split, &["v"])).is_ok());
@@ -884,13 +887,9 @@ mod tests {
         let (mut rec, _) = Recording::new();
         let mut ce = CommandExecutor::new(&mut rec);
         assert!(ce.execute(&cmd(CommandType::SaveLayout, &[])).is_err());
-        assert!(ce
-            .execute(&cmd(CommandType::SaveLayout, &["main"]))
-            .is_ok());
+        assert!(ce.execute(&cmd(CommandType::SaveLayout, &["main"])).is_ok());
         assert!(ce.execute(&cmd(CommandType::LoadLayout, &[])).is_err());
-        assert!(ce
-            .execute(&cmd(CommandType::LoadLayout, &["main"]))
-            .is_ok());
+        assert!(ce.execute(&cmd(CommandType::LoadLayout, &["main"])).is_ok());
     }
 
     #[test]
@@ -919,9 +918,7 @@ mod tests {
     fn set_border_style_requires_arg() {
         let (mut rec, _) = Recording::new();
         let mut ce = CommandExecutor::new(&mut rec);
-        assert!(ce
-            .execute(&cmd(CommandType::SetBorderStyle, &[]))
-            .is_err());
+        assert!(ce.execute(&cmd(CommandType::SetBorderStyle, &[])).is_err());
         assert!(ce
             .execute(&cmd(CommandType::SetBorderStyle, &["rounded"]))
             .is_ok());
@@ -958,8 +955,6 @@ mod tests {
         let (mut rec, _) = Recording::new();
         let mut ce = CommandExecutor::new(&mut rec);
         assert!(ce.execute(&cmd(CommandType::Preselect, &[])).is_err());
-        assert!(ce
-            .execute(&cmd(CommandType::Preselect, &["left"]))
-            .is_ok());
+        assert!(ce.execute(&cmd(CommandType::Preselect, &["left"])).is_ok());
     }
 }

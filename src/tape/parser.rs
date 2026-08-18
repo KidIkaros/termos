@@ -942,7 +942,8 @@ mod tests {
 
     #[test]
     fn all_basic_commands() {
-        let input = "Enter\nSpace\nBackspace\nDelete\nTab\nEscape\nUp\nDown\nLeft\nRight\nHome\nEnd";
+        let input =
+            "Enter\nSpace\nBackspace\nDelete\nTab\nEscape\nUp\nDown\nLeft\nRight\nHome\nEnd";
         let (commands, errors) = parse_file(input);
         assert!(errors.is_empty());
         assert_eq!(commands.len(), 12);

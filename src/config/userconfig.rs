@@ -519,16 +519,31 @@ mod tests {
     #[test]
     fn window_management_bindings_present() {
         let cfg = UserConfig::default_config();
-        assert!(cfg.keybindings.window_management.contains_key("close_window"));
-        assert!(cfg.keybindings.window_management.contains_key("next_window"));
-        assert!(cfg.keybindings.window_management.contains_key("prev_window"));
+        assert!(cfg
+            .keybindings
+            .window_management
+            .contains_key("close_window"));
+        assert!(cfg
+            .keybindings
+            .window_management
+            .contains_key("next_window"));
+        assert!(cfg
+            .keybindings
+            .window_management
+            .contains_key("prev_window"));
     }
 
     #[test]
     fn prefix_mode_bindings_present() {
         let cfg = UserConfig::default_config();
-        assert!(cfg.keybindings.prefix_mode.contains_key("prefix_new_window"));
-        assert!(cfg.keybindings.prefix_mode.contains_key("prefix_close_window"));
+        assert!(cfg
+            .keybindings
+            .prefix_mode
+            .contains_key("prefix_new_window"));
+        assert!(cfg
+            .keybindings
+            .prefix_mode
+            .contains_key("prefix_close_window"));
     }
 
     #[test]

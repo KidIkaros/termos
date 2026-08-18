@@ -3,9 +3,43 @@
 
 use crossbeam_channel::Sender;
 
+use crate::tape::command::Command;
 use crate::terminal::pty::{PtySink, WinSize};
 
+use super::model::{SessionInfo, WindowInfo};
 use super::protocol::Message;
+
+/// A control event routed from the daemon socket reader thread to the event
+/// loop. The reader parses protocol messages, fans PTY output into per-window
+/// channels, and sends everything else here.
+#[derive(Debug, Clone)]
+pub enum RemoteEvent {
+    /// The daemon acknowledged an `Attach`.
+    Attached { windows: Vec<WindowInfo> },
+    /// The daemon replied to a `List`.
+    ListResult { sessions: Vec<SessionInfo> },
+    /// A window was spawned in the attached session.
+    WindowAdded(WindowInfo),
+    /// A window was closed in the attached session.
+    WindowClosed(String),
+    /// A window's agent state changed (broadcast).
+    AgentStateChanged {
+        window: String,
+        state: String,
+        message: String,
+        harness: String,
+    },
+    /// One command from a remote `tape exec`.
+    TapeCommand {
+        index: usize,
+        total: usize,
+        command: Command,
+    },
+    /// A remote tape finished.
+    TapeFinished { total: usize },
+    /// The daemon reported an error.
+    Error(String),
+}
 
 /// A `PtySink` for a daemon-backed window. `write`/`resize` become
 /// `Input`/`Resize` messages sent to the socket writer thread.
@@ -79,7 +113,10 @@ mod tests {
     fn remote_sink_resize_sends_resize_message() {
         let (tx, rx) = unbounded();
         let sink = RemoteSink::new("w1", tx);
-        sink.resize(WinSize { cols: 120, rows: 40 });
+        sink.resize(WinSize {
+            cols: 120,
+            rows: 40,
+        });
         let msg = rx.try_recv().unwrap();
         match msg {
             Message::Resize { window, cols, rows } => {

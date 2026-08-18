@@ -761,9 +761,14 @@ mod tests {
     fn render_single_window_fills_content() {
         let mut os = test_os();
         let bounds = os.workspace_bounds(1);
-        os.workspace_mut(1)
-            .tree
-            .insert_window(0, -1, crate::layout::SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).tree.insert_window(
+            0,
+            -1,
+            crate::layout::SplitType::None,
+            0.5,
+            bounds,
+            0,
+        );
         os.workspace_mut(1).focused = Some(0);
         os.focused_window = Some(0);
 

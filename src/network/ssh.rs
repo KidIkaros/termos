@@ -21,7 +21,6 @@ use russh_keys::key::PublicKey;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::sync::Mutex;
 
-use crate::app::input::{handle_key, KeyResult};
 use crate::app::render::render;
 use crate::app::Os;
 use crate::config::UserConfig;
@@ -395,10 +394,7 @@ impl TermosSshServer {
 
     /// Spawn the render loop for a client. This runs in a tokio task and
     /// continuously renders the Os state to the SSH channel.
-    fn spawn_render_loop(
-        client_id: usize,
-        clients: Arc<Mutex<HashMap<usize, ClientSession>>>,
-    ) {
+    fn spawn_render_loop(client_id: usize, clients: Arc<Mutex<HashMap<usize, ClientSession>>>) {
         tokio::spawn(async move {
             let frame_budget = Duration::from_millis(16); // ~60 FPS
             let mut last_render = Instant::now();
@@ -496,13 +492,7 @@ impl Handler for TermosSshServer {
         }
 
         let mut clients = self.clients.lock().await;
-        clients.insert(
-            id,
-            ClientSession {
-                terminal,
-                os,
-            },
-        );
+        clients.insert(id, ClientSession { terminal, os });
 
         // Spawn the render loop for this client.
         let clients_clone = self.clients.clone();
@@ -558,12 +548,16 @@ impl Handler for TermosSshServer {
     ) -> Result<(), Self::Error> {
         let mut clients = self.clients.lock().await;
         if let Some(cs) = clients.values_mut().last() {
-            // Parse SSH input into crossterm key events.
+            // Parse SSH input into crossterm key events and drive the model
+            // through the unified message pump.
             let events = parse_ssh_input(data);
 
             for key_event in &events {
-                let result = handle_key(&mut cs.os, key_event);
-                if result == KeyResult::Quit || cs.os.quitting {
+                let effects = cs.os.update(crate::app::msg::Msg::Key(*key_event));
+                if effects
+                    .iter()
+                    .any(|e| matches!(e, crate::app::effect::Effect::Quit))
+                {
                     // Client wants to quit; we don't break the SSH connection,
                     // just stop processing input.
                     break;
@@ -645,10 +639,7 @@ mod tests {
         // Ctrl+B, then "ls\n"
         let events = parse_ssh_input(b"\x02ls\n");
         assert_eq!(events.len(), 4);
-        assert_eq!(
-            events[0].code,
-            crossterm::event::KeyCode::Char('b')
-        );
+        assert_eq!(events[0].code, crossterm::event::KeyCode::Char('b'));
         assert!(events[0]
             .modifiers
             .contains(crossterm::event::KeyModifiers::CONTROL));

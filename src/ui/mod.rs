@@ -129,8 +129,8 @@ pub fn rgb_tui(rgb: Rgb) -> TuiColor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::theme::{Rgb, Theme};
     use crate::vt::cell::{Color, Style};
-    use crate::config::theme::{Theme, Rgb};
     use ratatui::style::Modifier;
 
     fn test_theme() -> Theme {
@@ -280,34 +280,22 @@ mod tests {
 
     #[test]
     fn border_type_thick() {
-        assert_eq!(
-            border_type("thick"),
-            ratatui::widgets::BorderType::Thick
-        );
+        assert_eq!(border_type("thick"), ratatui::widgets::BorderType::Thick);
     }
 
     #[test]
     fn border_type_double() {
-        assert_eq!(
-            border_type("double"),
-            ratatui::widgets::BorderType::Double
-        );
+        assert_eq!(border_type("double"), ratatui::widgets::BorderType::Double);
     }
 
     #[test]
     fn border_type_plain() {
-        assert_eq!(
-            border_type("plain"),
-            ratatui::widgets::BorderType::Plain
-        );
+        assert_eq!(border_type("plain"), ratatui::widgets::BorderType::Plain);
     }
 
     #[test]
     fn border_type_normal() {
-        assert_eq!(
-            border_type("normal"),
-            ratatui::widgets::BorderType::Plain
-        );
+        assert_eq!(border_type("normal"), ratatui::widgets::BorderType::Plain);
     }
 
     #[test]

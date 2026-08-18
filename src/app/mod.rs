@@ -8,9 +8,12 @@
 
 pub mod agent_alert;
 pub mod copymode_ext;
+pub mod effect;
 pub mod input;
 pub mod interaction;
+pub mod msg;
 pub mod render;
+pub mod update;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

@@ -27,11 +27,13 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use termos::app::input::{handle_key, handle_mouse, KeyResult};
+use termos::app::effect::Effect;
+use termos::app::msg::{from_remote_event, Msg};
 use termos::app::render::render;
 use termos::app::Os;
 use termos::config::userconfig::{Overrides, UserConfig};
 use termos::session::model::{SessionInfo, WindowInfo};
+use termos::session::remote::RemoteEvent;
 use termos::session::{self, protocol, Daemon, DaemonClient, Message, RemoteSink};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -691,35 +693,6 @@ fn cmd_run(name: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
 /// it across session switches.
 type OutputRegistry = Arc<Mutex<HashMap<String, Sender<Vec<u8>>>>>;
 
-/// A control event routed from the socket reader thread to the event loop.
-enum RemoteEvent {
-    /// The daemon acknowledged an `Attach`.
-    Attached { windows: Vec<WindowInfo> },
-    /// The daemon replied to a `List`.
-    ListResult { sessions: Vec<SessionInfo> },
-    /// A window was spawned in the attached session.
-    WindowAdded(WindowInfo),
-    /// A window was closed in the attached session.
-    WindowClosed(String),
-    /// A window's agent state changed (broadcast).
-    AgentStateChanged {
-        window: String,
-        state: String,
-        message: String,
-        harness: String,
-    },
-    /// One command from a remote `tape exec`.
-    TapeCommand {
-        index: usize,
-        total: usize,
-        command: termos::tape::command::Command,
-    },
-    /// A remote tape finished.
-    TapeFinished { total: usize },
-    /// The daemon reported an error.
-    Error(String),
-}
-
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Run the full remote multiplexer TUI attached to a daemon session. Every
@@ -909,14 +882,14 @@ fn run_remote_event_loop(
     let mut last_render = Instant::now();
     let frame_budget = Duration::from_millis(16); // ~60 FPS
 
-    loop {
-        if handle_pending_actions(os, msg_tx, events, outputs, current)? {
-            return Ok(()); // quit requested (e.g. last session killed)
-        }
+    let mut host_buf: Vec<u8> = Vec::new();
 
+    loop {
         // Drain control events from the reader thread.
         while let Ok(ev) = events.try_recv() {
             match ev {
+                // These two touch the output-channel registry, so they stay
+                // at the loop level rather than becoming `Msg`s.
                 RemoteEvent::WindowAdded(info) => {
                     let (out_tx, out_rx) = unbounded::<Vec<u8>>();
                     outputs.lock().unwrap().insert(info.id.clone(), out_tx);
@@ -932,40 +905,30 @@ fn run_remote_event_loop(
                     outputs.lock().unwrap().remove(&id);
                     os.notify("window closed", "info");
                 }
-                RemoteEvent::AgentStateChanged {
-                    window,
-                    state,
-                    message,
-                    harness,
-                } => {
-                    os.handle_agent_state_changed(&window, &state, &message, &harness);
-                }
-                RemoteEvent::TapeCommand {
-                    index,
-                    total,
-                    command,
-                } => {
-                    os.handle_remote_tape_command(index, total, &command);
-                }
-                RemoteEvent::TapeFinished { total } => {
-                    os.remote_tape_finished();
-                    os.notify(format!("tape finished ({total} commands)"), "info");
-                }
-                RemoteEvent::Attached { .. } => {} // handled by pending actions
-                RemoteEvent::ListResult { sessions } => {
-                    os.remote_sessions = sessions;
-                }
-                RemoteEvent::Error(msg) => {
-                    os.notify(msg, "error");
+                other => {
+                    let effects = os.update(from_remote_event(other));
+                    if drain_remote_effects(
+                        os,
+                        msg_tx,
+                        events,
+                        outputs,
+                        current,
+                        effects,
+                        &mut host_buf,
+                    )? {
+                        return Ok(()); // quit requested
+                    }
                 }
             }
         }
 
-        // Render + input.
-        os.tick_agent_alerts();
-        os.tick_script();
-        os.sync_window_sizes();
-        os.flush_graphics();
+        // Maintenance tick.
+        let effects = os.update(Msg::Tick);
+        if drain_remote_effects(os, msg_tx, events, outputs, current, effects, &mut host_buf)? {
+            return Ok(());
+        }
+
+        // Render.
         if last_render.elapsed() >= frame_budget {
             terminal.draw(|frame| {
                 render(os, frame.buffer_mut());
@@ -973,112 +936,158 @@ fn run_remote_event_loop(
             last_render = Instant::now();
         }
 
-        // Flush host-terminal sequences queued by alerts.
-        let host_seq = os.take_host_sequence();
-        if !host_seq.is_empty() {
+        // Flush host-terminal sequences queued by alerts after the draw so
+        // they never interleave a frame.
+        if !host_buf.is_empty() {
             use std::io::Write;
             let mut stdout = stdout();
-            let _ = stdout.write_all(&host_seq);
+            let _ = stdout.write_all(&host_buf);
             let _ = stdout.flush();
+            host_buf.clear();
         }
 
+        // Poll for input.
         if poll(Duration::from_millis(8))? {
             match read()? {
                 Event::Key(key) => {
                     if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
                         continue;
                     }
-                    let result = handle_key(os, &key);
-                    if result == KeyResult::Quit || os.quitting {
-                        break;
+                    let effects = os.update(Msg::Key(key));
+                    if drain_remote_effects(
+                        os,
+                        msg_tx,
+                        events,
+                        outputs,
+                        current,
+                        effects,
+                        &mut host_buf,
+                    )? {
+                        return Ok(());
                     }
                 }
                 Event::Resize(cols, rows) => {
-                    os.width = cols as i32;
-                    os.height = rows as i32;
-                    os.sync_window_sizes();
+                    os.update(Msg::Resize { cols, rows });
                 }
                 Event::Mouse(mouse) => {
-                    handle_mouse(os, &mouse);
+                    os.update(Msg::Mouse(mouse));
                 }
                 _ => {}
             }
         }
     }
-
-    Ok(())
 }
 
-/// Handle the session-switch and session-kill requests set by the switcher.
-/// Returns `Ok(true)` when the TUI should quit.
-fn handle_pending_actions(
+/// Execute effects produced by `Os::update` in the remote loop.
+///
+/// Host sequences are accumulated into `host_buf` so the loop can flush them
+/// after the frame; session attach/kill requests run their (synchronous)
+/// socket flows; `Quit` returns `Ok(true)`.
+fn drain_remote_effects(
     os: &mut Os,
     msg_tx: &Sender<Message>,
     events: &Receiver<RemoteEvent>,
     outputs: &OutputRegistry,
     current: &mut String,
+    effects: Vec<Effect>,
+    host_buf: &mut Vec<u8>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    // Session switch (from the session switcher).
-    if let Some(target) = os.pending_switch.take() {
-        if &target != current {
-            match switch_session(&target, msg_tx, events) {
+    for effect in effects {
+        match effect {
+            Effect::Quit => return Ok(true),
+            Effect::WriteHost(seq) => host_buf.extend_from_slice(&seq),
+            Effect::RequestAttach(target) => {
+                if execute_attach(os, msg_tx, events, outputs, current, &target)? {
+                    return Ok(true);
+                }
+            }
+            Effect::RequestKill(target) => {
+                if execute_kill(os, msg_tx, events, outputs, current, &target)? {
+                    return Ok(true);
+                }
+            }
+            Effect::None => {}
+        }
+    }
+    Ok(false)
+}
+
+/// Attach to `target` (from the session switcher). Returns `Ok(true)` when
+/// the TUI should quit.
+fn execute_attach(
+    os: &mut Os,
+    msg_tx: &Sender<Message>,
+    events: &Receiver<RemoteEvent>,
+    outputs: &OutputRegistry,
+    current: &mut String,
+    target: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if target != current {
+        match switch_session(target, msg_tx, events) {
+            Ok(windows) => {
+                outputs.lock().unwrap().clear();
+                os.clear_all_windows();
+                register_windows(os, &windows, msg_tx, outputs);
+                *current = target.to_string();
+                os.remote_session = Some(target.to_string());
+                os.notify(format!("attached to session {target}"), "info");
+            }
+            Err(e) => {
+                // Restore streaming to the session we were on.
+                let _ = msg_tx.send(Message::Attach {
+                    name: current.clone(),
+                });
+                let _ = wait_for_attached(events);
+                os.notify(format!("switch failed: {e}"), "error");
+            }
+        }
+    } else {
+        os.notify(format!("already on session {target}"), "info");
+    }
+    // Refresh the session list for the switcher.
+    let _ = msg_tx.send(Message::List);
+    Ok(false)
+}
+
+/// Kill `target` (Ctrl+D in the session switcher). Returns `Ok(true)` when
+/// the TUI should quit (last session killed).
+fn execute_kill(
+    os: &mut Os,
+    msg_tx: &Sender<Message>,
+    events: &Receiver<RemoteEvent>,
+    outputs: &OutputRegistry,
+    current: &mut String,
+    target: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let _ = msg_tx.send(Message::Kill {
+        name: target.to_string(),
+    });
+    let sessions = wait_for_list(events).unwrap_or_else(|_| os.remote_sessions.clone());
+    os.remote_sessions = sessions.clone();
+
+    if target == current {
+        // We killed the attached session; switch to another or quit.
+        if let Some(next) = sessions
+            .iter()
+            .map(|s| s.name.clone())
+            .find(|n| n != current)
+        {
+            match switch_session(&next, msg_tx, events) {
                 Ok(windows) => {
                     outputs.lock().unwrap().clear();
                     os.clear_all_windows();
                     register_windows(os, &windows, msg_tx, outputs);
-                    *current = target.clone();
-                    os.remote_session = Some(target.clone());
-                    os.notify(format!("attached to session {target}"), "info");
+                    *current = next.clone();
+                    os.remote_session = Some(next.clone());
                 }
-                Err(e) => {
-                    // Restore streaming to the session we were on.
-                    let _ = msg_tx.send(Message::Attach {
-                        name: current.clone(),
-                    });
-                    let _ = wait_for_attached(events);
-                    os.notify(format!("switch failed: {e}"), "error");
-                }
+                Err(e) => os.notify(format!("re-attach failed: {e}"), "error"),
             }
         } else {
-            os.notify(format!("already on session {target}"), "info");
-        }
-        // Refresh the session list for the switcher.
-        let _ = msg_tx.send(Message::List);
-    }
-
-    // Session kill (Ctrl+D in the session switcher).
-    if let Some(target) = os.pending_kill.take() {
-        let _ = msg_tx.send(Message::Kill {
-            name: target.clone(),
-        });
-        let sessions = wait_for_list(events).unwrap_or_else(|_| os.remote_sessions.clone());
-        os.remote_sessions = sessions.clone();
-
-        if target == *current {
-            // We killed the attached session; switch to another or quit.
-            if let Some(next) = sessions
-                .iter()
-                .map(|s| s.name.clone())
-                .find(|n| n != current)
-            {
-                match switch_session(&next, msg_tx, events) {
-                    Ok(windows) => {
-                        outputs.lock().unwrap().clear();
-                        os.clear_all_windows();
-                        register_windows(os, &windows, msg_tx, outputs);
-                        *current = next.clone();
-                        os.remote_session = Some(next.clone());
-                    }
-                    Err(e) => os.notify(format!("re-attach failed: {e}"), "error"),
-                }
-            } else {
-                os.remote_session = None;
-                os.notify("last session killed — quitting", "info");
-                return Ok(true);
-            }
+            os.remote_session = None;
+            os.notify("last session killed — quitting", "info");
+            return Ok(true);
         }
     }
-
     Ok(false)
 }
 
@@ -1207,24 +1216,24 @@ fn run_event_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut last_render = Instant::now();
     let frame_budget = Duration::from_millis(16); // ~60 FPS
+    let mut host_buf: Vec<u8> = Vec::new();
 
     loop {
         // Hot-reload config if the watcher sent an update.
         if let Some(rx) = &config_rx {
             if let Ok(new_config) = rx.try_recv() {
-                os.config = new_config;
-                os.notify("config reloaded", "info");
+                let effects = os.update(Msg::ConfigReloaded(Box::new(new_config)));
+                if drain_local_effects(effects, &mut host_buf) {
+                    break;
+                }
             }
         }
 
-        // Raise any agent alerts whose settle window has expired.
-        os.tick_agent_alerts();
-        // Advance tape playback (blocks internally on sleeps/waits).
-        os.tick_script();
-
-        // Sync window sizes to the current layout.
-        os.sync_window_sizes();
-        os.flush_graphics();
+        // Maintenance tick: agent alerts, script playback, layout sync.
+        let effects = os.update(Msg::Tick);
+        if drain_local_effects(effects, &mut host_buf) {
+            break;
+        }
 
         // Render at most ~60 FPS.
         if last_render.elapsed() >= frame_budget {
@@ -1236,12 +1245,12 @@ fn run_event_loop(
 
         // Flush host-terminal sequences queued by alerts (OSC 9 / BEL) after
         // the draw so they never interleave a frame.
-        let host_seq = os.take_host_sequence();
-        if !host_seq.is_empty() {
+        if !host_buf.is_empty() {
             use std::io::Write;
             let mut stdout = stdout();
-            let _ = stdout.write_all(&host_seq);
+            let _ = stdout.write_all(&host_buf);
             let _ = stdout.flush();
+            host_buf.clear();
         }
 
         // Poll for input.
@@ -1251,20 +1260,18 @@ fn run_event_loop(
                     if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
                         continue;
                     }
-                    let result = handle_key(os, &key);
+                    let effects = os.update(Msg::Key(key));
                     // `Passthrough` means the input layer already forwarded the
                     // encoded bytes to the focused PTY.
-                    if result == KeyResult::Quit || os.quitting {
+                    if drain_local_effects(effects, &mut host_buf) {
                         break;
                     }
                 }
                 Event::Resize(cols, rows) => {
-                    os.width = cols as i32;
-                    os.height = rows as i32;
-                    os.sync_window_sizes();
+                    os.update(Msg::Resize { cols, rows });
                 }
                 Event::Mouse(mouse) => {
-                    handle_mouse(os, &mouse);
+                    os.update(Msg::Mouse(mouse));
                 }
                 _ => {}
             }
@@ -1272,6 +1279,24 @@ fn run_event_loop(
     }
 
     Ok(())
+}
+
+/// Execute effects produced by `Os::update` in the local loop.
+///
+/// Host sequences are accumulated so the loop can flush them after the draw;
+/// session attach/kill requests never occur in local mode and are ignored.
+/// Returns `true` when the application should quit.
+fn drain_local_effects(effects: Vec<Effect>, host_buf: &mut Vec<u8>) -> bool {
+    let mut quit = false;
+    for effect in effects {
+        match effect {
+            Effect::Quit => quit = true,
+            Effect::WriteHost(seq) => host_buf.extend_from_slice(&seq),
+            Effect::RequestAttach(_) | Effect::RequestKill(_) => {}
+            Effect::None => {}
+        }
+    }
+    quit
 }
 
 #[cfg(test)]
