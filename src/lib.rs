@@ -31,6 +31,7 @@ pub mod server;
 pub mod session;
 pub mod tape;
 pub mod terminal;
+pub mod testutil;
 pub mod ui;
 pub mod util;
 pub mod vt;
