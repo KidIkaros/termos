@@ -140,6 +140,25 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         render_overlay(buf, content_area, &lines, "Project tape");
     } else if os.tape_manager_open {
         render_tape_manager(os, buf, content_area);
+    } else if os.browser_open {
+        let mode = match os.browser_mode {
+            crate::scrollback::BrowseMode::Commands => "commands",
+            crate::scrollback::BrowseMode::Output => "output",
+            crate::scrollback::BrowseMode::Json => "json",
+            crate::scrollback::BrowseMode::Paths => "paths",
+        };
+        let rows = os.browser_rows();
+        let mut lines: Vec<String> = Vec::new();
+        let start = os.browser_scroll;
+        for row in rows.iter().skip(start).take(20) {
+            lines.push(row.clone());
+        }
+        lines.push(String::new());
+        lines.push(format!(
+            "mode: {mode} · {} block(s) · j/k select, m mode, Enter jump, Esc close",
+            os.browser_blocks.len()
+        ));
+        render_overlay(buf, content_area, &lines, "Scrollback browser");
     } else if os.aggregate_open {
         let items = os.aggregate_items();
         let mut lines: Vec<String> = Vec::new();

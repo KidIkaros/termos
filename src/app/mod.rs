@@ -294,6 +294,12 @@ pub struct Os {
     pub aggregate_selected: usize,
     /// The sidebar rail state.
     pub sidebar: sidebar::Sidebar,
+    /// The structured scrollback browser overlay.
+    pub browser_open: bool,
+    pub browser_blocks: Vec<crate::scrollback::CommandBlock>,
+    pub browser_selected: usize,
+    pub browser_mode: crate::scrollback::BrowseMode,
+    pub browser_scroll: usize,
     /// A hover awaiting the delay window: (text, position, since).
     pub tooltip_pending: Option<(String, (i32, i32), std::time::Instant)>,
     /// Command palette state.
@@ -605,6 +611,11 @@ impl Os {
             aggregate_open: false,
             aggregate_selected: 0,
             sidebar: sidebar::Sidebar::new(),
+            browser_open: false,
+            browser_blocks: Vec::new(),
+            browser_selected: 0,
+            browser_mode: crate::scrollback::BrowseMode::Commands,
+            browser_scroll: 0,
             tooltip_pending: None,
             palette_open: false,
             palette_query: String::new(),
@@ -2969,6 +2980,117 @@ impl Os {
     /// Cancel the rename dialog without applying.
     pub fn cancel_rename_dialog(&mut self) {
         self.rename_dialog = None;
+    }
+
+    /// Open the scrollback browser for the focused window: parse its
+    /// semantic markers into command blocks (prompt fallback when no markers).
+    pub fn open_scrollback_browser(&mut self) {
+        let Some(i) = self.focused_window else { return };
+        let Some(window) = self.windows.get(i) else {
+            return;
+        };
+        let (markers, count) = {
+            let Ok(emu) = window.emulator.lock() else {
+                return;
+            };
+            let markers = emu.semantic_markers().markers();
+            let count = emu.content_line_count();
+            (markers, count)
+        };
+        let text = |line: usize| {
+            self.windows
+                .get(i)
+                .and_then(|w| w.emulator.lock().ok())
+                .map(|emu| emu.content_line_text(line))
+                .unwrap_or_default()
+        };
+        self.browser_blocks = crate::scrollback::parse_blocks(&markers, count, text);
+        self.browser_selected = 0;
+        self.browser_scroll = 0;
+        self.browser_open = true;
+    }
+
+    /// Close the scrollback browser.
+    pub fn close_scrollback_browser(&mut self) {
+        self.browser_open = false;
+        self.browser_blocks.clear();
+        self.browser_selected = 0;
+        self.browser_scroll = 0;
+    }
+
+    /// Cycle the browser display mode (Commands/Output/JSON/Paths).
+    pub fn cycle_browser_mode(&mut self) {
+        use crate::scrollback::BrowseMode;
+        self.browser_mode = match self.browser_mode {
+            BrowseMode::Commands => BrowseMode::Output,
+            BrowseMode::Output => BrowseMode::Json,
+            BrowseMode::Json => BrowseMode::Paths,
+            BrowseMode::Paths => BrowseMode::Commands,
+        };
+        self.browser_scroll = 0;
+    }
+
+    /// The text rows for the selected block in the current mode.
+    pub fn browser_rows(&self) -> Vec<String> {
+        use crate::scrollback::BrowseMode;
+        match self.browser_mode {
+            BrowseMode::Commands => self
+                .browser_blocks
+                .iter()
+                .enumerate()
+                .map(|(i, b)| {
+                    let marker = if i == self.browser_selected {
+                        "› "
+                    } else {
+                        "  "
+                    };
+                    format!("{marker}{}", b.command)
+                })
+                .collect(),
+            BrowseMode::Output => {
+                let mut rows: Vec<String> = Vec::new();
+                for (i, b) in self.browser_blocks.iter().enumerate() {
+                    if i == self.browser_selected {
+                        rows.push(format!("── {} ──", b.command));
+                        rows.extend(b.output.lines().map(|l| l.to_string()));
+                    }
+                }
+                if rows.is_empty() {
+                    rows.push("(no output)".into());
+                }
+                rows
+            }
+            BrowseMode::Json => {
+                let mut rows: Vec<String> = Vec::new();
+                for (i, b) in self.browser_blocks.iter().enumerate() {
+                    if i == self.browser_selected {
+                        rows.push(format!("── {} ──", b.command));
+                        for frag in crate::scrollback::extract_json(&b.output) {
+                            rows.push(frag);
+                        }
+                    }
+                }
+                if rows.is_empty() {
+                    rows.push("(no JSON found)".into());
+                }
+                rows
+            }
+            BrowseMode::Paths => {
+                let mut rows: Vec<String> = Vec::new();
+                for (i, b) in self.browser_blocks.iter().enumerate() {
+                    if i == self.browser_selected {
+                        rows.push(format!("── {} ──", b.command));
+                        for p in crate::scrollback::extract_paths(&b.output) {
+                            rows.push(p);
+                        }
+                    }
+                }
+                if rows.is_empty() {
+                    rows.push("(no paths found)".into());
+                }
+                rows
+            }
+        }
     }
 
     /// The sidebar rail rows for the current state.
@@ -5940,5 +6062,135 @@ mod sidebar_tests {
         let rows = os.sidebar_rows();
         assert_eq!(rows[0].kind, sidebar::RowKind::Session);
         assert!(rows[0].label.contains("workspace"));
+    }
+}
+
+#[cfg(test)]
+mod browser_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crate::scrollback::BrowseMode;
+    use crate::terminal::pty::WinSize;
+    use crate::terminal::window::Window;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn os_with_markers() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.width = 80;
+        os.height = 25;
+        let w = Window::without_pty(
+            "w0".to_string(),
+            "w0".to_string(),
+            WinSize { cols: 40, rows: 24 },
+        );
+        os.windows.push(w);
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.focused_window = Some(0);
+        {
+            let mut emu = os.windows[0].emulator.lock().unwrap();
+            emu.write(b"$ ls\r\n");
+            emu.write(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07");
+            emu.write(b"file1\r\n/tmp/x.log\r\n");
+            emu.write(b"\x1b]133;D;0\x07");
+            emu.write(b"$ echo hi\r\n");
+            emu.write(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07");
+            emu.write(b"{\"ok\": true}\r\n");
+            emu.write(b"\x1b]133;D;0\x07");
+        }
+        os
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn open_parses_blocks() {
+        let mut os = os_with_markers();
+        os.open_scrollback_browser();
+        assert!(os.browser_open);
+        assert!(!os.browser_blocks.is_empty());
+        assert!(os.browser_blocks.iter().any(|b| b.command.contains("ls")));
+    }
+
+    #[test]
+    fn empty_window_has_no_blocks() {
+        let mut os = Os::new(UserConfig::default_config());
+        let w = Window::without_pty(
+            "w0".to_string(),
+            "w0".to_string(),
+            WinSize { cols: 10, rows: 3 },
+        );
+        os.windows.push(w);
+        os.focused_window = Some(0);
+        os.open_scrollback_browser();
+        assert!(os.browser_open);
+        assert!(os.browser_blocks.is_empty());
+    }
+
+    #[test]
+    fn navigation_and_close() {
+        let mut os = os_with_markers();
+        os.open_scrollback_browser();
+        let count = os.browser_blocks.len();
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('j')));
+        assert_eq!(os.browser_selected, 1 % count);
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Esc));
+        assert!(!os.browser_open);
+    }
+
+    #[test]
+    fn mode_cycles() {
+        let mut os = os_with_markers();
+        os.open_scrollback_browser();
+        assert_eq!(os.browser_mode, BrowseMode::Commands);
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('m')));
+        assert_eq!(os.browser_mode, BrowseMode::Output);
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('m')));
+        assert_eq!(os.browser_mode, BrowseMode::Json);
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('m')));
+        assert_eq!(os.browser_mode, BrowseMode::Paths);
+    }
+
+    #[test]
+    fn json_mode_finds_fragments() {
+        let mut os = os_with_markers();
+        os.open_scrollback_browser();
+        // Select the block with the JSON output.
+        let idx = os
+            .browser_blocks
+            .iter()
+            .position(|b| b.command.contains("echo hi"))
+            .unwrap();
+        os.browser_selected = idx;
+        os.browser_mode = BrowseMode::Json;
+        let rows = os.browser_rows();
+        assert!(rows.iter().any(|r| r.contains("\"ok\"")));
+    }
+
+    #[test]
+    fn paths_mode_finds_paths() {
+        let mut os = os_with_markers();
+        os.open_scrollback_browser();
+        let idx = os
+            .browser_blocks
+            .iter()
+            .position(|b| b.command.contains("ls"))
+            .unwrap();
+        os.browser_selected = idx;
+        os.browser_mode = BrowseMode::Paths;
+        let rows = os.browser_rows();
+        assert!(rows.iter().any(|r| r.contains("/tmp/x.log")));
+    }
+
+    #[test]
+    fn bracket_opens_from_scrollback_mode() {
+        let mut os = os_with_markers();
+        os.enter_scrollback_mode();
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('[')));
+        assert!(os.browser_open);
     }
 }

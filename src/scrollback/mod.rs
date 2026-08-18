@@ -78,24 +78,49 @@ fn parse_with_markers(
     }
     let mut blocks = Vec::new();
     for (i, c) in cs.iter().enumerate() {
+        // The block starts on the C-marker line; output begins there, with
+        // the first line clipped at the marker's column.
         let start = c.abs_line.max(0) as usize;
-        let end = if let Some(next) = cs.get(i + 1) {
-            ((next.abs_line - 1).max(c.abs_line)) as usize
-        } else {
-            line_count.saturating_sub(1).max(start)
+        let col = c.col.max(0) as usize;
+        // The block ends at the D marker (its line minus one), or one before
+        // the next C marker, or the last content line.
+        let d_line = ds
+            .iter()
+            .filter(|d| d.abs_line >= c.abs_line)
+            .map(|d| d.abs_line)
+            .min();
+        let next_c = cs.get(i + 1).map(|n| n.abs_line);
+        let end = match (d_line, next_c) {
+            (Some(d), _) => ((d - 1).max(c.abs_line)) as usize,
+            (None, Some(n)) => ((n - 1).max(c.abs_line)) as usize,
+            (None, None) => (line_count as i32 - 1).max(c.abs_line) as usize,
         };
         let exit = ds
             .iter()
-            .find(|d| d.abs_line >= c.abs_line && d.abs_line <= end as i32)
+            .find(|d| d.abs_line >= c.abs_line && (d.abs_line - 1) <= end as i32)
             .map(|d| d.exit_code)
             .unwrap_or(-1);
-        let output = (start + 1..=end)
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut output: Vec<String> = (start..=end).map(line_text).collect();
+        if let Some(first) = output.first_mut() {
+            if col < first.chars().count() {
+                *first = first.chars().skip(col).collect();
+            } else {
+                first.clear();
+            }
+        }
+        // A C marker emitted before the newline leaves the first line empty
+        // after clipping (the command line); output then starts on the next.
+        if output.first().map(|l| l.trim().is_empty()).unwrap_or(false) {
+            output.remove(0);
+        }
+        // Trim trailing blank lines (the D marker usually fires on the line
+        // after the last output).
+        while output.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+            output.pop();
+        }
         blocks.push(CommandBlock {
             command: c.captured_text.clone(),
-            output,
+            output: output.join("\n"),
             exit_code: exit,
             start_line: start,
             end_line: end,
@@ -255,13 +280,15 @@ mod tests {
 
     #[test]
     fn blocks_from_markers() {
+        // Real emission: the C marker sits on the first output line with the
+        // captured command text; D closes the block with the exit code.
         let markers = vec![
-            cmd_marker(0, "ls"),
-            done_marker(2, 0),
-            cmd_marker(3, "echo hi"),
-            done_marker(4, 0),
-            cmd_marker(5, "pwd"),
-            done_marker(6, 7),
+            cmd_marker(1, "ls"),
+            done_marker(3, 0),
+            cmd_marker(4, "echo hi"),
+            done_marker(5, 0),
+            cmd_marker(6, "pwd"),
+            done_marker(7, 7),
         ];
         let text = |i: usize| lines()[i].clone();
         let blocks = parse_blocks(&markers, 7, text);
@@ -270,8 +297,10 @@ mod tests {
         assert_eq!(blocks[0].output, "file1\nfile2");
         assert_eq!(blocks[0].exit_code, 0);
         assert_eq!(blocks[1].command, "echo hi");
+        assert_eq!(blocks[1].output, "hi");
         assert_eq!(blocks[2].command, "pwd");
         assert_eq!(blocks[2].exit_code, 7);
+        assert_eq!(blocks[2].output, "/tmp");
     }
 
     #[test]

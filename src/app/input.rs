@@ -205,6 +205,11 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         return handle_tape_manager(os, key);
     }
 
+    // The scrollback browser consumes its own keys.
+    if os.browser_open {
+        return handle_browser_key(os, key);
+    }
+
     // The sidebar consumes its own keys while focused.
     if os.sidebar.open {
         return handle_sidebar_key(os, key);
@@ -307,6 +312,51 @@ fn handle_rename_dialog_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         KeyCode::Char(c) => {
             if let Some((_, text)) = os.rename_dialog.as_mut() {
                 text.push(c);
+            }
+        }
+        _ => {}
+    }
+    KeyResult::Consumed
+}
+
+fn handle_browser_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    let count = os.browser_blocks.len();
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            os.close_scrollback_browser();
+        }
+        KeyCode::Up | KeyCode::BackTab | KeyCode::Char('k') => {
+            if count > 0 {
+                os.browser_selected = (os.browser_selected + count - 1) % count;
+            }
+            os.browser_scroll = 0;
+        }
+        KeyCode::Down | KeyCode::Tab | KeyCode::Char('j') => {
+            if count > 0 {
+                os.browser_selected = (os.browser_selected + 1) % count;
+            }
+            os.browser_scroll = 0;
+        }
+        KeyCode::Char('m') => {
+            os.cycle_browser_mode();
+        }
+        // Scroll within the selected block's output.
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            os.browser_scroll = os.browser_scroll.saturating_sub(10);
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            os.browser_scroll += 10;
+        }
+        // Enter jumps the copy-mode cursor to the block's start line.
+        KeyCode::Enter => {
+            let start = os
+                .browser_blocks
+                .get(os.browser_selected)
+                .map(|b| b.start_line);
+            if let Some(line) = start {
+                os.close_scrollback_browser();
+                os.enter_scrollback_mode();
+                os.copy_cursor_line = line;
             }
         }
         _ => {}
@@ -1206,6 +1256,11 @@ fn handle_scrollback_mode(os: &mut Os, key: &KeyEvent) -> KeyResult {
         // Bracket matching.
         KeyCode::Char('%') => {
             os.copy_bracket_match();
+            KeyResult::Consumed
+        }
+        // Open the structured scrollback browser ('[' is free in copy mode).
+        KeyCode::Char('[') => {
+            os.open_scrollback_browser();
             KeyResult::Consumed
         }
         // Regex search.
