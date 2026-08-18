@@ -79,6 +79,8 @@ pub struct Emulator {
     /// Cell size in pixels for XTWINOPS responses (default 8×16).
     cell_width: u16,
     cell_height: u16,
+    /// Kitty keyboard protocol flag stack.
+    kitty_kbd_stack: Vec<u32>,
 }
 
 impl Default for Emulator {
@@ -115,6 +117,7 @@ impl Emulator {
             viewport: 0,
             cell_width: 8,
             cell_height: 16,
+            kitty_kbd_stack: vec![0],
         };
         // Alt screen keeps no scrollback.
         emu.screens[1].set_scrollback_enabled(false);
@@ -261,6 +264,21 @@ impl Emulator {
     pub fn set_cell_size(&mut self, width: u16, height: u16) {
         self.cell_width = width;
         self.cell_height = height;
+    }
+
+    /// Current kitty keyboard protocol flags (top of stack).
+    pub fn kitty_keyboard_flags(&self) -> u32 {
+        *self.kitty_kbd_stack.last().unwrap_or(&0)
+    }
+
+    /// Copy of the kitty keyboard flag stack (for daemon state sync).
+    pub fn kitty_keyboard_stack(&self) -> Vec<u32> {
+        self.kitty_kbd_stack.clone()
+    }
+
+    /// Restore the kitty keyboard flag stack (from daemon state sync).
+    pub fn restore_kitty_keyboard_stack(&mut self, stack: Vec<u32>) {
+        self.kitty_kbd_stack = if stack.is_empty() { vec![0] } else { stack };
     }
 
     pub fn scrollback_line_text(&self, index: usize) -> Option<String> {
@@ -817,6 +835,7 @@ impl Handler for Emulator {
                 self.gl = 0;
                 self.gr = 1;
                 self.gsingle = 0;
+                self.kitty_kbd_stack = vec![0];
                 self.screen_mut().clear();
                 self.screen_mut().set_cursor(0, 0, false);
                 self.screen_mut().scroll = ScrollRegion::full(self.width(), self.height());
@@ -1331,6 +1350,42 @@ impl Emulator {
             (b'>', b'c') => {
                 let seq = b"\x1b[>1;10;0c".to_vec();
                 self.queue_response(&seq);
+            }
+            // Kitty keyboard push (CSI > flags u).
+            (b'>', b'u') => {
+                let flags = params.first().copied().unwrap_or(0) as u32;
+                self.kitty_kbd_stack.push(flags);
+            }
+            // Kitty keyboard pop (CSI < count u).
+            (b'<', b'u') => {
+                let count = params.first().copied().unwrap_or(1).max(1) as usize;
+                for _ in 0..count {
+                    if self.kitty_kbd_stack.len() <= 1 {
+                        break;
+                    }
+                    self.kitty_kbd_stack.pop();
+                }
+            }
+            // Kitty keyboard query (CSI ? u).
+            (b'?', b'u') => {
+                let flags = self.kitty_keyboard_flags();
+                let seq = format!("\x1b[?{flags}u");
+                self.queue_response(seq.as_bytes());
+            }
+            // Kitty keyboard set (CSI = flags ; mode u).
+            (b'=', b'u') => {
+                let flags = params.first().copied().unwrap_or(0) as u32;
+                let mode = params.get(1).copied().unwrap_or(1) as u32;
+                let current = self.kitty_keyboard_flags();
+                let new_flags = match mode {
+                    1 => flags,            // set given flags, unset all others
+                    2 => current | flags,  // set given flags, keep existing
+                    3 => current & !flags, // unset given flags, keep existing
+                    _ => current,
+                };
+                if let Some(top) = self.kitty_kbd_stack.last_mut() {
+                    *top = new_flags;
+                }
             }
             // DEC private mode set.
             (b'?', b'h') => {
@@ -1917,5 +1972,90 @@ mod malformed_sequence_tests {
         e.write(b"\x1b[;H");
         assert_eq!(e.cursor_position().x, 0);
         assert_eq!(e.cursor_position().y, 0);
+    }
+}
+
+#[cfg(test)]
+mod kitty_keyboard_tests {
+    use super::*;
+
+    #[test]
+    fn push_sets_flags() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[>1u");
+        assert_eq!(e.kitty_keyboard_flags(), 1);
+        e.write(b"\x1b[>2u");
+        assert_eq!(e.kitty_keyboard_flags(), 2);
+    }
+
+    #[test]
+    fn pop_restores_flags() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[>1u");
+        e.write(b"\x1b[>2u");
+        e.write(b"\x1b[<1u");
+        assert_eq!(e.kitty_keyboard_flags(), 1);
+    }
+
+    #[test]
+    fn pop_keeps_base() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[<5u");
+        assert_eq!(e.kitty_keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn query_responds() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[>7u");
+        e.write(b"\x1b[?u");
+        let resp = e.take_response();
+        let s = String::from_utf8_lossy(&resp);
+        assert!(s.contains("\x1b[?7u"), "got: {s}");
+    }
+
+    #[test]
+    fn set_mode1_replaces() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[>1u");
+        e.write(b"\x1b[=2;1u");
+        assert_eq!(e.kitty_keyboard_flags(), 2);
+    }
+
+    #[test]
+    fn set_mode2_adds() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[>1u");
+        e.write(b"\x1b[=2;2u");
+        assert_eq!(e.kitty_keyboard_flags(), 3);
+    }
+
+    #[test]
+    fn set_mode3_removes() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[>3u");
+        e.write(b"\x1b[=1;3u");
+        assert_eq!(e.kitty_keyboard_flags(), 2);
+    }
+
+    #[test]
+    fn ris_resets_keyboard() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[>7u");
+        e.write(b"\x1bc");
+        assert_eq!(e.kitty_keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn stack_sync() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[>1u");
+        e.write(b"\x1b[>2u");
+        let stack = e.kitty_keyboard_stack();
+        assert_eq!(stack, vec![0, 1, 2]);
+
+        let mut e2 = Emulator::new(80, 24);
+        e2.restore_kitty_keyboard_stack(stack);
+        assert_eq!(e2.kitty_keyboard_flags(), 2);
     }
 }
