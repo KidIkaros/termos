@@ -305,6 +305,10 @@ impl ScreenBuffer {
 
     pub fn restore_cursor(&mut self) {
         self.cursor.pos = self.cursor.saved;
+        // The saved position may predate a resize; clamp it to the current
+        // screen so DECRC can never leave the cursor out of bounds.
+        self.cursor.pos.x = self.cursor.pos.x.clamp(0, self.width - 1);
+        self.cursor.pos.y = self.cursor.pos.y.clamp(0, self.height - 1);
         self.cursor.pen = self.cursor.saved_pen.clone();
     }
 

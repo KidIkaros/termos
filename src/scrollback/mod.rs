@@ -118,10 +118,7 @@ fn parse_with_prompts(
         if is_prompt {
             if let Some(s) = start.take() {
                 let end = line.saturating_sub(1).max(s);
-                let output = (s + 1..=end)
-                    .map(line_text)
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let output = (s + 1..=end).map(line_text).collect::<Vec<_>>().join("\n");
                 blocks.push(CommandBlock {
                     command: line_text(s).trim().to_string(),
                     output,
@@ -136,10 +133,7 @@ fn parse_with_prompts(
     }
     if let Some(s) = start {
         let end = line_count.saturating_sub(1).max(s);
-        let output = (s + 1..=end)
-            .map(line_text)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let output = (s + 1..=end).map(line_text).collect::<Vec<_>>().join("\n");
         blocks.push(CommandBlock {
             command: line_text(s).trim().to_string(),
             output,
