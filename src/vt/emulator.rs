@@ -920,8 +920,15 @@ impl Handler for Emulator {
                 let col = p(1, 1) - 1;
                 self.screen_mut().set_cursor(col, row, false);
             }
-            // Cursor up (with origin).
-            b'I' => self.screen_mut().move_cursor(0, -p_or1(0)),
+            // CHT — cursor horizontal tabulation (forward N tabs).
+            b'I' => {
+                let n = p_or1(0);
+                let screen = self.screen_mut();
+                for _ in 0..n {
+                    let next = ((screen.cursor.pos.x / 8) + 1) * 8;
+                    screen.cursor.pos.x = next.min(screen.width() - 1);
+                }
+            }
             // Cursor down (with origin).
             b'J' => match p(0, 0) {
                 0 => self.screen_mut().clear_to_end_of_screen(),
@@ -947,6 +954,15 @@ impl Handler for Emulator {
             b'@' => self.screen_mut().insert_cell(p_or1(0)),
             // Erase character.
             b'X' => self.screen_mut().erase_characters(p_or1(0)),
+            // CBT — cursor backward tabulation (back N tabs).
+            b'Z' => {
+                let n = p_or1(0);
+                let screen = self.screen_mut();
+                for _ in 0..n {
+                    let prev = ((screen.cursor.pos.x - 1) / 8) * 8;
+                    screen.cursor.pos.x = prev.max(0);
+                }
+            }
             // Scroll up.
             b'S' => self.screen_mut().scroll_up(p_or1(0)),
             // Scroll down.
@@ -1686,5 +1702,40 @@ mod esc_osc_completion_tests {
         e.write(b"\x1b[2 q");
         let resp = e.take_response();
         assert!(resp.is_empty(), "DECSCUSR should not produce output");
+    }
+
+    #[test]
+    fn cht_moves_forward_tabs() {
+        let mut e = Emulator::new(80, 24);
+        // Start at column 0.
+        e.write(b"\x1b[2I");
+        // Two tab stops forward: 0 -> 8 -> 16.
+        assert_eq!(e.cursor_position().x, 16);
+    }
+
+    #[test]
+    fn cht_clamps_to_width() {
+        let mut e = Emulator::new(20, 24);
+        e.write(b"\x1b[1;18H");
+        e.write(b"\x1b[3I");
+        // 17 -> next tab is 24, but clamped to 19.
+        assert_eq!(e.cursor_position().x, 19);
+    }
+
+    #[test]
+    fn cbt_moves_backward_tabs() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[1;20H");
+        e.write(b"\x1b[2Z");
+        // 19 -> prev tab 16 -> prev tab 8.
+        assert_eq!(e.cursor_position().x, 8);
+    }
+
+    #[test]
+    fn cbt_clamps_to_zero() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[1;3H");
+        e.write(b"\x1b[5Z");
+        assert_eq!(e.cursor_position().x, 0);
     }
 }
