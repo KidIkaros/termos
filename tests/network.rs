@@ -111,6 +111,7 @@ async fn web_server_serves_index_html() {
             termos::web::TouchMode::Auto,
             0,
             false,
+            false,
         )
         .await;
     });
@@ -150,6 +151,7 @@ async fn web_websocket_upgrade() {
             config,
             termos::web::TouchMode::Auto,
             0,
+            false,
             false,
         )
         .await;

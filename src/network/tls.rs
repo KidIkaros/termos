@@ -94,6 +94,14 @@ pub fn auto_tls_config(
     std::fs::write(&cert_path, cert_pem)?;
     std::fs::write(&key_path, key_pem)?;
 
+    // Restrict private key permissions (0600 on Unix).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("failed to set key file permissions: {e}"))?;
+    }
+
     // Build rustls config from the DER bytes directly.
     let certs = vec![rustls::pki_types::CertificateDer::from(cert_der.to_vec())];
     let key = rustls::pki_types::PrivateKeyDer::try_from(key_der)

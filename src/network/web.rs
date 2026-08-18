@@ -61,7 +61,12 @@ pub async fn run_web_server(
     touch_mode: crate::web::TouchMode,
     max_connections: u64,
     read_only: bool,
+    tls_enabled: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Refuse non-TLS on non-loopback addresses to prevent credential exposure.
+    let host = addr.split(':').next().unwrap_or("127.0.0.1");
+    crate::web::check_transport_security(host, tls_enabled)?;
+
     let addr: SocketAddr = addr.parse()?;
     let state = WebServerState {
         config: Arc::new(config),

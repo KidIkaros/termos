@@ -62,6 +62,32 @@ pub struct TerminalHandle {
     sink: Vec<u8>,
 }
 
+/// A simple writer that forwards bytes to the SSH channel via an unbounded
+/// sender. Used by graphics passthrough to write APC/sixel sequences directly
+/// to the channel.
+struct ChannelWriter {
+    sender: UnboundedSender<Vec<u8>>,
+}
+
+impl ChannelWriter {
+    fn new(sender: UnboundedSender<Vec<u8>>) -> Self {
+        Self { sender }
+    }
+}
+
+impl std::io::Write for ChannelWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.sender
+            .send(buf.to_vec())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "channel closed"))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl TerminalHandle {
     async fn start(handle: Handle, channel_id: ChannelId) -> Self {
         let (sender, mut receiver) = unbounded_channel::<Vec<u8>>();
@@ -535,6 +561,33 @@ impl Handler for TermosSshServer {
                 pix_width as i32,
                 pix_height as i32,
             ));
+            // Project client capabilities onto the app's host graphics caps,
+            // overriding the server's local probe with the remote client's
+            // reported capabilities.
+            if let Some(ref caps) = cs.caps {
+                let host = crate::server::client_to_host_capabilities(caps);
+                cs.os.graphics_caps.kitty = host.kitty_graphics;
+                cs.os.graphics_caps.sixel = host.sixel_graphics;
+                // Re-initialize passthrough if capabilities changed.
+                // The passthrough writes to the SSH channel via a clone of
+                // the terminal's sender.
+                if host.kitty_graphics && cs.os.kitty_passthrough.is_none() {
+                    let out: Box<dyn std::io::Write + Send> =
+                        Box::new(ChannelWriter::new(cs.terminal.sender.clone()));
+                    cs.os.kitty_passthrough = Some(crate::graphics::kitty::KittyPassthrough::new(
+                        cs.os.graphics_caps,
+                        out,
+                    ));
+                }
+                if host.sixel_graphics && cs.os.sixel_passthrough.is_none() {
+                    let out: Box<dyn std::io::Write + Send> =
+                        Box::new(ChannelWriter::new(cs.terminal.sender.clone()));
+                    cs.os.sixel_passthrough = Some(crate::graphics::sixel::SixelPassthrough::new(
+                        cs.os.graphics_caps,
+                        out,
+                    ));
+                }
+            }
             cs.os.width = col_width as i32;
             cs.os.height = row_height as i32;
             cs.os.sync_window_sizes();

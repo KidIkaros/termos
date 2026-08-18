@@ -30,6 +30,14 @@ pub const MODE_INSERT: i64 = 4;
 pub const MODE_APPLICATION_CURSOR_KEYS: i64 = 1;
 pub const MODE_APPLICATION_KEYPAD: i64 = 2;
 
+/// Known ANSI (non-private) modes that `CSI h`/`CSI l` may set/reset.
+/// DEC private modes (25, 47, 1049, 2004, etc.) are only set via `CSI ? h`/`CSI ? l`.
+/// Per the VT spec and Go reference: 2 (KAM), 4 (IRM/insert), 7 (auto-wrap),
+/// 12 (SRM/send-receive), 20 (LNM/linefeed).
+fn is_ansi_mode(mode: i64) -> bool {
+    matches!(mode, 2 | 4 | 7 | 12 | 20)
+}
+
 /// The emulator.
 #[derive(Debug)]
 pub struct Emulator {
@@ -909,10 +917,18 @@ impl Handler for Emulator {
             }
             if inter == b'$' && final_byte == b'p' {
                 // DECRQM — Request Mode (ANSI).
-                // Response: CSI n ; s $ y  where s is 1=set, 2=reset.
+                // Response: CSI n ; s $ y  where s is 0=unknown, 1=set, 2=reset.
                 let mode = p(0, 0);
                 if mode != 0 {
-                    let setting = if self.is_mode_set(mode as i64) { 1 } else { 2 };
+                    let setting = if self.modes.contains_key(&(mode as i64)) {
+                        if self.is_mode_set(mode as i64) {
+                            1
+                        } else {
+                            2
+                        }
+                    } else {
+                        0 // not recognized
+                    };
                     let seq = format!("\x1b[{mode};{setting}$y");
                     self.queue_response(seq.as_bytes());
                 }
@@ -1001,16 +1017,22 @@ impl Handler for Emulator {
             b'T' => self.screen_mut().scroll_down(p_or1(0)),
             // SGR.
             b'm' => self.apply_sgr(&params),
-            // ANSI mode set.
+            // ANSI mode set (CSI h without private marker).
+            // Only known ANSI modes are accepted; DEC private modes (25, 47,
+            // 1049, 2004, etc.) require `CSI ? h`.
             b'h' => {
                 for &mode in &params {
-                    self.set_mode(mode, true);
+                    if is_ansi_mode(mode) {
+                        self.set_mode(mode, true);
+                    }
                 }
             }
-            // ANSI mode reset.
+            // ANSI mode reset (CSI l without private marker).
             b'l' => {
                 for &mode in &params {
-                    self.set_mode(mode, false);
+                    if is_ansi_mode(mode) {
+                        self.set_mode(mode, false);
+                    }
                 }
             }
             // Cursor save.
@@ -1339,7 +1361,15 @@ impl Emulator {
         if intermediates.contains(&b'$') && final_byte == b'p' && private_marker == b'?' {
             let mode = p(0, 0);
             if mode != 0 {
-                let setting = if self.is_mode_set(mode as i64) { 1 } else { 2 };
+                let setting = if self.modes.contains_key(&(mode as i64)) {
+                    if self.is_mode_set(mode as i64) {
+                        1
+                    } else {
+                        2
+                    }
+                } else {
+                    0 // not recognized
+                };
                 let seq = format!("\x1b[?{mode};{setting}$y");
                 self.queue_response(seq.as_bytes());
             }
@@ -1381,7 +1411,7 @@ impl Emulator {
                     1 => flags,            // set given flags, unset all others
                     2 => current | flags,  // set given flags, keep existing
                     3 => current & !flags, // unset given flags, keep existing
-                    _ => current,
+                    _ => flags,            // unknown mode: replace (matches Go)
                 };
                 if let Some(top) = self.kitty_kbd_stack.last_mut() {
                     *top = new_flags;
@@ -1869,6 +1899,50 @@ mod esc_osc_completion_tests {
         e.write(b"\x1b[7h");
         assert!(e.is_mode_set(MODE_AUTO_WRAP));
     }
+
+    #[test]
+    fn decrqm_unknown_mode_returns_0() {
+        let mut e = Emulator::new(80, 24);
+        // Mode 999 is not known — should return 0 (not recognized).
+        e.write(b"\x1b[999$p");
+        let resp = e.take_response();
+        let s = String::from_utf8_lossy(&resp);
+        assert!(
+            s.contains("\x1b[999;0$y"),
+            "unknown mode should return 0: {s}"
+        );
+    }
+
+    #[test]
+    fn decrqm_dec_unknown_mode_returns_0() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[?999$p");
+        let resp = e.take_response();
+        let s = String::from_utf8_lossy(&resp);
+        assert!(
+            s.contains("\x1b[?999;0$y"),
+            "unknown DEC mode should return 0: {s}"
+        );
+    }
+
+    #[test]
+    fn ansi_csi_h_does_not_set_dec_mode_25() {
+        let mut e = Emulator::new(80, 24);
+        // Mode 25 (cursor visible) is set by default. CSI 25l (without ?)
+        // should NOT reset it — DEC modes require the `?` private marker.
+        assert!(e.is_mode_set(MODE_CURSOR_VISIBLE));
+        e.write(b"\x1b[25l");
+        assert!(
+            e.is_mode_set(MODE_CURSOR_VISIBLE),
+            "CSI 25l without ? should not reset DEC mode 25"
+        );
+        // CSI ? 25l (with ?) should reset it.
+        e.write(b"\x1b[?25l");
+        assert!(
+            !e.is_mode_set(MODE_CURSOR_VISIBLE),
+            "CSI ? 25l should reset DEC mode 25"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2035,6 +2109,15 @@ mod kitty_keyboard_tests {
         let mut e = Emulator::new(80, 24);
         e.write(b"\x1b[>3u");
         e.write(b"\x1b[=1;3u");
+        assert_eq!(e.kitty_keyboard_flags(), 2);
+    }
+
+    #[test]
+    fn set_unknown_mode_replaces() {
+        // Unknown mode (0, 4, etc.) should replace flags (match Go behaviour).
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[>7u");
+        e.write(b"\x1b[=2;0u"); // mode 0 is unknown → replace
         assert_eq!(e.kitty_keyboard_flags(), 2);
     }
 

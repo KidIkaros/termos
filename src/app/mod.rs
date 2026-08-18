@@ -12,6 +12,7 @@ pub mod copymode_ext;
 pub mod effect;
 pub mod input;
 pub mod interaction;
+pub mod layout_templates;
 pub mod msg;
 pub mod render;
 pub mod sidebar;

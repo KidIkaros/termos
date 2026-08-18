@@ -37,7 +37,18 @@ use termos::session::remote::RemoteEvent;
 use termos::session::{self, protocol, Daemon, DaemonClient, Message, RemoteSink};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    let raw_args: Vec<String> = std::env::args().collect();
+    let (overrides, remaining) = Overrides::parse(&raw_args[1..]);
+
+    // Initialize logging: daemon modes write to a file, everything else to stderr.
+    let is_daemon = remaining
+        .first()
+        .is_some_and(|c| c == "daemon" || c == "start-server");
+    if is_daemon {
+        init_daemon_logging();
+    } else {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    }
 
     // Write a crash report on panic (Go's WriteCrashLog), so a malformed
     // guest stream or a rare UI branch leaves an artifact instead of nothing.
@@ -57,13 +68,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         default_panic(info);
     }));
 
-    let raw_args: Vec<String> = std::env::args().collect();
-    let (overrides, remaining) = Overrides::parse(&raw_args[1..]);
     if !remaining.is_empty() {
         return dispatch(&remaining, &overrides);
     }
 
     run_local_tui_with_overrides(&overrides)
+}
+
+/// Initialize logging for daemon mode — writes to a file in the state directory.
+fn init_daemon_logging() {
+    let dir = dirs::state_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("termos");
+    let _ = std::fs::create_dir_all(&dir);
+    let log_path = dir.join("daemon.log");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path);
+    match file {
+        Ok(f) => {
+            env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+                .target(env_logger::Target::Pipe(Box::new(f)))
+                .init();
+        }
+        Err(_) => {
+            // Fallback to stderr if the log file can't be opened.
+            env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+                .init();
+        }
+    }
 }
 
 /// Route a subcommand to its handler.
@@ -171,9 +205,34 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
                 }
                 Some(termos::cli::ConfigCommand::Edit) => {
                     let path = termos::cli::config_path();
+
+                    // Create config with defaults if it doesn't exist.
+                    if !path.exists() {
+                        if let Some(parent) = path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&path, termos::cli::default_config_toml())?;
+                        println!("Created default config at {}", path.display());
+                    }
+
+                    // Find an editor: $EDITOR, $VISUAL, then fallback list.
                     let editor = std::env::var("EDITOR")
                         .or_else(|_| std::env::var("VISUAL"))
-                        .unwrap_or_else(|_| "vi".into());
+                        .ok()
+                        .or_else(|| {
+                            for e in &["vim", "vi", "nano", "emacs"] {
+                                if std::process::Command::new("which")
+                                    .arg(e)
+                                    .output()
+                                    .is_ok_and(|o| o.status.success())
+                                {
+                                    return Some((*e).to_string());
+                                }
+                            }
+                            None
+                        })
+                        .ok_or("no editor found. Set $EDITOR or install vim/vi/nano/emacs")?;
+
                     std::process::Command::new(&editor)
                         .arg(&path)
                         .status()?;
@@ -182,13 +241,23 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
                 Some(termos::cli::ConfigCommand::Reset) => {
                     let path = termos::cli::config_path();
                     if path.exists() {
-                        std::fs::write(&path, termos::cli::default_config_toml())?;
-                        println!("config reset to defaults at {}", path.display());
-                    } else {
-                        std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
-                        std::fs::write(&path, termos::cli::default_config_toml())?;
-                        println!("config created at {}", path.display());
+                        println!("Warning: This will overwrite your existing configuration at:");
+                        println!("  {}", path.display());
+                        print!("Are you sure you want to reset to defaults? (yes/no): ");
+                        std::io::Write::flush(&mut std::io::stdout())?;
+                        let mut response = String::new();
+                        std::io::stdin().read_line(&mut response)?;
+                        let response = response.trim().to_lowercase();
+                        if response != "yes" && response != "y" {
+                            println!("Reset cancelled.");
+                            return Ok(());
+                        }
                     }
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&path, termos::cli::default_config_toml())?;
+                    println!("Configuration reset to defaults at {}", path.display());
                     Ok(())
                 }
                 None => Err(format!("unknown config command '{sub}'").into()),
@@ -347,7 +416,7 @@ fn print_help() {
     println!("    set-session-name <s> <n>   Rename a session");
     println!("    set-session-accent <s> <a> Set session accent color");
     println!("    logs                       Show daemon logs");
-    println!("    layout <list|delete|dir>   Manage saved layouts");
+    println!("    layout <list|delete|dir|export>  Manage saved layouts");
     println!("    config <show|path|edit|reset|validate>  Config management");
     println!("    keybinds <list|describe>   Keybind reference");
     println!("    tape <play|validate|list|show|delete|dir|exec>  Tape scripting");
@@ -800,6 +869,41 @@ fn cmd_agent_verb(args: &[String], verb: Verb) -> Result<(), Box<dyn std::error:
             }
         }
     }
+}
+
+/// Format a Unix timestamp as `YYYY-MM-DD HH:MM` (UTC, no external deps).
+fn format_unix_timestamp(secs: u64) -> String {
+    const DAYS_IN_MONTH: [u64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut days = secs / 86400;
+    let rem = secs % 86400;
+    let hour = rem / 3600;
+    let minute = (rem % 3600) / 60;
+
+    let mut year = 1970u64;
+    loop {
+        let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100))
+            || year.is_multiple_of(400);
+        let year_days = if leap { 366 } else { 365 };
+        if days < year_days {
+            break;
+        }
+        days -= year_days;
+        year += 1;
+    }
+
+    let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100))
+        || year.is_multiple_of(400);
+    let mut month = 0usize;
+    for (i, &dm) in DAYS_IN_MONTH.iter().enumerate() {
+        let dm = if i == 1 && leap { 29 } else { dm };
+        if days < dm {
+            month = i;
+            break;
+        }
+        days -= dm;
+    }
+
+    format!("{year:04}-{month:02}-{:02} {hour:02}:{minute:02}", days + 1)
 }
 
 /// Read until a non-echo reply (or an error) arrives.
@@ -1480,9 +1584,11 @@ fn cmd_resurrect(name: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         client.send(&Message::Resurrect {
             name: n.to_string(),
         })?;
+        let _ = recv_reply(&client)?;
         println!("resurrected session '{n}'");
     } else {
         client.send(&Message::ResurrectAll)?;
+        let _ = recv_reply(&client)?;
         println!("resurrected all saved sessions");
     }
     Ok(())
@@ -1491,6 +1597,9 @@ fn cmd_resurrect(name: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_kill_server() -> Result<(), Box<dyn std::error::Error>> {
     let client = DaemonClient::connect()?;
     client.send(&Message::KillServer)?;
+    // The daemon sends Pong before shutting down; read but don't fail on error
+    // (the daemon may close the connection before we read).
+    let _ = client.recv();
     println!("daemon stopped");
     Ok(())
 }
@@ -1506,7 +1615,7 @@ fn cmd_session_info(name: Option<&str>) -> Result<(), Box<dyn std::error::Error>
         Some(s) => {
             println!("Session: {}", s.name);
             println!("  Windows: {}", s.windows);
-            println!("  Created: {}", s.created_at);
+            println!("  Created: {}", format_unix_timestamp(s.created_at));
             println!("  Attached: {}", s.attached);
             println!("  Restored: {}", s.restored);
             Ok(())
@@ -1544,6 +1653,7 @@ fn cmd_set_session_name(args: &[String]) -> Result<(), Box<dyn std::error::Error
         session: session.clone(),
         name: new_name.clone(),
     })?;
+    let _ = recv_reply(&client)?;
     println!("renamed session '{session}' to '{new_name}'");
     Ok(())
 }
@@ -1560,12 +1670,16 @@ fn cmd_set_session_accent(args: &[String]) -> Result<(), Box<dyn std::error::Err
         session: session.clone(),
         accent: accent.clone(),
     })?;
+    let _ = recv_reply(&client)?;
     println!("set accent for session '{session}' to '{accent}'");
     Ok(())
 }
 
 fn cmd_logs() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::temp_dir().join("termos-daemon.log");
+    let path = dirs::state_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("termos")
+        .join("daemon.log");
     if path.exists() {
         let content = std::fs::read_to_string(&path)?;
         print!("{content}");
@@ -1576,52 +1690,43 @@ fn cmd_logs() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_layout(sub: &str, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use termos::app::layout_templates;
     match sub {
         "list" | "ls" => {
-            let dir = termos::cli::config_path()
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."))
-                .join("layouts");
-            if !dir.exists() {
-                println!("(no saved layouts)");
+            let templates = layout_templates::list_layout_templates();
+            if templates.is_empty() {
+                println!(
+                    "No saved layouts. Use 'tuios layout save <name>' or the command palette."
+                );
                 return Ok(());
             }
-            for entry in std::fs::read_dir(&dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.extension().is_some_and(|e| e == "toml") {
-                    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
-                    println!("{name}");
-                }
+            for (name, created_at) in templates {
+                println!("  {name}  (created: {})", format_unix_timestamp(created_at));
             }
             Ok(())
         }
         "delete" | "rm" => {
             let name = args.first().ok_or("usage: tuios layout delete <name>")?;
-            let path = termos::cli::config_path()
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."))
-                .join("layouts")
-                .join(format!("{name}.toml"));
-            if path.exists() {
-                std::fs::remove_file(&path)?;
-                println!("deleted layout '{name}'");
-            } else {
-                return Err(format!("layout '{name}' not found").into());
-            }
+            layout_templates::delete_layout_template(name)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            println!("Deleted layout '{name}'");
             Ok(())
         }
         "dir" => {
-            let dir = termos::cli::config_path()
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."))
-                .join("layouts");
-            println!("{}", dir.display());
+            println!("{}", layout_templates::layouts_dir().display());
             Ok(())
         }
-        other => {
-            Err(format!("unknown layout subcommand '{other}' (try: list, delete, dir)").into())
+        "export" => {
+            let name = args.first().ok_or("usage: tuios layout export <name>")?;
+            let tmpl = layout_templates::load_layout_template(name)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            print!("{}", layout_templates::generate_tape_script(&tmpl));
+            Ok(())
         }
+        other => Err(format!(
+            "unknown layout subcommand '{other}' (try: list, delete, dir, export)"
+        )
+        .into()),
     }
 }
 

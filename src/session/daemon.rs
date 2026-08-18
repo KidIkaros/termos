@@ -1032,6 +1032,9 @@ impl Daemon {
                 Err(e) => log::warn!("accept error: {e}"),
             }
         }
+        // Clean up the socket file on shutdown.
+        let _ = std::fs::remove_file(path);
+        log::info!("termos daemon socket cleaned up");
         Ok(())
     }
 }
