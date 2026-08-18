@@ -5224,7 +5224,7 @@ mod session_close_tests {
 
     #[test]
     fn toll_counts_windows() {
-        let mut os = os_with_session();
+        let os = os_with_session();
         let (panes, agents) = os.session_toll("work");
         assert_eq!(panes, 3);
         assert_eq!(agents, 0);
