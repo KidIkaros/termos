@@ -20,6 +20,7 @@
 pub mod app;
 pub mod cli;
 pub mod config;
+pub mod fuzz;
 pub mod graphics;
 pub mod harness;
 pub mod hooks;

@@ -1822,13 +1822,13 @@ impl Os {
     // Workspace helpers
     // -----------------------------------------------------------------------
 
-    fn workspace_mut(&mut self, number: i32) -> &mut Workspace {
+    pub fn workspace_mut(&mut self, number: i32) -> &mut Workspace {
         self.workspaces
             .entry(number)
             .or_insert_with(|| Workspace::new(number))
     }
 
-    fn workspace(&self, number: i32) -> &Workspace {
+    pub fn workspace(&self, number: i32) -> &Workspace {
         self.workspaces.get(&number).expect("workspace exists")
     }
 
@@ -2541,7 +2541,7 @@ impl Os {
         }
     }
 
-    fn default_shell(&self) -> String {
+    pub fn default_shell(&self) -> String {
         if !self.config.appearance.preferred_shell.is_empty() {
             return self.config.appearance.preferred_shell.clone();
         }
