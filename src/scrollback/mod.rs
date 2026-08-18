@@ -90,7 +90,7 @@ fn parse_with_markers(
             .map(|d| d.exit_code)
             .unwrap_or(-1);
         let output = (start + 1..=end)
-            .map(|l| line_text(l))
+            .map(line_text)
             .collect::<Vec<_>>()
             .join("\n");
         blocks.push(CommandBlock {
@@ -119,7 +119,7 @@ fn parse_with_prompts(
             if let Some(s) = start.take() {
                 let end = line.saturating_sub(1).max(s);
                 let output = (s + 1..=end)
-                    .map(|l| line_text(l))
+                    .map(line_text)
                     .collect::<Vec<_>>()
                     .join("\n");
                 blocks.push(CommandBlock {
@@ -137,7 +137,7 @@ fn parse_with_prompts(
     if let Some(s) = start {
         let end = line_count.saturating_sub(1).max(s);
         let output = (s + 1..=end)
-            .map(|l| line_text(l))
+            .map(line_text)
             .collect::<Vec<_>>()
             .join("\n");
         blocks.push(CommandBlock {
