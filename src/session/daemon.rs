@@ -155,6 +155,8 @@ pub struct Daemon {
     /// (held state, when it was recorded). A quieter state must stand
     /// unchanged for [`OSC_HOLD_WINDOW`] before it is published.
     osc_holds: Arc<Mutex<HashMap<String, (AgentState, std::time::Instant)>>>,
+    /// Shutdown flag — set by `KillServer` to stop the accept loop.
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Ring capacity (256 KiB) and the capture size cap (64 KiB).
@@ -176,6 +178,7 @@ impl Daemon {
             last_active: Mutex::new(HashMap::new()),
             rings: Arc::new(Mutex::new(HashMap::new())),
             osc_holds: Arc::new(Mutex::new(HashMap::new())),
+            shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -1008,13 +1011,23 @@ impl Daemon {
             let _ = std::fs::create_dir_all(parent);
         }
         let listener = UnixListener::bind(path)?;
+        listener.set_nonblocking(true)?;
         log::info!("termos daemon listening on {}", path.display());
 
         for stream in listener.incoming() {
+            if self.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                log::info!("termos daemon shutting down");
+                break;
+            }
             match stream {
                 Ok(stream) => {
+                    let _ = stream.set_nonblocking(false);
                     let daemon = Arc::clone(&self);
                     std::thread::spawn(move || handle_client(stream, daemon));
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
                 }
                 Err(e) => log::warn!("accept error: {e}"),
             }
@@ -1486,6 +1499,45 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                     let _ = send(&writer, &Message::Error { message: e });
                 }
             },
+            Message::ResurrectAll => {
+                daemon.restore_saved();
+                let _ = send(
+                    &writer,
+                    &Message::ListResult {
+                        sessions: daemon.list_infos(),
+                    },
+                );
+            }
+            Message::KillServer => {
+                let _ = send(&writer, &Message::Pong);
+                daemon
+                    .shutdown
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Message::SetSessionName { session, name } => {
+                if let Err(e) = daemon.set_session_label(&session, &name) {
+                    let _ = send(&writer, &Message::Error { message: e });
+                } else {
+                    let _ = send(
+                        &writer,
+                        &Message::ListResult {
+                            sessions: daemon.list_infos(),
+                        },
+                    );
+                }
+            }
+            Message::SetSessionAccent { session, accent } => {
+                if let Err(e) = daemon.set_session_accent(&session, &accent) {
+                    let _ = send(&writer, &Message::Error { message: e });
+                } else {
+                    let _ = send(
+                        &writer,
+                        &Message::ListResult {
+                            sessions: daemon.list_infos(),
+                        },
+                    );
+                }
+            }
             Message::ClientJoined { .. } | Message::ClientLeft { .. } => {}
             Message::GetState { session } => {
                 let state = daemon.state_for_session(&session);

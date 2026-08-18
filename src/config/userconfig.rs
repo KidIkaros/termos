@@ -289,7 +289,12 @@ impl UserConfig {
             Ok(data) => data,
             Err(_) => return Self::default_config(),
         };
-        let mut cfg: UserConfig = match toml::from_str(&data) {
+        Self::parse_str(&data)
+    }
+
+    /// Parse config from a TOML string. Returns defaults on parse error.
+    pub fn parse_str(data: &str) -> Self {
+        let mut cfg: UserConfig = match toml::from_str(data) {
             Ok(cfg) => cfg,
             Err(_) => return Self::default_config(),
         };

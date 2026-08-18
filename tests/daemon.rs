@@ -519,3 +519,77 @@ fn daemon_tape_exec_broadcasts_commands() {
     assert_eq!(commands, 3, "expected 3 TapeCommand frames");
     assert!(finished, "no TapeFinished frame");
 }
+
+#[test]
+fn multi_client_both_see_session_list() {
+    let (dir, client_a) = start_daemon();
+    let socket = dir.path().join("tuios.sock");
+
+    // Create a session from client A.
+    client_a
+        .send(&Message::New {
+            name: "shared".into(),
+            shell: "".into(),
+        })
+        .unwrap();
+    // Drain the response.
+    let _ = client_a.recv();
+
+    // Client B connects and lists.
+    let client_b = DaemonClient::connect_to(&socket).unwrap();
+    client_b.send(&Message::List).unwrap();
+    let resp = client_b.recv().unwrap();
+    match resp {
+        Message::ListResult { sessions } => {
+            assert!(
+                sessions.iter().any(|s| s.name == "shared"),
+                "client B doesn't see the session: {:?}",
+                sessions
+            );
+        }
+        other => panic!("expected ListResult, got {:?}", other),
+    }
+}
+
+#[test]
+fn set_session_name_sets_label() {
+    let (_dir, client) = start_daemon();
+    client
+        .send(&Message::New {
+            name: "work".into(),
+            shell: "".into(),
+        })
+        .unwrap();
+    let _ = client.recv();
+
+    // SetSessionName sets the display label, not the internal session name.
+    client
+        .send(&Message::SetSessionName {
+            session: "work".into(),
+            name: "My Work Session".into(),
+        })
+        .unwrap();
+
+    // The daemon should reply with a ListResult (acknowledging the change).
+    let resp = client.recv().unwrap();
+    assert!(
+        matches!(resp, Message::ListResult { .. }),
+        "expected ListResult, got {:?}",
+        resp
+    );
+}
+
+#[test]
+fn kill_server_stops_daemon() {
+    let (dir, client) = start_daemon();
+    let socket = dir.path().join("tuios.sock");
+
+    client.send(&Message::KillServer).unwrap();
+
+    // Give the daemon a moment to shut down.
+    std::thread::sleep(Duration::from_millis(100));
+
+    // A new connection should fail.
+    let result = DaemonClient::connect_to(&socket);
+    assert!(result.is_err(), "daemon should be stopped");
+}
