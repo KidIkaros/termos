@@ -26,6 +26,7 @@ pub fn save(name: &str, windows: &[WindowState]) -> Result<(), String> {
     let state = SessionState {
         name: name.to_string(),
         windows: windows.to_vec(),
+        resurrection_version: crate::session::resurrection::RESURRECTION_VERSION,
     };
     let json = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
     let path = dir.join(format!("{name}.json"));

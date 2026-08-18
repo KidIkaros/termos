@@ -87,6 +87,9 @@ pub struct WindowState {
 pub struct SessionState {
     pub name: String,
     pub windows: Vec<WindowState>,
+    /// The on-disk schema version. Stamped on every write by the saver.
+    #[serde(default)]
+    pub resurrection_version: u32,
 }
 
 fn now_secs() -> u64 {

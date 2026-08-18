@@ -6,12 +6,6 @@
 /// RGB color triple.
 pub type Rgb = (u8, u8, u8);
 
-/// A callback that receives a string slice.
-pub type StrCallback = Box<dyn Fn(&str) + Send + Sync>;
-
-/// A callback that receives two position tuples.
-pub type PositionCallback = Box<dyn Fn((i32, i32), (i32, i32)) + Send + Sync>;
-
 /// Terminal cursor style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorStyle {
@@ -24,10 +18,17 @@ pub enum CursorStyle {
     SteadyBar,
 }
 
+/// A callback that receives a string slice.
+pub type StrCallback = Box<dyn Fn(&str) + Send + Sync>;
+
+/// A callback that receives two position tuples.
+pub type PositionCallback = Box<dyn Fn((i32, i32), (i32, i32)) + Send + Sync>;
+
 /// A set of optional callbacks for VT emulator events.
 ///
 /// Each callback is `Option<Box<dyn Fn>>`, set via the builder methods.
 /// Unset callbacks are no-ops when fired.
+#[allow(clippy::type_complexity)]
 pub struct Callbacks {
     pub bell: Option<Box<dyn Fn() + Send + Sync>>,
     pub title: Option<StrCallback>,

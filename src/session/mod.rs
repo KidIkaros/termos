@@ -10,7 +10,9 @@ pub mod model;
 pub mod persistence;
 pub mod protocol;
 pub mod remote;
+pub mod resurrection;
 pub mod tree;
+pub mod verb;
 
 pub use client::DaemonClient;
 pub use daemon::{default_socket_path, ensure_daemon_running, Daemon};
@@ -21,3 +23,11 @@ pub use model::{
 };
 pub use protocol::Message;
 pub use remote::RemoteSink;
+pub use resurrection::{
+    clean_resurrection_dir, list_resurrectable_infos, list_resurrectable_sessions,
+    load_resurrection_state, remove_resurrection_state, resurrection_dir, resurrection_path,
+    save_session_for_resurrection, ResurrectableInfo, RESURRECTION_INTERVAL, RESURRECTION_VERSION,
+};
+pub use verb::{
+    VerbError, VerbHint, VerbRegistry, VerbRequest, VerbResponse, VERB_PROTOCOL_VERSION,
+};
