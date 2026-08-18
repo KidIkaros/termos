@@ -13,6 +13,7 @@ pub mod input;
 pub mod interaction;
 pub mod msg;
 pub mod render;
+pub mod sidebar;
 pub mod update;
 
 use std::collections::HashMap;
@@ -290,6 +291,8 @@ pub struct Os {
     /// Whether the aggregate view (all windows across workspaces) is open.
     pub aggregate_open: bool,
     pub aggregate_selected: usize,
+    /// The sidebar rail state.
+    pub sidebar: sidebar::Sidebar,
     /// A hover awaiting the delay window: (text, position, since).
     pub tooltip_pending: Option<(String, (i32, i32), std::time::Instant)>,
     /// Command palette state.
@@ -586,6 +589,7 @@ impl Os {
             tooltip: None,
             aggregate_open: false,
             aggregate_selected: 0,
+            sidebar: sidebar::Sidebar::new(),
             tooltip_pending: None,
             palette_open: false,
             palette_query: String::new(),
@@ -2871,6 +2875,46 @@ impl Os {
     /// Cancel the rename dialog without applying.
     pub fn cancel_rename_dialog(&mut self) {
         self.rename_dialog = None;
+    }
+
+    /// The sidebar rail rows for the current state.
+    pub fn sidebar_rows(&self) -> Vec<sidebar::SidebarRow> {
+        let ws_of = |idx: usize| {
+            for i in 1..=9 {
+                if self.workspace(i).tree.has_window(idx as i32) {
+                    return i;
+                }
+            }
+            0
+        };
+        sidebar::build_rows(
+            self.remote_session.as_deref(),
+            &self.remote_sessions,
+            &self.windows,
+            self.current_workspace,
+            ws_of,
+        )
+    }
+
+    /// Activate the selected sidebar row: switch to the session (daemon mode)
+    /// or focus the window.
+    pub fn activate_sidebar_selection(&mut self) {
+        let rows = self.sidebar_rows();
+        let Some(row) = rows.get(self.sidebar.selected) else {
+            self.sidebar.close();
+            return;
+        };
+        self.sidebar.close();
+        if let Some(session) = &row.session {
+            self.pending_switch = Some(session.clone());
+            return;
+        }
+        if let Some(idx) = row.window {
+            if row.workspace >= 1 {
+                self.switch_workspace(row.workspace);
+            }
+            self.focus_window(idx);
+        }
     }
 
     /// Open the aggregate view.
@@ -5702,5 +5746,99 @@ mod aggregate_tests {
         let items = os.aggregate_items();
         let (_, _, _, preview) = items.iter().find(|(_, i, _, _)| *i == 0).unwrap();
         assert!(preview.contains("hello world"));
+    }
+}
+
+#[cfg(test)]
+mod sidebar_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crate::terminal::pty::WinSize;
+    use crate::terminal::window::Window;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn os_with_windows() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.width = 80;
+        os.height = 25;
+        for i in 0..2 {
+            let w = Window::without_pty(
+                format!("w{i}"),
+                format!("win{i}"),
+                WinSize { cols: 10, rows: 3 },
+            );
+            os.windows.push(w);
+        }
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(1, 0, SplitType::Horizontal, 0.5, bounds, 0);
+        os.focused_window = Some(0);
+        os
+    }
+
+    #[test]
+    fn leader_b_toggles_sidebar() {
+        let mut os = os_with_windows();
+        os.prefix = Prefix::Leader;
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('b')));
+        assert!(os.sidebar.open);
+        os.prefix = Prefix::Leader;
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('b')));
+        assert!(!os.sidebar.open);
+    }
+
+    #[test]
+    fn rows_include_windows_with_agent_glyphs() {
+        let mut os = os_with_windows();
+        os.windows[1].agent_state = "working".to_string();
+        let rows = os.sidebar_rows();
+        assert_eq!(rows.len(), 3); // session + 2 windows
+        assert_eq!(rows[1].window, Some(0));
+        assert_eq!(rows[2].window, Some(1));
+        assert_eq!(rows[2].agent_state, "working");
+    }
+
+    #[test]
+    fn enter_focuses_selected_window() {
+        let mut os = os_with_windows();
+        os.sidebar.open();
+        // Select the second window row (index 2).
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('j')));
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('j')));
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Enter));
+        assert!(!os.sidebar.open);
+        assert_eq!(os.focused_window, Some(1));
+    }
+
+    #[test]
+    fn esc_closes_sidebar() {
+        let mut os = os_with_windows();
+        os.sidebar.open();
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Esc));
+        assert!(!os.sidebar.open);
+    }
+
+    #[test]
+    fn navigation_wraps() {
+        let mut os = os_with_windows();
+        os.sidebar.open();
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('k')));
+        assert_eq!(os.sidebar.selected, 2); // wrapped to the last row
+    }
+
+    #[test]
+    fn sidebar_rows_local_session_header() {
+        let os = os_with_windows();
+        let rows = os.sidebar_rows();
+        assert_eq!(rows[0].kind, sidebar::RowKind::Session);
+        assert!(rows[0].label.contains("workspace"));
     }
 }

@@ -111,6 +111,11 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     // Draw the dock bar.
     render_dock(os, buf, dock_area, &sorted_ids);
 
+    // Sidebar rail over the right edge.
+    if os.sidebar.open {
+        render_sidebar(os, buf, content_area);
+    }
+
     // Modal overlays, topmost, in priority order.
     if let Some((_, text)) = &os.rename_dialog {
         let lines = vec![
@@ -865,6 +870,83 @@ fn render_context_menu(buf: &mut Buffer, area: TuiRect, menu: &ContextMenu) {
             // A marker at the left edge.
             buf[(x + 1, row_y)].set_char('›');
         }
+    }
+}
+
+/// Render the sidebar rail on the right edge.
+fn render_sidebar(os: &Os, buf: &mut Buffer, area: TuiRect) {
+    const WIDTH: u16 = 32;
+    let width = WIDTH.min(area.width.saturating_sub(8));
+    let x = area.width.saturating_sub(width);
+    let bg = os
+        .theme
+        .as_ref()
+        .map(|t| TuiColor::Rgb(t.ansi[0].0, t.ansi[0].1, t.ansi[0].2))
+        .unwrap_or(TuiColor::DarkGray);
+    let fg = TuiColor::White;
+    for cy in 0..area.height {
+        for cx in x..area.width {
+            let cell = &mut buf[(cx, cy)];
+            cell.set_bg(bg);
+            cell.set_fg(fg);
+        }
+    }
+    let rows = os.sidebar_rows();
+    let mut y = 0u16;
+    for (i, row) in rows.iter().enumerate() {
+        if y >= area.height {
+            break;
+        }
+        let selected = i == os.sidebar.selected;
+        let indent = if row.kind == super::sidebar::RowKind::Window {
+            2
+        } else {
+            0
+        };
+        let glyph = if row.kind == super::sidebar::RowKind::Window {
+            super::sidebar::agent_glyph(&row.agent_state)
+        } else {
+            "▸"
+        };
+        let mut text = format!(
+            "{}{} {}",
+            " ".repeat(indent),
+            glyph,
+            &row.label
+                .chars()
+                .take((width as usize).saturating_sub(indent + 4))
+                .collect::<String>()
+        );
+        if selected {
+            text.insert(0, '›');
+        }
+        for (j, ch) in text.chars().enumerate() {
+            let cx = x + j as u16;
+            if cx >= area.width {
+                break;
+            }
+            let cell = &mut buf[(cx, y)];
+            cell.set_char(ch);
+            if selected {
+                cell.set_bg(TuiColor::Blue);
+            }
+        }
+        // Detail line for sessions.
+        if row.kind == super::sidebar::RowKind::Session && !row.detail.is_empty() {
+            y += 1;
+            if y < area.height {
+                for (j, ch) in row.detail.chars().enumerate() {
+                    let cx = x + 1 + j as u16;
+                    if cx >= area.width {
+                        break;
+                    }
+                    let cell = &mut buf[(cx, y)];
+                    cell.set_char(ch);
+                    cell.set_bg(bg);
+                }
+            }
+        }
+        y += 1;
     }
 }
 

@@ -205,6 +205,11 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         return handle_tape_manager(os, key);
     }
 
+    // The sidebar consumes its own keys while focused.
+    if os.sidebar.open {
+        return handle_sidebar_key(os, key);
+    }
+
     // The aggregate view consumes its own keys.
     if os.aggregate_open {
         return handle_aggregate_key(os, key);
@@ -303,6 +308,42 @@ fn handle_rename_dialog_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
             if let Some((_, text)) = os.rename_dialog.as_mut() {
                 text.push(c);
             }
+        }
+        _ => {}
+    }
+    KeyResult::Consumed
+}
+
+fn handle_sidebar_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    // The leader key and any pending prefix keep working while the sidebar is
+    // focused (so leader+b closes it, and leader+S etc. still route).
+    if os.prefix != Prefix::None {
+        return match os.prefix {
+            Prefix::Leader => handle_leader_key(os, key),
+            Prefix::Workspace => handle_workspace_prefix(os, key),
+            Prefix::Window => handle_window_prefix(os, key),
+            Prefix::Minimize => handle_minimize_prefix(os, key),
+            Prefix::Tape => handle_tape_prefix(os, key),
+            Prefix::Debug => handle_debug_prefix(os, key),
+            Prefix::None => unreachable!(),
+        };
+    }
+    if is_leader_key(key, os.leader_key()) {
+        return handle_leader_key(os, key);
+    }
+    let count = os.sidebar_rows().len();
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            os.sidebar.close();
+        }
+        KeyCode::Up | KeyCode::BackTab | KeyCode::Char('k') => {
+            os.sidebar.move_selection(-1, count);
+        }
+        KeyCode::Down | KeyCode::Tab | KeyCode::Char('j') => {
+            os.sidebar.move_selection(1, count);
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            os.activate_sidebar_selection();
         }
         _ => {}
     }
@@ -626,6 +667,17 @@ fn handle_leader_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         // Aggregate view (all windows, all workspaces).
         KeyCode::Char('A') => {
             os.open_aggregate_view();
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // Sidebar: b toggles, e focuses.
+        KeyCode::Char('b') => {
+            os.sidebar.toggle();
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        KeyCode::Char('e') => {
+            os.sidebar.open();
             os.prefix = Prefix::None;
             KeyResult::Consumed
         }
