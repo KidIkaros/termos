@@ -7,6 +7,7 @@
 //! Bubble Tea.
 
 pub mod agent_alert;
+pub mod copymode_ext;
 pub mod input;
 pub mod interaction;
 pub mod render;
