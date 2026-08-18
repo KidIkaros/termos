@@ -306,6 +306,8 @@ pub struct Os {
     pub selection: Option<Selection>,
     /// Whether a mouse drag selection is in progress.
     pub mouse_selecting: bool,
+    /// The open right-click context menu, if any.
+    pub context_menu: Option<ContextMenu>,
     /// The last yanked text (internal clipboard).
     pub clipboard: String,
     /// Mouse border-drag resize state: (window_id, edge, start_pos).
@@ -419,6 +421,60 @@ pub struct ProjectTapePending {
     pub content: Vec<u8>,
 }
 
+/// An action a context-menu row can run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextAction {
+    NewWindow,
+    SplitHorizontal,
+    SplitVertical,
+    CloseWindow,
+    Zoom,
+    Copy,
+    Paste,
+    Cancel,
+}
+
+impl ContextAction {
+    /// The row label.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::NewWindow => "New window",
+            Self::SplitHorizontal => "Split horizontal",
+            Self::SplitVertical => "Split vertical",
+            Self::CloseWindow => "Close window",
+            Self::Zoom => "Toggle zoom",
+            Self::Copy => "Copy selection",
+            Self::Paste => "Paste clipboard",
+            Self::Cancel => "Cancel",
+        }
+    }
+}
+
+/// The open right-click context menu, anchored to the cell it was opened on.
+#[derive(Debug, Clone)]
+pub struct ContextMenu {
+    pub x: i32,
+    pub y: i32,
+    pub selected: usize,
+    pub items: Vec<ContextAction>,
+}
+
+impl ContextMenu {
+    /// The standard item set, newest first.
+    pub fn standard() -> Vec<ContextAction> {
+        vec![
+            ContextAction::NewWindow,
+            ContextAction::SplitHorizontal,
+            ContextAction::SplitVertical,
+            ContextAction::CloseWindow,
+            ContextAction::Zoom,
+            ContextAction::Copy,
+            ContextAction::Paste,
+            ContextAction::Cancel,
+        ]
+    }
+}
+
 /// A dock notification.
 #[derive(Debug, Clone)]
 pub struct Notification {
@@ -483,6 +539,7 @@ impl Os {
             copy_search_typing: false,
             selection: None,
             mouse_selecting: false,
+            context_menu: None,
             clipboard: String::new(),
             drag_resize: None,
             last_click: None,
@@ -2603,6 +2660,56 @@ impl Os {
         }
     }
 
+    /// Open the context menu at a cell (right-click), focusing the window
+    /// under the cursor first.
+    pub fn open_context_menu_at(&mut self, x: i32, y: i32) {
+        if let Some(idx) = self.window_at(x, y) {
+            self.focus_window(idx);
+        }
+        self.context_menu = Some(ContextMenu {
+            x,
+            y,
+            selected: 0,
+            items: ContextMenu::standard(),
+        });
+    }
+
+    /// Dismiss the context menu (also called by the next click anywhere).
+    pub fn dismiss_context_menu(&mut self) {
+        self.context_menu = None;
+    }
+
+    /// Run the selected context-menu action.
+    pub fn run_context_action(&mut self, action: ContextAction) {
+        let shell = self.default_shell();
+        match action {
+            ContextAction::NewWindow => {
+                let wake = Box::new(|| {});
+                let _ = self.split(crate::layout::SplitType::None, &shell, wake);
+            }
+            ContextAction::SplitHorizontal => {
+                let wake = Box::new(|| {});
+                let _ = self.split(crate::layout::SplitType::Horizontal, &shell, wake);
+            }
+            ContextAction::SplitVertical => {
+                let wake = Box::new(|| {});
+                let _ = self.split(crate::layout::SplitType::Vertical, &shell, wake);
+            }
+            ContextAction::CloseWindow => self.close_focused_window(),
+            ContextAction::Zoom => {
+                let _ = self.toggle_zoom_internal();
+            }
+            ContextAction::Copy => self.yank_selection(),
+            ContextAction::Paste => {
+                let text = self.clipboard.clone();
+                if !text.is_empty() {
+                    self.write_to_focused(text.as_bytes());
+                }
+            }
+            ContextAction::Cancel => {}
+        }
+    }
+
     /// Copy the current selection to the clipboard and the host terminal via
     /// OSC 52.
     pub fn yank_selection(&mut self) {
@@ -4405,5 +4512,96 @@ mod animation_tests {
         assert_eq!(w, 80);
         assert!((0..=12).contains(&y));
         assert!((12..=24).contains(&h));
+    }
+}
+
+#[cfg(test)]
+mod context_menu_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crate::terminal::pty::WinSize;
+    use crate::terminal::window::Window;
+
+    fn os_with_window() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.width = 80;
+        os.height = 25;
+        let win = Window::without_pty(
+            "w0".to_string(),
+            "w0".to_string(),
+            WinSize { cols: 40, rows: 12 },
+        );
+        os.windows.push(win);
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+        os
+    }
+
+    #[test]
+    fn open_menu_anchors_and_focuses() {
+        let mut os = os_with_window();
+        os.open_context_menu_at(10, 10);
+        let menu = os.context_menu.as_ref().unwrap();
+        assert_eq!((menu.x, menu.y), (10, 10));
+        assert_eq!(menu.selected, 0);
+        assert_eq!(menu.items.len(), 8);
+        assert_eq!(os.focused_window, Some(0));
+    }
+
+    #[test]
+    fn dismiss_clears_menu() {
+        let mut os = os_with_window();
+        os.open_context_menu_at(5, 5);
+        os.dismiss_context_menu();
+        assert!(os.context_menu.is_none());
+    }
+
+    #[test]
+    fn right_click_toggles_menu() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut os = os_with_window();
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 10,
+            row: 10,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        crate::app::input::handle_mouse(&mut os, &mouse);
+        assert!(os.context_menu.is_some());
+        // A second right-click dismisses.
+        crate::app::input::handle_mouse(&mut os, &mouse);
+        assert!(os.context_menu.is_none());
+    }
+
+    #[test]
+    fn menu_navigation_and_cancel() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut os = os_with_window();
+        os.open_context_menu_at(5, 5);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        crate::app::input::handle_key(&mut os, &esc);
+        assert!(os.context_menu.is_none());
+    }
+
+    #[test]
+    fn menu_enter_runs_zoom_action() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut os = os_with_window();
+        os.config.appearance.animations_enabled = false;
+        os.open_context_menu_at(5, 5);
+        // Navigate to the Zoom row (index 4).
+        for _ in 0..4 {
+            let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+            crate::app::input::handle_key(&mut os, &down);
+        }
+        assert_eq!(os.context_menu.as_ref().unwrap().selected, 4);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        crate::app::input::handle_key(&mut os, &enter);
+        assert!(os.context_menu.is_none());
+        assert!(os.windows[0].zoomed);
     }
 }

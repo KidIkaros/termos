@@ -205,6 +205,11 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         return handle_tape_manager(os, key);
     }
 
+    // The open context menu consumes navigation/selection keys.
+    if os.context_menu.is_some() {
+        return handle_context_menu_key(os, key);
+    }
+
     // A pending prefix consumes the next key.
     match os.prefix {
         Prefix::Leader => return handle_leader_key(os, key),
@@ -229,6 +234,31 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
 
     // Window-management mode.
     handle_window_management(os, key)
+}
+
+fn handle_context_menu_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    let Some(menu) = os.context_menu.as_mut() else {
+        return KeyResult::Consumed;
+    };
+    let count = menu.items.len();
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            menu.selected = (menu.selected + count - 1) % count;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            menu.selected = (menu.selected + 1) % count;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            let action = menu.items[menu.selected];
+            os.dismiss_context_menu();
+            os.run_context_action(action);
+        }
+        KeyCode::Esc | KeyCode::Char('q') => {
+            os.dismiss_context_menu();
+        }
+        _ => {}
+    }
+    KeyResult::Consumed
 }
 
 fn handle_quit_confirmation(os: &mut Os, key: &KeyEvent) -> KeyResult {
@@ -1147,6 +1177,16 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
                 }
                 os.scroll_window_viewport(idx, -step);
             }
+            true
+        }
+        MouseEventKind::Down(MouseButton::Right) => {
+            // A right-click anywhere dismisses any open menu first; a second
+            // right-click opens the menu at the new position.
+            if os.context_menu.is_some() {
+                os.dismiss_context_menu();
+                return true;
+            }
+            os.open_context_menu_at(column, row);
             true
         }
         MouseEventKind::Down(MouseButton::Left) => {

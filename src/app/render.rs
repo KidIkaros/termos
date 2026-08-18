@@ -9,7 +9,7 @@ use ratatui::style::{Color as TuiColor, Modifier, Style as TuiStyle};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Widget};
 
-use crate::app::{Mode, Os, Prefix, Selection};
+use crate::app::{ContextMenu, Mode, Os, Prefix, Selection};
 use crate::layout::Rect;
 use crate::ui::{border_type, to_tui_style};
 
@@ -112,7 +112,9 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     render_dock(os, buf, dock_area, &sorted_ids);
 
     // Modal overlays, topmost, in priority order.
-    if let Some(pending) = &os.project_tape_pending {
+    if let Some(menu) = &os.context_menu {
+        render_context_menu(buf, content_area, menu);
+    } else if let Some(pending) = &os.project_tape_pending {
         let mut lines = Vec::new();
         lines.push("A .tuios.tape was found in this directory.".into());
         lines.push(format!("  {}", pending.path));
@@ -743,6 +745,56 @@ fn debug_stats_lines(os: &Os) -> Vec<String> {
     lines.push(String::new());
     lines.push("l log viewer · c stats · a animations · q close".into());
     lines
+}
+
+/// Render the context menu anchored at its cell, clamped to the screen.
+fn render_context_menu(buf: &mut Buffer, area: TuiRect, menu: &ContextMenu) {
+    let width = menu
+        .items
+        .iter()
+        .map(|i| i.label().len())
+        .max()
+        .unwrap_or(0) as u16
+        + 6;
+    let height = menu.items.len() as u16 + 2;
+    let x = (menu.x as u16).min(area.width.saturating_sub(width));
+    let y = (menu.y as u16).min(area.height.saturating_sub(height));
+    let rect = TuiRect {
+        x,
+        y,
+        width,
+        height,
+    };
+    // Border.
+    for cx in x..x + width {
+        buf[(cx, y)].set_char('─');
+        buf[(cx, y + height - 1)].set_char('─');
+    }
+    for cy in y..y + height {
+        buf[(x, cy)].set_char('│');
+        buf[(x + width - 1, cy)].set_char('│');
+    }
+    buf[(x, y)].set_char('┌');
+    buf[(x + width - 1, y)].set_char('┐');
+    buf[(x, y + height - 1)].set_char('└');
+    buf[(x + width - 1, y + height - 1)].set_char('┘');
+    for (i, action) in menu.items.iter().enumerate() {
+        let row_y = y + 1 + i as u16;
+        let selected = i == menu.selected;
+        let label = action.label();
+        for (j, ch) in label.chars().enumerate() {
+            let cell = &mut buf[(x + 1 + j as u16, row_y)];
+            cell.set_char(ch);
+            if selected {
+                cell.set_bg(TuiColor::DarkGray);
+                cell.set_fg(TuiColor::White);
+            }
+        }
+        if selected {
+            // A marker at the left edge.
+            buf[(x + 1, row_y)].set_char('›');
+        }
+    }
 }
 
 pub fn render_overlay(buf: &mut Buffer, area: TuiRect, lines: &[String], title: &str) {
