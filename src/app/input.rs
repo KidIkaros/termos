@@ -477,6 +477,12 @@ fn handle_leader_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
             os.prefix = Prefix::Debug;
             KeyResult::Consumed
         }
+        // Layout picker.
+        KeyCode::Char('L') => {
+            os.open_switcher(crate::app::SwitcherKind::Layout);
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
         // Split horizontal / vertical.
         KeyCode::Char('-') => {
             do_split_window(os, SplitType::Horizontal);
@@ -1159,6 +1165,15 @@ fn handle_switcher(os: &mut Os, key: &KeyEvent) -> KeyResult {
                 if let Some(e) = items.get(os.switcher_selected) {
                     os.pending_kill = e.session.clone();
                 }
+            }
+            KeyResult::Consumed
+        }
+        // In the layout picker, `x` deletes the selected layout.
+        KeyCode::Char('x') if os.switcher_kind == SwitcherKind::Layout => {
+            let items = os.switcher_items();
+            if let Some(e) = items.get(os.switcher_selected) {
+                let name = e.label.clone();
+                os.delete_saved_layout(&name);
             }
             KeyResult::Consumed
         }

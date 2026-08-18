@@ -290,6 +290,7 @@ pub fn render_switcher(os: &Os, buf: &mut Buffer, area: TuiRect) {
         super::SwitcherKind::Workspace => "Workspaces",
         super::SwitcherKind::Window => "Windows",
         super::SwitcherKind::Session => "Sessions",
+        super::SwitcherKind::Layout => "Layouts",
     };
     let rows: Vec<(String, String)> = os
         .switcher_items()

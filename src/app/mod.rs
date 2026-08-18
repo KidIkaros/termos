@@ -125,6 +125,8 @@ pub enum SwitcherKind {
     Window,
     /// List daemon sessions (prefix `S` in daemon mode).
     Session,
+    /// List saved layout templates (prefix `L`).
+    Layout,
 }
 
 /// A rectangular text selection anchored to a window's content lines and
@@ -2421,6 +2423,21 @@ impl Os {
                 }
                 items
             }
+            SwitcherKind::Layout => {
+                let mut items: Vec<SwitcherEntry> = self
+                    .layouts
+                    .keys()
+                    .map(|name| SwitcherEntry {
+                        label: name.clone(),
+                        detail: "saved layout — Enter to apply, x to delete".into(),
+                        workspace: 0,
+                        window: None,
+                        session: None,
+                    })
+                    .collect();
+                items.sort_by(|a, b| a.label.cmp(&b.label));
+                items
+            }
             SwitcherKind::Session => {
                 let mut items = Vec::new();
                 for s in &self.remote_sessions {
@@ -2449,6 +2466,28 @@ impl Os {
         items.into_iter().map(|(_, e)| e).collect()
     }
 
+    /// Apply a saved layout to the current workspace (`layouts` map).
+    pub fn apply_saved_layout(&mut self, name: &str) -> bool {
+        if let Some(serialized) = self.layouts.get(name) {
+            let tree = BSPTree::deserialize(serialized);
+            if let Some(ws) = self.workspaces.get_mut(&self.current_workspace) {
+                ws.tree = tree;
+                self.notify(format!("applied layout '{name}'"), "info");
+                self.log_action(&format!("load_layout {name}"));
+                self.sync_window_sizes();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Delete a saved layout by name.
+    pub fn delete_saved_layout(&mut self, name: &str) {
+        self.layouts.remove(name);
+        self.notify(format!("deleted layout '{name}'"), "info");
+        self.log_action(&format!("delete_layout {name}"));
+    }
+
     pub fn switcher_move(&mut self, delta: i32) {
         let len = self.switcher_items().len();
         if len == 0 {
@@ -2465,6 +2504,12 @@ impl Os {
         let entry = items.get(self.switcher_selected).cloned();
         self.close_switcher();
         if let Some(entry) = entry {
+            if self.switcher_kind == SwitcherKind::Layout {
+                if !entry.label.is_empty() {
+                    self.apply_saved_layout(&entry.label);
+                }
+                return;
+            }
             if let Some(session) = entry.session {
                 self.pending_switch = Some(session);
                 return;
@@ -4731,5 +4776,76 @@ mod rename_dialog_tests {
         crate::app::input::handle_key(&mut os, &key(KeyCode::Enter));
         assert!(os.rename_dialog.is_some());
         assert!(os.context_menu.is_none());
+    }
+}
+
+#[cfg(test)]
+mod layout_picker_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crate::layout::bsp::SerializedBSPTree;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn os_with_layout() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.width = 80;
+        os.height = 25;
+        // Save a layout from an empty tree.
+        let bounds = os.workspace_bounds(1);
+        let tree = os.workspace(1).tree.serialize();
+        os.layouts.insert("tall".to_string(), tree);
+        // A second layout with different defaults.
+        let mut ser = SerializedBSPTree {
+            root: None,
+            auto_scheme: 2,
+            default_ratio: 0.3,
+        };
+        let _ = &mut ser;
+        os.layouts.insert("wide".to_string(), ser);
+        let _ = bounds;
+        os
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn leader_l_opens_layout_picker() {
+        let mut os = os_with_layout();
+        os.prefix = Prefix::Leader;
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('L')));
+        assert!(os.switcher_open);
+        assert_eq!(os.switcher_kind, SwitcherKind::Layout);
+        assert_eq!(os.switcher_items().len(), 2);
+    }
+
+    #[test]
+    fn enter_applies_selected_layout() {
+        let mut os = os_with_layout();
+        os.open_switcher(SwitcherKind::Layout);
+        // Select the "wide" layout (second row).
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Down));
+        assert_eq!(os.switcher_items()[os.switcher_selected].label, "wide");
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Enter));
+        assert!(!os.switcher_open);
+        assert_eq!(os.workspace(1).tree.default_ratio(), 0.3);
+    }
+
+    #[test]
+    fn x_deletes_selected_layout() {
+        let mut os = os_with_layout();
+        os.open_switcher(SwitcherKind::Layout);
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('x')));
+        assert_eq!(os.layouts.len(), 1);
+        assert!(!os.layouts.contains_key("tall"));
+    }
+
+    #[test]
+    fn esc_closes_picker() {
+        let mut os = os_with_layout();
+        os.open_switcher(SwitcherKind::Layout);
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Esc));
+        assert!(!os.switcher_open);
     }
 }
