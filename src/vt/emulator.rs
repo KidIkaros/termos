@@ -63,6 +63,9 @@ pub struct Emulator {
     /// The most recent OSC 9;4 progress report (state, percent), drained by
     /// the app's agent-state tick.
     pending_progress: Option<(crate::vt::progress::ProgressState, Option<u8>)>,
+    /// The most recent desktop notification (title, body), drained by the
+    /// app layer. Set by OSC 9, OSC 777, and OSC 99.
+    pending_notification: Option<(String, String)>,
     /// OSC 133 semantic markers (prompt/command boundaries), recorded as the
     /// stream is parsed. Used by the structured scrollback browser.
     semantic_markers: crate::vt::semantic_markers::SemanticMarkerList,
@@ -100,6 +103,7 @@ impl Emulator {
             pending_apc: Vec::new(),
             pending_sixel: Vec::new(),
             pending_progress: None,
+            pending_notification: None,
             semantic_markers: crate::vt::semantic_markers::SemanticMarkerList::new(10_000),
             last_printed_char: None,
             viewport: 0,
@@ -742,9 +746,26 @@ impl Handler for Emulator {
             (Some(b'('), 0x30) => self.charsets[0] = CharSet::SpecialGraphics,
             (Some(b'('), b'A') => self.charsets[0] = CharSet::Uk,
             (Some(b'('), b'B') => self.charsets[0] = CharSet::Ascii,
+            // SCS: ESC ) 0 / A / B — select charset into G1.
             (Some(b')'), 0x30) => self.charsets[1] = CharSet::SpecialGraphics,
             (Some(b')'), b'A') => self.charsets[1] = CharSet::Uk,
             (Some(b')'), b'B') => self.charsets[1] = CharSet::Ascii,
+            // SCS: ESC * 0 / A / B — select charset into G2.
+            (Some(b'*'), 0x30) => self.charsets[2] = CharSet::SpecialGraphics,
+            (Some(b'*'), b'A') => self.charsets[2] = CharSet::Uk,
+            (Some(b'*'), b'B') => self.charsets[2] = CharSet::Ascii,
+            // SCS: ESC + 0 / A / B — select charset into G3.
+            (Some(b'+'), 0x30) => self.charsets[3] = CharSet::SpecialGraphics,
+            (Some(b'+'), b'A') => self.charsets[3] = CharSet::Uk,
+            (Some(b'+'), b'B') => self.charsets[3] = CharSet::Ascii,
+            // ESC = — DECKPAM (application keypad mode).
+            (None, b'=') => {
+                self.modes.insert(MODE_APPLICATION_KEYPAD, true);
+            }
+            // ESC > — DECKPNM (numeric keypad mode).
+            (None, b'>') => {
+                self.modes.insert(MODE_APPLICATION_KEYPAD, false);
+            }
             // ESC 7 — save cursor.
             (None, b'7') => self.screen_mut().save_cursor(),
             // ESC 8 — restore cursor.
@@ -776,8 +797,18 @@ impl Handler for Emulator {
                     self.screen_mut().cursor.pos.y -= 1;
                 }
             }
-            // ESC H — tab set.
+            // ESC H — tab set (no-op with fixed 8-column tabs).
             (None, b'H') => {}
+            // ESC n — LS2 (locking shift G2).
+            (None, b'n') => self.gl = 2,
+            // ESC o — LS3 (locking shift G3).
+            (None, b'o') => self.gl = 3,
+            // ESC | — LS3R (locking shift G3 right).
+            (None, b'|') => self.gr = 3,
+            // ESC } — LS2R (locking shift G2 right).
+            (None, b'}') => self.gr = 2,
+            // ESC ~ — LS1R (locking shift G1 right).
+            (None, b'~') => self.gr = 1,
             // ESC Z — DECID (respond with DA1).
             (None, b'Z') => {
                 let seq = b"\x1b[?1;2c".to_vec();
@@ -918,6 +949,12 @@ impl Handler for Emulator {
                 let x = p(0, 1) - 1;
                 self.screen_mut().cursor.pos.x = x.clamp(0, self.width() - 1);
             }
+            // Horizontal position relative (HPR).
+            b'a' => {
+                let dx = p(0, 1);
+                let screen = self.screen_mut();
+                screen.cursor.pos.x = (screen.cursor.pos.x + dx).clamp(0, screen.width() - 1);
+            }
             // Repeat preceding character (REP).
             b'b' => {
                 if let Some(c) = self.last_printed_char {
@@ -1020,12 +1057,15 @@ impl Handler for Emulator {
                     self.semantic_markers.push(marker);
                 }
             }
-            // OSC 9 — progress report (9;4;...) or desktop notification body.
+            // OSC 9 — progress report (9;4;...) or iTerm2 desktop notification.
             9 => {
                 let payload = String::from_utf8_lossy(payload);
                 if crate::vt::progress::is_progress_payload(&payload) {
                     let (state, percent) = crate::vt::progress::parse_progress(&payload);
                     self.pending_progress = Some((state, percent));
+                } else {
+                    // iTerm2 notification: "9;<msg>".
+                    self.pending_notification = Some((String::new(), payload.into_owned()));
                 }
             }
             // Set window title / icon name.
@@ -1056,8 +1096,39 @@ impl Handler for Emulator {
                 // current link on the pen here.
                 let _ = url;
             }
-            // OSC 10/11 — fg/bg colors.
-            10 | 11 => {}
+            // OSC 10/11/12 — fg/bg/cursor colors.
+            10..=12 => {}
+            // OSC 66 — kitty text sizing. We can't render scaled text on a
+            // cell grid, but we don't want the sequence to vanish either.
+            66 => {}
+            // OSC 777 — urxvt notification: "notify;<title>;<body>".
+            777 => {
+                let text = String::from_utf8_lossy(payload);
+                let parts: Vec<&str> = text.splitn(3, ';').collect();
+                if parts.len() >= 3 && parts[0] == "notify" {
+                    self.pending_notification = Some((parts[1].to_string(), parts[2].to_string()));
+                }
+            }
+            // OSC 99 — kitty notification: "<meta>;<payload>".
+            99 => {
+                let text = String::from_utf8_lossy(payload);
+                let parts: Vec<&str> = text.splitn(2, ';').collect();
+                if parts.len() >= 2 {
+                    // Best-effort v1: skip continuation chunks (d=0).
+                    let is_continuation = parts[0].split(':').any(|kv| kv == "d=0");
+                    if !is_continuation {
+                        let body = parts[1].to_string();
+                        let title = parts[0]
+                            .split(':')
+                            .find_map(|kv| kv.strip_prefix("p=title:"))
+                            .unwrap_or("")
+                            .to_string();
+                        self.pending_notification = Some((title, body));
+                    }
+                }
+            }
+            // OSC 110/111/112 — reset fg/bg/cursor colors.
+            110..=112 => {}
             // OSC 52 — clipboard.
             52 => {
                 let text = String::from_utf8_lossy(payload);
@@ -1119,6 +1190,12 @@ impl Emulator {
     ) -> Option<(crate::vt::progress::ProgressState, Option<u8>)> {
         self.pending_progress.take()
     }
+
+    /// Drain the most recent desktop notification (title, body), if any.
+    /// Set by OSC 9, OSC 777, and OSC 99.
+    pub fn take_pending_notification(&mut self) -> Option<(String, String)> {
+        self.pending_notification.take()
+    }
 }
 
 impl Emulator {
@@ -1154,6 +1231,10 @@ impl Emulator {
             }
             // DECSLRM — set left/right margins (requires DECLRMM).
             b's' => {}
+            // DECST8C — set tab at every 8 columns. With fixed 8-column
+            // tabs this is a no-op: the tab() method always uses multiples
+            // of 8.
+            b'W' => {}
             // DECSCUSR — set cursor style.
             b'q' => {}
             b't' => {}
@@ -1274,5 +1355,131 @@ mod csi_completion_tests {
         e.write(b"\x1b[5b");
         // No panic, cursor at origin.
         assert_eq!(e.cursor_position().x, 0);
+    }
+
+    #[test]
+    fn hpr_moves_cursor_right() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[5;10H");
+        e.write(b"\x1b[3a");
+        assert_eq!(e.cursor_position().x, 12);
+        assert_eq!(e.cursor_position().y, 4);
+    }
+
+    #[test]
+    fn hpr_clamps_to_width() {
+        let mut e = Emulator::new(10, 24);
+        e.write(b"\x1b[1;8H");
+        e.write(b"\x1b[5a");
+        assert_eq!(e.cursor_position().x, 9);
+    }
+
+    #[test]
+    fn decst8c_is_noop() {
+        let mut e = Emulator::new(80, 24);
+        // Should not panic; fixed 8-column tabs are unaffected.
+        e.write(b"\x1b[?5W");
+        e.write(b"\t");
+        assert_eq!(e.cursor_position().x, 8);
+    }
+}
+
+#[cfg(test)]
+mod esc_osc_completion_tests {
+    use super::*;
+
+    #[test]
+    fn deckpam_deckpnm_toggle() {
+        let mut e = Emulator::new(80, 24);
+        assert!(!e.is_mode_set(MODE_APPLICATION_KEYPAD));
+        e.write(b"\x1b=");
+        assert!(e.is_mode_set(MODE_APPLICATION_KEYPAD));
+        e.write(b"\x1b>");
+        assert!(!e.is_mode_set(MODE_APPLICATION_KEYPAD));
+    }
+
+    #[test]
+    fn ls2_sets_gl() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1bn");
+        assert_eq!(e.gl, 2);
+    }
+
+    #[test]
+    fn ls3_sets_gl() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1bo");
+        assert_eq!(e.gl, 3);
+    }
+
+    #[test]
+    fn ls1r_sets_gr() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b~");
+        assert_eq!(e.gr, 1);
+    }
+
+    #[test]
+    fn ls2r_sets_gr() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b}");
+        assert_eq!(e.gr, 2);
+    }
+
+    #[test]
+    fn ls3r_sets_gr() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b|");
+        assert_eq!(e.gr, 3);
+    }
+
+    #[test]
+    fn scs_g2_g3_select() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b*0");
+        assert_eq!(e.charsets[2], CharSet::SpecialGraphics);
+        e.write(b"\x1b+B");
+        assert_eq!(e.charsets[3], CharSet::Ascii);
+    }
+
+    #[test]
+    fn osc9_notification() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b]9;Hello world\x07");
+        let (title, body) = e.take_pending_notification().unwrap();
+        assert_eq!(title, "");
+        assert_eq!(body, "Hello world");
+    }
+
+    #[test]
+    fn osc777_notification() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b]777;notify;Title;Body text\x07");
+        let (title, body) = e.take_pending_notification().unwrap();
+        assert_eq!(title, "Title");
+        assert_eq!(body, "Body text");
+    }
+
+    #[test]
+    fn osc99_notification() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b]99;i=1;payload\x07");
+        let (_title, body) = e.take_pending_notification().unwrap();
+        assert_eq!(body, "payload");
+    }
+
+    #[test]
+    fn osc99_continuation_skipped() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b]99;d=0;chunk\x07");
+        assert!(e.take_pending_notification().is_none());
+    }
+
+    #[test]
+    fn osc9_progress_still_works() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b]9;4;1;50\x07");
+        assert!(e.take_pending_progress().is_some());
+        assert!(e.take_pending_notification().is_none());
     }
 }
