@@ -908,15 +908,12 @@ fn render_sidebar(os: &Os, buf: &mut Buffer, area: TuiRect) {
         } else {
             "▸"
         };
-        let mut text = format!(
-            "{}{} {}",
-            " ".repeat(indent),
-            glyph,
-            &row.label
-                .chars()
-                .take((width as usize).saturating_sub(indent + 4))
-                .collect::<String>()
-        );
+        let label: String = row
+            .label
+            .chars()
+            .take((width as usize).saturating_sub(indent + 4))
+            .collect();
+        let mut text = format!("{}{} {}", " ".repeat(indent), glyph, label);
         if selected {
             text.insert(0, '›');
         }
