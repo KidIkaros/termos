@@ -23,6 +23,7 @@ use serde_json::Value;
 
 use crate::terminal::pty::{spawn_pty, PtyHandle, PtyWriter, WinSize};
 
+use super::agent_state::AgentState;
 use super::manager::Manager;
 use super::model::{Session, SessionConfig, WindowInfo, WindowState};
 use super::persistence;
@@ -128,7 +129,7 @@ impl SessionBroadcast {
 /// broadcast hubs.
 pub struct Daemon {
     manager: Manager,
-    windows: Mutex<HashMap<String, Vec<LiveWindow>>>,
+    windows: Arc<Mutex<HashMap<String, Vec<LiveWindow>>>>,
     broadcast: Mutex<HashMap<String, Arc<SessionBroadcast>>>,
     /// Lifecycle hooks fired daemon-side for the window/session events the
     /// daemon owns (authoritative for daemon-mode windows).
@@ -140,21 +141,30 @@ pub struct Daemon {
     /// Per-window raw-output rings keyed by (session, window), for the
     /// `capture-pane` / `wait-for` verbs.
     rings: Arc<Mutex<HashMap<(String, String), OutputRing>>>,
+    /// Anti-flicker holds for OSC-derived agent states, keyed by window id:
+    /// (held state, when it was recorded). A quieter state must stand
+    /// unchanged for [`OSC_HOLD_WINDOW`] before it is published.
+    osc_holds: Arc<Mutex<HashMap<String, (AgentState, std::time::Instant)>>>,
 }
 
 /// Ring capacity (256 KiB) and the capture size cap (64 KiB).
 const RING_CAP: usize = 256 * 1024;
 const CAPTURE_CAP: usize = 64 * 1024;
 
+/// How long a quieter agent state must stand unchanged before it is
+/// published (Go's `agentHoldWindow`, 700ms).
+const OSC_HOLD_WINDOW: Duration = Duration::from_millis(700);
+
 impl Daemon {
     pub fn new() -> Self {
         Self {
             manager: Manager::new(),
-            windows: Mutex::new(HashMap::new()),
+            windows: Arc::new(Mutex::new(HashMap::new())),
             broadcast: Mutex::new(HashMap::new()),
             hook_manager: crate::hooks::Manager::new(),
             last_active: Mutex::new(HashMap::new()),
             rings: Arc::new(Mutex::new(HashMap::new())),
+            osc_holds: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -280,7 +290,19 @@ impl Daemon {
         let pump_session = session.to_string();
         let pump_id = id.to_string();
         let rings = Arc::clone(&self.rings);
-        std::thread::spawn(move || pump(reader.rx, pump_broadcast, pump_session, pump_id, rings));
+        let pump_windows = Arc::clone(&self.windows);
+        let pump_holds = Arc::clone(&self.osc_holds);
+        std::thread::spawn(move || {
+            pump(
+                reader.rx,
+                pump_broadcast,
+                pump_session,
+                pump_id,
+                rings,
+                pump_windows,
+                pump_holds,
+            )
+        });
         Ok(LiveWindow {
             info: WindowInfo {
                 id: id.to_string(),
@@ -426,6 +448,30 @@ impl Daemon {
             },
         );
         Ok(info.id)
+    }
+
+    /// Apply a detected OSC 9;4 progress state to a window with the
+    /// anti-flicker hold from Go's `agent_hold.go`: a state at or above the
+    /// current loudness publishes immediately; a quieter state must stand
+    /// unchanged for [`OSC_HOLD_WINDOW`]. Publishes via
+    /// [`AgentStateChanged`](Message::AgentStateChanged) when it goes through.
+    pub fn apply_osc_progress(
+        &self,
+        session: &str,
+        window: &str,
+        state: &AgentState,
+        now: std::time::Instant,
+    ) {
+        let broadcast = self.broadcast_for(session);
+        apply_osc_progress_pieces(
+            &self.windows,
+            &self.osc_holds,
+            session,
+            window,
+            state,
+            now,
+            &broadcast,
+        );
     }
 
     /// Read a window's agent state (`get-agent-state`).
@@ -861,6 +907,94 @@ impl Default for Daemon {
 /// Reads and writes use separate handles so the request loop can block on a
 /// read without holding the write lock that the broadcast-forwarding threads
 /// need.
+/// The shared OSC-progress application used by both the daemon method and the
+/// per-window output pump. Reads the window's current state, applies the
+/// anti-flicker hold, and broadcasts `AgentStateChanged` when the state
+/// publishes.
+fn apply_osc_progress_pieces(
+    windows: &Mutex<HashMap<String, Vec<LiveWindow>>>,
+    holds: &Mutex<HashMap<String, (AgentState, std::time::Instant)>>,
+    session: &str,
+    window: &str,
+    state: &AgentState,
+    now: std::time::Instant,
+    broadcast: &Arc<SessionBroadcast>,
+) {
+    let current = {
+        let windows = windows.lock().unwrap();
+        windows
+            .get(session)
+            .and_then(|wins| wins.iter().find(|w| w.info.id == window))
+            .and_then(|w| AgentState::parse(&w.info.agent_state))
+    };
+    let Some(current) = current else { return };
+    if *state == current {
+        holds.lock().unwrap().remove(window);
+        return;
+    }
+    if !hold_quieter_state(holds, window, state, &current, now) {
+        return;
+    }
+    let mut wins = windows.lock().unwrap();
+    let Some(live) = wins
+        .get_mut(session)
+        .and_then(|wins| wins.iter_mut().find(|w| w.info.id == window))
+    else {
+        return;
+    };
+    live.info.agent_state = state.name().to_string();
+    live.info.agent_message.clear();
+    live.info.agent_harness = "osc".to_string();
+    let info = live.info.clone();
+    drop(wins);
+    broadcast.send_to_all(&Message::AgentStateChanged {
+        window: info.id,
+        state: info.agent_state,
+        message: info.agent_message,
+        harness: info.agent_harness,
+    });
+}
+
+/// Go's `holdQuieterState`: decide whether `next` may be published now.
+fn hold_quieter_state(
+    holds: &Mutex<HashMap<String, (AgentState, std::time::Instant)>>,
+    window: &str,
+    next: &AgentState,
+    current: &AgentState,
+    now: std::time::Instant,
+) -> bool {
+    if agent_loudness(next) >= agent_loudness(current) {
+        holds.lock().unwrap().remove(window);
+        return true;
+    }
+    let mut holds = holds.lock().unwrap();
+    match holds.get(window) {
+        Some((held, since)) if *held == *next => {
+            if now.duration_since(*since) < OSC_HOLD_WINDOW {
+                false
+            } else {
+                holds.remove(window);
+                true
+            }
+        }
+        _ => {
+            holds.insert(window.to_string(), (*next, now));
+            false
+        }
+    }
+}
+
+/// How strongly an agent state wants a human (Go's `agentLoudness`):
+/// NeedsInput/Errored > Working > Idle/Done > None.
+fn agent_loudness(state: &AgentState) -> i32 {
+    match state {
+        AgentState::NeedsInput | AgentState::Errored => 3,
+        AgentState::Working => 2,
+        AgentState::Idle | AgentState::Done => 1,
+        AgentState::None => 0,
+    }
+}
+
 /// Extract a string parameter from a verb request's params object.
 fn verb_param(params: &Value, name: &str) -> Option<String> {
     params
@@ -1227,13 +1361,32 @@ fn pump(
     session: String,
     window: String,
     rings: Arc<Mutex<HashMap<(String, String), OutputRing>>>,
+    windows: Arc<Mutex<HashMap<String, Vec<LiveWindow>>>>,
+    holds: Arc<Mutex<HashMap<String, (AgentState, std::time::Instant)>>>,
 ) {
+    let mut scanner = crate::session::osc_scan::OscProgressScanner::new();
     while let Ok(chunk) = rx.recv() {
         if let Ok(mut rings) = rings.lock() {
             rings
                 .entry((session.clone(), window.clone()))
                 .or_insert_with(|| OutputRing::new(RING_CAP))
                 .push(&chunk);
+        }
+        // Detect OSC 9;4 progress reports in the raw stream and drive the
+        // window's agent state (anti-flicker held, then broadcast).
+        for progress in scanner.feed(&chunk) {
+            if let Some(state) = crate::session::osc_scan::agent_state_for_progress(progress.state)
+            {
+                apply_osc_progress_pieces(
+                    &windows,
+                    &holds,
+                    &session,
+                    &window,
+                    &state,
+                    std::time::Instant::now(),
+                    &broadcast,
+                );
+            }
         }
         broadcast.send_to_all(&Message::PtyOutput {
             window: window.clone(),
@@ -1429,6 +1582,116 @@ mod tests {
         assert!(Arc::ptr_eq(&b1, &b2));
         let b3 = d.broadcast_for("s2");
         assert!(!Arc::ptr_eq(&b1, &b3));
+    }
+}
+
+#[cfg(test)]
+mod osc_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn holds() -> Mutex<HashMap<String, (AgentState, Instant)>> {
+        Mutex::new(HashMap::new())
+    }
+
+    fn t0() -> Instant {
+        Instant::now()
+    }
+
+    #[test]
+    fn louder_state_publishes_immediately() {
+        let h = holds();
+        // Current: Idle (loudness 1). Next: Working (loudness 2) -> publish.
+        assert!(hold_quieter_state(
+            &h,
+            "w1",
+            &AgentState::Working,
+            &AgentState::Idle,
+            t0()
+        ));
+        assert!(h.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn equal_loudness_publishes_immediately() {
+        let h = holds();
+        assert!(hold_quieter_state(
+            &h,
+            "w1",
+            &AgentState::Errored,
+            &AgentState::NeedsInput,
+            t0()
+        ));
+    }
+
+    #[test]
+    fn quieter_state_is_held_first_time() {
+        let h = holds();
+        // Current: Working (2). Next: Idle (1) -> held, not published.
+        assert!(!hold_quieter_state(
+            &h,
+            "w1",
+            &AgentState::Idle,
+            &AgentState::Working,
+            t0()
+        ));
+        assert!(h.lock().unwrap().contains_key("w1"));
+    }
+
+    #[test]
+    fn quieter_state_publishes_after_window() {
+        let h = holds();
+        let start = t0();
+        assert!(!hold_quieter_state(
+            &h,
+            "w1",
+            &AgentState::Idle,
+            &AgentState::Working,
+            start
+        ));
+        // Still inside the window.
+        assert!(!hold_quieter_state(
+            &h,
+            "w1",
+            &AgentState::Idle,
+            &AgentState::Working,
+            start + Duration::from_millis(600),
+        ));
+        // Past the window.
+        assert!(hold_quieter_state(
+            &h,
+            "w1",
+            &AgentState::Idle,
+            &AgentState::Working,
+            start + Duration::from_millis(701),
+        ));
+        assert!(h.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn same_state_cancels_hold() {
+        let h = holds();
+        let start = t0();
+        assert!(!hold_quieter_state(
+            &h,
+            "w1",
+            &AgentState::Idle,
+            &AgentState::Working,
+            start
+        ));
+        // The window became idle some other way; the hold is dropped.
+        h.lock().unwrap().remove("w1");
+        assert!(!h.lock().unwrap().contains_key("w1"));
+    }
+
+    #[test]
+    fn loudness_ordering() {
+        assert_eq!(agent_loudness(&AgentState::None), 0);
+        assert_eq!(agent_loudness(&AgentState::Idle), 1);
+        assert_eq!(agent_loudness(&AgentState::Done), 1);
+        assert_eq!(agent_loudness(&AgentState::Working), 2);
+        assert_eq!(agent_loudness(&AgentState::NeedsInput), 3);
+        assert_eq!(agent_loudness(&AgentState::Errored), 3);
     }
 }
 

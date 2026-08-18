@@ -8,6 +8,7 @@ pub mod daemon;
 pub mod events;
 pub mod manager;
 pub mod model;
+pub mod osc_scan;
 pub mod persistence;
 pub mod protocol;
 pub mod remote;

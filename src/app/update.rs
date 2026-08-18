@@ -39,6 +39,7 @@ impl Os {
                 Vec::new()
             }
             Msg::Tick => {
+                self.tick_agent_progress();
                 self.tick_agent_alerts();
                 self.tick_script();
                 self.sync_window_sizes();

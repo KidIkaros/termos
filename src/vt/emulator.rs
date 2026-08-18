@@ -60,6 +60,9 @@ pub struct Emulator {
     /// Pending DCS sequences that look like Sixel (`q` final byte) for the
     /// app layer's Sixel passthrough.
     pending_sixel: Vec<Vec<u8>>,
+    /// The most recent OSC 9;4 progress report (state, percent), drained by
+    /// the app's agent-state tick.
+    pending_progress: Option<(crate::vt::progress::ProgressState, Option<u8>)>,
     /// How many scrollback lines are currently shown above the live screen.
     /// 0 means the live screen is shown; a positive value means the view is
     /// scrolled back that many lines (copy mode).
@@ -92,6 +95,7 @@ impl Emulator {
             clipboard: None,
             pending_apc: Vec::new(),
             pending_sixel: Vec::new(),
+            pending_progress: None,
             viewport: 0,
         };
         // Alt screen keeps no scrollback.
@@ -944,6 +948,14 @@ impl Handler for Emulator {
         };
 
         match num {
+            // OSC 9 — progress report (9;4;...) or desktop notification body.
+            9 => {
+                let payload = String::from_utf8_lossy(payload);
+                if crate::vt::progress::is_progress_payload(&payload) {
+                    let (state, percent) = crate::vt::progress::parse_progress(&payload);
+                    self.pending_progress = Some((state, percent));
+                }
+            }
             // Set window title / icon name.
             0 | 2 => {
                 self.title = String::from_utf8_lossy(payload).into_owned();
@@ -1022,6 +1034,13 @@ impl Emulator {
     /// Drain pending Sixel DCS payloads (the bytes after `DCS ... q`).
     pub fn drain_pending_sixel(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.pending_sixel)
+    }
+
+    /// Drain the most recent OSC 9;4 progress report, if any.
+    pub fn take_pending_progress(
+        &mut self,
+    ) -> Option<(crate::vt::progress::ProgressState, Option<u8>)> {
+        self.pending_progress.take()
     }
 }
 

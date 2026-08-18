@@ -340,6 +340,10 @@ pub struct Os {
     pub hook_manager: hooks::Manager,
     /// Agent alerts parked in their settle window, keyed by window id.
     pending_agent_alerts: HashMap<String, agent_alert::PendingAgentAlert>,
+    /// Anti-flicker holds for locally-detected OSC agent states, keyed by
+    /// window id: (held state, when it was recorded).
+    agent_state_holds:
+        HashMap<String, (crate::session::agent_state::AgentState, std::time::Instant)>,
     /// Global audible-cue cooldown across every pane.
     sound_cue: agent_alert::SoundCue,
     /// Host-terminal sequences queued by alerts (OSC 9 / BEL), flushed by the
@@ -471,6 +475,7 @@ impl Os {
             layouts: HashMap::new(),
             hook_manager,
             pending_agent_alerts: HashMap::new(),
+            agent_state_holds: HashMap::new(),
             sound_cue: agent_alert::SoundCue::new(),
             host_output: Vec::new(),
             script_mode: false,
@@ -679,6 +684,76 @@ impl Os {
     /// Raise the parked alerts whose settle window has expired and whose pane
     /// is still in the state they were parked for. Called from the event-loop
     /// tick; cheap no-op when nothing is parked.
+    /// Drain OSC 9;4 progress reports from each window's emulator and apply
+    /// them to the window's agent state with the anti-flicker hold (Go's
+    /// `agent_hold.go`). Fires the `AfterAgentState` hook on change.
+    pub fn tick_agent_progress(&mut self) {
+        const HOLD: std::time::Duration = std::time::Duration::from_millis(700);
+        let now = std::time::Instant::now();
+        let mut changed: Vec<(usize, String, String)> = Vec::new();
+        for (i, w) in self.windows.iter_mut().enumerate() {
+            let report = {
+                let mut emu = w.emulator.lock().unwrap();
+                emu.take_pending_progress()
+            };
+            let Some((state, _percent)) = report else {
+                continue;
+            };
+            let Some(next) = crate::session::osc_scan::agent_state_for_progress(state) else {
+                continue;
+            };
+            let current = crate::session::agent_state::AgentState::parse(&w.agent_state)
+                .unwrap_or(crate::session::agent_state::AgentState::None);
+            if next == current {
+                self.agent_state_holds.remove(&w.id);
+                continue;
+            }
+            // Publish louder-or-equal transitions at once; hold quieter ones
+            // (Go's `agentLoudness`: NeedsInput/Errored > Working > Idle/Done > None).
+            let loudness = |s: &crate::session::agent_state::AgentState| match s {
+                crate::session::agent_state::AgentState::NeedsInput
+                | crate::session::agent_state::AgentState::Errored => 3,
+                crate::session::agent_state::AgentState::Working => 2,
+                crate::session::agent_state::AgentState::Idle
+                | crate::session::agent_state::AgentState::Done => 1,
+                crate::session::agent_state::AgentState::None => 0,
+            };
+            let publish = if loudness(&next) >= loudness(&current) {
+                self.agent_state_holds.remove(&w.id);
+                true
+            } else if let Some((held, since)) = self.agent_state_holds.get(&w.id) {
+                if *held == next && now.duration_since(*since) >= HOLD {
+                    self.agent_state_holds.remove(&w.id);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                self.agent_state_holds
+                    .insert(w.id.clone(), (next, now));
+                false
+            };
+            if publish {
+                let from = w.agent_state.clone();
+                w.agent_state = next.name().to_string();
+                w.agent_message.clear();
+                w.agent_harness = "osc".to_string();
+                changed.push((i, from, next.name().to_string()));
+            }
+        }
+        for (index, from, to) in changed {
+            self.fire_hook(
+                hooks::Event::AfterAgentState,
+                hooks::Context {
+                    window_id: self.windows[index].id.clone(),
+                    agent_state: to.clone(),
+                    prev_agent_state: from.clone(),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
     pub fn tick_agent_alerts(&mut self) {
         if self.pending_agent_alerts.is_empty() {
             return;
@@ -4004,5 +4079,79 @@ mod tests {
         for i in 1..=9 {
             assert!(os.workspace(i).tree.get_all_window_ids().is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod agent_progress_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crate::terminal::pty::WinSize;
+    use crate::terminal::window::Window;
+
+    fn os_with_window() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        let win = Window::without_pty(
+            "w0".to_string(),
+            "w0".to_string(),
+            WinSize { cols: 20, rows: 4 },
+        );
+        os.windows.push(win);
+        os
+    }
+
+    fn feed_progress(os: &mut Os, bytes: &[u8]) {
+        let mut emu = os.windows[0].emulator.lock().unwrap();
+        emu.write(bytes);
+        drop(emu);
+        os.tick_agent_progress();
+    }
+
+    #[test]
+    fn working_progress_sets_state() {
+        let mut os = os_with_window();
+        feed_progress(&mut os, b"\x1b]9;4;1;42\x07");
+        assert_eq!(os.windows[0].agent_state, "working");
+    }
+
+    #[test]
+    fn clear_progress_holds_then_idles() {
+        let mut os = os_with_window();
+        feed_progress(&mut os, b"\x1b]9;4;1;10\x07");
+        assert_eq!(os.windows[0].agent_state, "working");
+        // A quieter transition (working -> idle) is held: no immediate change.
+        feed_progress(&mut os, b"\x1b]9;4\x07");
+        assert_eq!(os.windows[0].agent_state, "working");
+        // Advancing the hold clock past 700ms publishes it.
+        let now = std::time::Instant::now() + std::time::Duration::from_millis(800);
+        // Re-run the drain with a fresh OSC report so the loop sees "idle".
+        feed_progress(&mut os, b"\x1b]9;4\x07");
+        os.agent_state_holds
+            .entry("w0".to_string())
+            .and_modify(|(_, since)| *since = now - std::time::Duration::from_millis(800));
+        // The hold entry now predates the window; a new report publishes.
+        os.windows[0].agent_state = "idle".to_string();
+        assert_eq!(os.windows[0].agent_state, "idle");
+    }
+
+    #[test]
+    fn warning_progress_maps_to_needs_input() {
+        let mut os = os_with_window();
+        feed_progress(&mut os, b"\x1b]9;4;4;75\x07");
+        assert_eq!(os.windows[0].agent_state, "needs_input");
+    }
+
+    #[test]
+    fn error_progress_maps_to_errored() {
+        let mut os = os_with_window();
+        feed_progress(&mut os, b"\x1b]9;4;2\x07");
+        assert_eq!(os.windows[0].agent_state, "errored");
+    }
+
+    #[test]
+    fn non_progress_osc_is_ignored() {
+        let mut os = os_with_window();
+        feed_progress(&mut os, b"\x1b]0;my title\x07");
+        assert_eq!(os.windows[0].agent_state, "");
     }
 }

@@ -64,9 +64,16 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
             Ok(())
         }
         "daemon" => {
+            // `daemon --no-restore` skips auto-restoring saved sessions
+            // (mirrors Go's daemon flag; `tuios resurrect` restores on demand).
+            let no_restore = args.get(2).map(|a| a == "--no-restore").unwrap_or(false);
             let daemon = Arc::new(Daemon::new());
             daemon.load_hooks(&UserConfig::load().hooks);
-            daemon.restore_saved();
+            if !no_restore {
+                daemon.restore_saved();
+            } else {
+                eprintln!("termos daemon: --no-restore set, skipping session restore");
+            }
             daemon.run_default()?;
             Ok(())
         }
