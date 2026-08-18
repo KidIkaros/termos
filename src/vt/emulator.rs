@@ -76,6 +76,9 @@ pub struct Emulator {
     /// 0 means the live screen is shown; a positive value means the view is
     /// scrolled back that many lines (copy mode).
     viewport: usize,
+    /// Cell size in pixels for XTWINOPS responses (default 8×16).
+    cell_width: u16,
+    cell_height: u16,
 }
 
 impl Default for Emulator {
@@ -110,6 +113,8 @@ impl Emulator {
             semantic_markers: crate::vt::semantic_markers::SemanticMarkerList::new(10_000),
             last_printed_char: None,
             viewport: 0,
+            cell_width: 8,
+            cell_height: 16,
         };
         // Alt screen keeps no scrollback.
         emu.screens[1].set_scrollback_enabled(false);
@@ -250,6 +255,12 @@ impl Emulator {
     pub fn set_viewport(&mut self, value: usize) {
         let max = self.screens[0].scrollback.len();
         self.viewport = value.min(max);
+    }
+
+    /// Set the cell size in pixels, used for XTWINOPS pixel responses.
+    pub fn set_cell_size(&mut self, width: u16, height: u16) {
+        self.cell_width = width;
+        self.cell_height = height;
     }
 
     pub fn scrollback_line_text(&self, index: usize) -> Option<String> {
@@ -957,7 +968,14 @@ impl Handler for Emulator {
                 match p(0, 0) {
                     14 => {
                         // Report window size in pixels.
-                        let seq = format!("\x1b[4;{};{}t", 480, 640);
+                        let ph = self.height() as u16 * self.cell_height;
+                        let pw = self.width() as u16 * self.cell_width;
+                        let seq = format!("\x1b[4;{ph};{pw}t");
+                        self.queue_response(seq.as_bytes());
+                    }
+                    16 => {
+                        // Report cell size in pixels.
+                        let seq = format!("\x1b[6;{};{}t", self.cell_height, self.cell_width);
                         self.queue_response(seq.as_bytes());
                     }
                     18 => {
@@ -1565,5 +1583,26 @@ mod esc_osc_completion_tests {
         assert!(e.scrollback_len() > 0, "scrollback should have content");
         e.write(b"\x1b[3J");
         assert_eq!(e.scrollback_len(), 0, "ED 3 should clear scrollback");
+    }
+
+    #[test]
+    fn xtwinops_16_reports_cell_size() {
+        let mut e = Emulator::new(80, 24);
+        e.set_cell_size(10, 20);
+        e.write(b"\x1b[16t");
+        let resp = e.take_response();
+        let s = String::from_utf8_lossy(&resp);
+        assert!(s.contains("\x1b[6;20;10t"), "got: {s}");
+    }
+
+    #[test]
+    fn xtwinops_14_reports_pixel_size() {
+        let mut e = Emulator::new(80, 24);
+        e.set_cell_size(10, 20);
+        e.write(b"\x1b[14t");
+        let resp = e.take_response();
+        let s = String::from_utf8_lossy(&resp);
+        // 24 rows * 20 px = 480, 80 cols * 10 px = 800
+        assert!(s.contains("\x1b[4;480;800t"), "got: {s}");
     }
 }
