@@ -5694,7 +5694,7 @@ mod aggregate_tests {
 
     #[test]
     fn preview_comes_from_emulator() {
-        let mut os = os_with_two_workspaces();
+        let os = os_with_two_workspaces();
         {
             let mut emu = os.windows[0].emulator.lock().unwrap();
             emu.write(b"hello world\nsecond line");
