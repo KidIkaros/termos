@@ -72,6 +72,7 @@ pub enum Command {
     SwitchWorkspace(i32),
     Quit,
     Theme,
+    Settings,
 }
 
 impl Command {
@@ -87,6 +88,7 @@ impl Command {
             Command::ToggleTiling,
             Command::EqualizeSplits,
             Command::Scrollback,
+            Command::Settings,
         ];
         for i in 1..=9 {
             cmds.push(Command::SwitchWorkspace(i));
@@ -111,6 +113,7 @@ impl Command {
             Command::SwitchWorkspace(i) => format!("Switch to workspace {i}"),
             Command::Quit => "Quit".into(),
             Command::Theme => "Theme picker".into(),
+            Command::Settings => "Settings".into(),
         }
     }
 }
@@ -341,6 +344,9 @@ pub struct Os {
     pub theme_picker_open: bool,
     /// The selected index in the theme picker.
     pub theme_picker_selected: usize,
+    /// Whether the settings overlay is open and the selected row.
+    pub settings_open: bool,
+    pub settings_selected: usize,
     /// Cached list of available theme names.
     pub theme_list: Vec<String>,
     /// The current daemon session name (Some = daemon/attach mode).
@@ -601,6 +607,8 @@ impl Os {
             event_log: Vec::new(),
             theme_picker_open: false,
             theme_picker_selected: 0,
+            settings_open: false,
+            settings_selected: 0,
             theme_list: Vec::new(),
             remote_session: None,
             remote_sessions: Vec::new(),
@@ -2391,6 +2399,7 @@ impl Os {
                 self.show_quit_confirmation = true;
             }
             Command::Theme => self.open_theme_picker(),
+            Command::Settings => self.open_settings(),
         }
     }
 
@@ -3522,6 +3531,102 @@ impl Os {
             cursor_line: line,
             cursor_col: width,
         });
+    }
+
+    /// Open the settings overlay.
+    pub fn open_settings(&mut self) {
+        self.settings_open = true;
+        self.settings_selected = 0;
+    }
+
+    /// Close the settings overlay.
+    pub fn close_settings(&mut self) {
+        self.settings_open = false;
+        self.settings_selected = 0;
+    }
+
+    /// The settings rows with their current values.
+    pub fn settings_rows(&self) -> Vec<(String, String)> {
+        let theme = self
+            .theme
+            .as_ref()
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| self.config.appearance.theme.clone());
+        let mut rows = vec![
+            ("Theme".to_string(), theme),
+            (
+                "Animations".to_string(),
+                if self.config.appearance.animations_enabled {
+                    "on".into()
+                } else {
+                    "off".into()
+                },
+            ),
+            (
+                "Which-key overlay".to_string(),
+                if self.config.appearance.which_key_enabled {
+                    "on".into()
+                } else {
+                    "off".into()
+                },
+            ),
+            (
+                "Pane gap".to_string(),
+                if self.gap > 0 {
+                    self.gap.to_string()
+                } else {
+                    "off".into()
+                },
+            ),
+        ];
+        rows.push((
+            "Scroll lines".to_string(),
+            self.config.appearance.scroll_lines.to_string(),
+        ));
+        rows
+    }
+
+    /// Adjust the selected settings row: `delta` -1/0/+1 (left/enter/right).
+    pub fn adjust_settings_row(&mut self, delta: i32) {
+        let theme_names = crate::config::theme::Theme::built_in_names();
+        let row = self.settings_selected;
+        match row {
+            0 => {
+                // Cycle the theme.
+                let current = self
+                    .theme
+                    .as_ref()
+                    .map(|t| t.name.clone())
+                    .unwrap_or_else(|| self.config.appearance.theme.clone());
+                let idx = theme_names.iter().position(|n| *n == current).unwrap_or(0);
+                let next = (idx as i32 + delta).rem_euclid(theme_names.len() as i32) as usize;
+                let name = theme_names[next].to_string();
+                self.theme = crate::config::Theme::built_in(&name);
+                self.config.appearance.theme = name.clone();
+                self.notify(format!("theme: {name}"), "info");
+                self.log_action(&format!("set_theme {name}"));
+            }
+            1 => {
+                if delta != 0 {
+                    self.config.appearance.animations_enabled =
+                        !self.config.appearance.animations_enabled;
+                }
+            }
+            2 => {
+                if delta != 0 {
+                    self.config.appearance.which_key_enabled =
+                        !self.config.appearance.which_key_enabled;
+                }
+            }
+            3 => {
+                self.gap = (self.gap + delta).max(0);
+            }
+            4 => {
+                self.config.appearance.scroll_lines =
+                    (self.config.appearance.scroll_lines + delta).max(1);
+            }
+            _ => {}
+        }
     }
 
     pub fn open_theme_picker(&mut self) {
@@ -5228,5 +5333,86 @@ mod session_close_tests {
         let (panes, agents) = os.session_toll("work");
         assert_eq!(panes, 3);
         assert_eq!(agents, 0);
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn os() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.theme = crate::config::Theme::built_in("dracula");
+        os
+    }
+
+    #[test]
+    fn open_and_close() {
+        let mut os = os();
+        os.open_settings();
+        assert!(os.settings_open);
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Esc));
+        assert!(!os.settings_open);
+    }
+
+    #[test]
+    fn rows_include_theme_and_toggles() {
+        let os = os();
+        let rows = os.settings_rows();
+        assert!(rows.iter().any(|(l, _)| l == "Theme"));
+        assert!(rows.iter().any(|(l, _)| l == "Animations"));
+        assert!(rows.iter().any(|(l, _)| l == "Which-key overlay"));
+    }
+
+    #[test]
+    fn cycle_theme_changes_theme() {
+        let mut os = os();
+        os.open_settings();
+        // Row 0 is Theme; right arrow cycles forward.
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Right));
+        let name = os.theme.as_ref().unwrap().name.clone();
+        assert_ne!(name, "dracula");
+        assert_eq!(os.config.appearance.theme, name);
+    }
+
+    #[test]
+    fn toggle_animations() {
+        let mut os = os();
+        os.config.appearance.animations_enabled = false;
+        os.open_settings();
+        // Down to row 1 (Animations), then Enter toggles.
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('j')));
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Enter));
+        assert!(os.config.appearance.animations_enabled);
+    }
+
+    #[test]
+    fn gap_adjusts_with_arrows() {
+        let mut os = os();
+        os.open_settings();
+        // Down to row 3 (Pane gap).
+        for _ in 0..3 {
+            crate::app::input::handle_key(&mut os, &key(KeyCode::Char('j')));
+        }
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Right));
+        assert_eq!(os.gap, 1);
+    }
+
+    #[test]
+    fn palette_settings_command_opens() {
+        let mut os = os();
+        os.open_palette();
+        // Type to filter down to the Settings command and activate it.
+        for c in "settings".chars() {
+            crate::app::input::handle_key(&mut os, &key(KeyCode::Char(c)));
+        }
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Enter));
+        assert!(os.settings_open);
     }
 }

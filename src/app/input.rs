@@ -205,6 +205,11 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         return handle_tape_manager(os, key);
     }
 
+    // The settings overlay consumes its own keys.
+    if os.settings_open {
+        return handle_settings_key(os, key);
+    }
+
     // The session-close confirmation consumes its own keys.
     if os.session_close.is_some() {
         return handle_session_close_key(os, key);
@@ -293,6 +298,29 @@ fn handle_rename_dialog_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
             if let Some((_, text)) = os.rename_dialog.as_mut() {
                 text.push(c);
             }
+        }
+        _ => {}
+    }
+    KeyResult::Consumed
+}
+
+fn handle_settings_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    let count = os.settings_rows().len();
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            os.close_settings();
+        }
+        KeyCode::Up | KeyCode::BackTab | KeyCode::Char('k') => {
+            os.settings_selected = (os.settings_selected + count - 1) % count;
+        }
+        KeyCode::Down | KeyCode::Tab | KeyCode::Char('j') => {
+            os.settings_selected = (os.settings_selected + 1) % count;
+        }
+        KeyCode::Left => {
+            os.adjust_settings_row(-1);
+        }
+        KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ') => {
+            os.adjust_settings_row(1);
         }
         _ => {}
     }

@@ -135,6 +135,20 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         render_overlay(buf, content_area, &lines, "Project tape");
     } else if os.tape_manager_open {
         render_tape_manager(os, buf, content_area);
+    } else if os.settings_open {
+        let rows = os.settings_rows();
+        let mut lines: Vec<String> = Vec::new();
+        for (i, (label, value)) in rows.iter().enumerate() {
+            let marker = if i == os.settings_selected {
+                "› "
+            } else {
+                "  "
+            };
+            lines.push(format!("{marker}{label:<20} {value}"));
+        }
+        lines.push(String::new());
+        lines.push("↑↓ select · ←/→ or Enter adjust · Esc close".into());
+        render_overlay(buf, content_area, &lines, "Settings");
     } else if let Some((session, selected)) = &os.session_close {
         let (panes, agents) = os.session_toll(session);
         let mut toll = format!("{panes} pane(s)");
