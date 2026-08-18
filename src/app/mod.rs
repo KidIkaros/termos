@@ -279,6 +279,9 @@ pub struct Os {
     /// Kill-and-quit: after the pending session kill, the client quits even
     /// when other sessions exist.
     pub quit_after_kill: bool,
+    /// The open session-close confirmation: (session name, selected row).
+    /// Cancel (0) is the default; Close (1) is the destructive row.
+    pub session_close: Option<(String, usize)>,
     /// Command palette state.
     pub palette_open: bool,
     pub palette_query: String,
@@ -566,6 +569,7 @@ impl Os {
             show_quit_confirmation: false,
             quit_menu: None,
             quit_after_kill: false,
+            session_close: None,
             palette_open: false,
             palette_query: String::new(),
             palette_selected: 0,
@@ -2892,6 +2896,45 @@ impl Os {
         }
     }
 
+    /// Open the session-close confirmation for a session. Raised every time,
+    /// whatever the session holds; the toll line counts what would be lost.
+    pub fn open_session_close(&mut self, session: &str) {
+        self.session_close = Some((session.to_string(), 0));
+    }
+
+    /// Cancel the session-close confirmation.
+    pub fn cancel_session_close(&mut self) {
+        self.session_close = None;
+    }
+
+    /// The toll closing `session` would take: panes and agent-marked windows.
+    pub fn session_toll(&self, session: &str) -> (usize, usize) {
+        let windows = self
+            .remote_sessions
+            .iter()
+            .find(|s| s.name == session)
+            .map(|s| s.windows)
+            .unwrap_or(0);
+        // Agent-marked windows are only known locally for the attached
+        // session; remote sessions report their count from the listing.
+        let agents = if self.remote_session.as_deref() == Some(session) {
+            self.windows
+                .iter()
+                .filter(|w| !w.agent_state.is_empty())
+                .count()
+        } else {
+            0
+        };
+        (windows, agents)
+    }
+
+    /// Confirm the close: request the kill.
+    pub fn confirm_session_close(&mut self) {
+        if let Some((session, _)) = self.session_close.take() {
+            self.pending_kill = Some(session);
+        }
+    }
+
     /// Dismiss the context menu (also called by the next click anywhere).
     pub fn dismiss_context_menu(&mut self) {
         self.context_menu = None;
@@ -5105,5 +5148,85 @@ mod quit_menu_tests {
         assert_eq!(os.quit_menu.as_ref().unwrap().selected, 1);
         crate::app::input::handle_key(&mut os, &key(KeyCode::Down));
         assert_eq!(os.quit_menu.as_ref().unwrap().selected, 0);
+    }
+}
+
+#[cfg(test)]
+mod session_close_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn os_with_session() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.remote_session = Some("work".into());
+        os.remote_sessions = vec![crate::session::model::SessionInfo {
+            id: "s1".into(),
+            name: "work".into(),
+            created_at: 0,
+            attached: true,
+            windows: 3,
+            restored: false,
+        }];
+        os
+    }
+
+    #[test]
+    fn open_defaults_to_cancel() {
+        let mut os = os_with_session();
+        os.open_session_close("work");
+        let (session, selected) = os.session_close.as_ref().unwrap();
+        assert_eq!(session, "work");
+        assert_eq!(*selected, 0);
+    }
+
+    #[test]
+    fn enter_on_default_cancels() {
+        let mut os = os_with_session();
+        os.open_session_close("work");
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Enter));
+        assert!(os.session_close.is_none());
+        assert!(os.pending_kill.is_none());
+    }
+
+    #[test]
+    fn select_close_and_confirm_kills() {
+        let mut os = os_with_session();
+        os.open_session_close("work");
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('j')));
+        assert_eq!(os.session_close.as_ref().unwrap().1, 1);
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Enter));
+        assert!(os.session_close.is_none());
+        assert_eq!(os.pending_kill.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn y_shortcut_confirms() {
+        let mut os = os_with_session();
+        os.open_session_close("work");
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('y')));
+        assert!(os.session_close.is_none());
+        assert_eq!(os.pending_kill.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn esc_cancels() {
+        let mut os = os_with_session();
+        os.open_session_close("work");
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Esc));
+        assert!(os.session_close.is_none());
+        assert!(os.pending_kill.is_none());
+    }
+
+    #[test]
+    fn toll_counts_windows() {
+        let mut os = os_with_session();
+        let (panes, agents) = os.session_toll("work");
+        assert_eq!(panes, 3);
+        assert_eq!(agents, 0);
     }
 }

@@ -135,6 +135,20 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         render_overlay(buf, content_area, &lines, "Project tape");
     } else if os.tape_manager_open {
         render_tape_manager(os, buf, content_area);
+    } else if let Some((session, selected)) = &os.session_close {
+        let (panes, agents) = os.session_toll(session);
+        let mut toll = format!("{panes} pane(s)");
+        if agents > 0 {
+            toll.push_str(&format!(", {agents} agent-marked window(s)"));
+        }
+        let lines = vec![
+            format!("Close session '{session}'? This will end its panes."),
+            format!("  {toll}"),
+            String::new(),
+            format!("  {} Cancel", if *selected == 0 { "›" } else { " " }),
+            format!("  {} Close session", if *selected == 1 { "›" } else { " " }),
+        ];
+        render_overlay(buf, content_area, &lines, "Close session");
     } else if let Some(menu) = &os.quit_menu {
         let mut lines: Vec<String> = Vec::new();
         for (i, item) in menu.items.iter().enumerate() {

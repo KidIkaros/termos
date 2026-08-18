@@ -205,6 +205,11 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         return handle_tape_manager(os, key);
     }
 
+    // The session-close confirmation consumes its own keys.
+    if os.session_close.is_some() {
+        return handle_session_close_key(os, key);
+    }
+
     // The quit menu consumes its own keys.
     if os.quit_menu.is_some() {
         return handle_quit_menu_key(os, key);
@@ -288,6 +293,37 @@ fn handle_rename_dialog_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
             if let Some((_, text)) = os.rename_dialog.as_mut() {
                 text.push(c);
             }
+        }
+        _ => {}
+    }
+    KeyResult::Consumed
+}
+
+fn handle_session_close_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
+            if let Some((_, selected)) = os.session_close.as_mut() {
+                *selected = if *selected == 0 { 1 } else { 0 };
+            }
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            // Cancel is row 0 (the default); Close is row 1.
+            let close = os
+                .session_close
+                .as_ref()
+                .map(|(_, s)| *s == 1)
+                .unwrap_or(false);
+            if close {
+                os.confirm_session_close();
+            } else {
+                os.cancel_session_close();
+            }
+        }
+        KeyCode::Esc | KeyCode::Char('q') => {
+            os.cancel_session_close();
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            os.confirm_session_close();
         }
         _ => {}
     }
@@ -1206,11 +1242,14 @@ fn handle_switcher(os: &mut Os, key: &KeyEvent) -> KeyResult {
             KeyResult::Consumed
         }
         KeyCode::Char('d') if ctrl => {
-            // In the session switcher, Ctrl+D requests a kill.
+            // In the session switcher, Ctrl+D requests a kill via the
+            // close confirmation (Cancel is the default row).
             if os.switcher_kind == SwitcherKind::Session {
                 let items = os.switcher_items();
                 if let Some(e) = items.get(os.switcher_selected) {
-                    os.pending_kill = e.session.clone();
+                    if let Some(session) = e.session.clone() {
+                        os.open_session_close(&session);
+                    }
                 }
             }
             KeyResult::Consumed
