@@ -7,8 +7,10 @@ from earlier phases.
 
 Legend: ✅ done · 🚧 in progress · ⬜ not started
 
-> **Phases 1 and 2 are complete.** The next phase to start is Phase 3 (hooks),
-> which builds on the daemon/session foundation from Phase 2.
+> **Phases 1–6 are complete.** Phase 7 (hardening & interactive QA) is in
+> progress; the parity campaign (see plan-26f58d39a48a4a71.md) continues
+> with the message-pump architecture, app overlays, sidebar, session/daemon
+> completion, and the remaining subsystems.
 
 ## Phase 1 — Scrollback & copy UX (self-contained, high value)
 
@@ -48,29 +50,45 @@ exchange raw bytes (see `docs/DAEMON.md`).
 
 ## Phase 3 — Hooks
 
-- ⬜ Lifecycle hooks (session start, window spawn/close, mode change) running
+- ✅ Lifecycle hooks (session start, window spawn/close, mode change) running
   user-configured commands; port `internal/hooks`.
 
 ## Phase 4 — Tape scripting
 
-- ⬜ Record a window's output to a tape; replay/seek; port `internal/tape`
+- ✅ Record a window's output to a tape; replay/seek; port `internal/tape`
   (parser + command format).
 
 ## Phase 5 — Graphics passthrough
 
-- ⬜ Kitty graphics protocol (APC passthrough, placement/queries, z-index).
-- ⬜ Sixel decoding to cell grids.
-- ⬜ Image protocol config + interplay with scrollback and selection.
+- ✅ Kitty graphics protocol (APC passthrough, placement/queries, z-index).
+- ✅ Sixel decoding to cell grids.
+- ✅ Image protocol config + interplay with scrollback and selection.
 
 ## Phase 6 — Network modes
 
-- ⬜ SSH server mode (attach a session over SSH).
-- ⬜ Web server mode (render + forward I/O over WebSocket).
+- ✅ SSH server mode (attach a session over SSH).
+  - `src/network/ssh.rs`: russh server with terminal handle, render loop,
+    SSH input parsing (CSI sequences, modifier keys, function keys),
+    kitty/sixel detection, session picker.
+  - Client sessions get fresh `Os` with independent windows/workspaces.
+  - Render loop: Os state → `CrosstermBackend<Vec<u8>>` → `TerminalHandle` → SSH channel.
+  - Input loop: SSH channel bytes → `parse_ssh_input()` → `handle_key()`.
+- ✅ Web server mode (render + forward I/O over WebSocket).
+  - `src/network/web.rs`: axum HTTP server, tokio-tungstenite WebSocket.
+  - Static HTML page with xterm.js frontend (`src/network/web/index.html`).
+  - Render loop: Os state → `CrosstermBackend<Vec<u8>>` → ANSI → JSON frames → WebSocket.
+  - Input loop: WebSocket JSON frames → `parse_web_input()` → `handle_key()`.
+  - Supports resize events from the frontend.
+  - 7 unit tests for web input parsing (ctrl+letter, arrows, function keys, etc.).
 
 ## Phase 7 — Hardening & interactive QA
 
-- ⬜ Interactive QA in a real terminal across the palette, switcher, scrollback,
-  selection, and mouse flows.
-- ⬜ VT conformance expansion (VTE/escape-test suites), fuzzing the parser.
-- ⬜ Performance: frame-budget tuning, dirty-region rendering, scrollback
-  reflow under resize.
+- 🚧 Interactive QA in a real terminal across the palette, switcher, scrollback,
+  selection, and mouse flows. (Palette/theme picker exercised; the structured
+  scrollback browser and switcher overlays are part of the parity campaign.)
+- 🚧 VT conformance expansion (VTE/escape-test suites), fuzzing the parser.
+  (Conformance tests exist; structured fuzzing targets are part of the parity
+  campaign.)
+- 🚧 Performance: frame-budget tuning, dirty-region rendering, scrollback
+  reflow under resize. (Frame-budget loop in place; dirty-region rendering and
+  benchmark baselines are part of the parity campaign.)
