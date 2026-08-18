@@ -34,6 +34,8 @@ pub struct Window {
     pub agent_message: String,
     /// The harness id the last agent report named.
     pub agent_harness: String,
+    /// Memoised shell working-directory read (per-window).
+    pub cwd_cache: super::cwd::CwdCache,
 }
 
 impl Window {
@@ -71,6 +73,7 @@ impl Window {
             agent_state: String::new(),
             agent_message: String::new(),
             agent_harness: String::new(),
+            cwd_cache: super::cwd::CwdCache::new(),
             last_size: None,
             zoomed: false,
             pre_zoom_x: 0,
@@ -107,6 +110,7 @@ impl Window {
             agent_state: String::new(),
             agent_message: String::new(),
             agent_harness: String::new(),
+            cwd_cache: super::cwd::CwdCache::new(),
             last_size: None,
             zoomed: false,
             pre_zoom_x: 0,
@@ -132,6 +136,7 @@ impl Window {
             agent_state: String::new(),
             agent_message: String::new(),
             agent_harness: String::new(),
+            cwd_cache: super::cwd::CwdCache::new(),
             last_size: None,
             zoomed: false,
             pre_zoom_x: 0,
@@ -177,6 +182,11 @@ impl Window {
 
     pub fn close(&mut self) {
         self.exited = true;
+    }
+
+    /// The shell's working directory, or empty when unknown.
+    pub fn cwd(&self) -> String {
+        self.cwd_cache.get(self.pid().unwrap_or(0))
     }
 }
 

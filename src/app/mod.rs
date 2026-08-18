@@ -3047,7 +3047,13 @@ impl Os {
                             .find(|l| !l.trim().is_empty())
                     })
                     .unwrap_or_default();
-                items.push((ws, idx, window.title.clone(), preview));
+                let cwd = window.cwd();
+                let detail = if cwd.is_empty() {
+                    preview
+                } else {
+                    format!("[{}] {}", cwd, preview)
+                };
+                items.push((ws, idx, window.title.clone(), detail));
             }
         }
         items
