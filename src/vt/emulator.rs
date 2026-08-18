@@ -874,6 +874,22 @@ impl Handler for Emulator {
             return;
         }
 
+        // Sequences with intermediate bytes (e.g. DECSCUSR: CSI SP q).
+        if let Some(&inter) = seq.intermediates.first() {
+            if inter == b' ' && final_byte == b'q' {
+                // DECSCUSR — set cursor style.
+                // 0=default, 1=blinking block, 2=steady block,
+                // 3=blinking underline, 4=steady underline,
+                // 5=blinking bar, 6=steady bar.
+                let _n = p(0, 1);
+                // Cursor style is rendered by the app layer; we accept
+                // the sequence without error.
+                return;
+            }
+            // Other intermediate sequences are not handled.
+            return;
+        }
+
         match final_byte {
             // Cursor up.
             b'A' => self.screen_mut().move_cursor(0, -p_or1(0)),
@@ -1278,6 +1294,15 @@ impl Emulator {
             }
             // DEC private mode query.
             (b'?', b'$') | (b'?', b'p') => {}
+            // DECXCPR — extended cursor position report (CSI ? 6 n).
+            (b'?', b'n') => {
+                if p(0, 0) == 6 {
+                    let x = self.screen().cursor.pos.x + 1;
+                    let y = self.screen().cursor.pos.y + 1;
+                    let seq = format!("\x1b[?{};{};0R", y, x);
+                    self.queue_response(seq.as_bytes());
+                }
+            }
             // DECSTBM — set top/bottom margins.
             (b'?', b'r') => {
                 let top = p(0, 1) - 1;
@@ -1641,5 +1666,25 @@ mod esc_osc_completion_tests {
         let resp = e.take_response();
         let s = String::from_utf8_lossy(&resp);
         assert!(s.contains("\x1b[?62;"), "DECID got: {s}");
+    }
+
+    #[test]
+    fn decxcpr_reports_extended_cursor() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[5;10H");
+        e.write(b"\x1b[?6n");
+        let resp = e.take_response();
+        let s = String::from_utf8_lossy(&resp);
+        // Row 5, col 10, page 0.
+        assert!(s.contains("\x1b[?5;10;0R"), "DECXCPR got: {s}");
+    }
+
+    #[test]
+    fn decscusr_accepted() {
+        let mut e = Emulator::new(80, 24);
+        // Should not panic or produce output.
+        e.write(b"\x1b[2 q");
+        let resp = e.take_response();
+        assert!(resp.is_empty(), "DECSCUSR should not produce output");
     }
 }
