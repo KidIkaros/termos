@@ -759,12 +759,6 @@ fn render_context_menu(buf: &mut Buffer, area: TuiRect, menu: &ContextMenu) {
     let height = menu.items.len() as u16 + 2;
     let x = (menu.x as u16).min(area.width.saturating_sub(width));
     let y = (menu.y as u16).min(area.height.saturating_sub(height));
-    let rect = TuiRect {
-        x,
-        y,
-        width,
-        height,
-    };
     // Border.
     for cx in x..x + width {
         buf[(cx, y)].set_char('─');
