@@ -11,7 +11,7 @@
 //! watch the same session at once.
 
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, BufRead, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
+use serde_json::Value;
 
 use crate::terminal::pty::{spawn_pty, PtyHandle, PtyWriter, WinSize};
 
@@ -26,6 +27,11 @@ use super::manager::Manager;
 use super::model::{Session, SessionConfig, WindowInfo, WindowState};
 use super::persistence;
 use super::protocol::{self, Message, VERSION};
+use super::verb::{
+    VerbError, VerbRegistry, VerbRequest, VerbResponse, ERR_COMMAND_FAILED, ERR_INVALID_PARAMS,
+    ERR_INVALID_REQUEST, ERR_OPTION_NOT_FOUND, ERR_SESSION_NOT_FOUND, ERR_TIMEOUT,
+    ERR_UNKNOWN_VERB, ERR_WINDOW_NOT_FOUND, MIN_VERB_PROTOCOL_VERSION, VERB_PROTOCOL_VERSION,
+};
 
 /// The default Unix socket path.
 pub fn default_socket_path() -> PathBuf {
@@ -522,6 +528,189 @@ impl Daemon {
         }
     }
 
+    /// Dispatch one verb-protocol request with daemon state access.
+    ///
+    /// Verbs that touch daemon state (`list-sessions`, `capture-pane`,
+    /// `set-agent-state`, ...) are answered here from the live session
+    /// registry; the remaining documented verbs fall through to the static
+    /// registry, which knows their schemas and examples.
+    pub fn dispatch_verb(&self, req: &VerbRequest) -> VerbResponse {
+        let id = req.id.clone();
+        let params = req.params.clone().unwrap_or(Value::Null);
+        match self.try_verb(&req.verb, &params) {
+            Ok(result) => VerbResponse::ok(id, result),
+            Err(e) => VerbResponse::err(id, e),
+        }
+    }
+
+    /// The daemon-aware verb handlers. Unknown or purely-documented verbs
+    /// delegate to the static [`VerbRegistry`].
+    fn try_verb(&self, verb: &str, params: &Value) -> Result<Value, VerbError> {
+        match verb {
+            "hello" => Ok(serde_json::json!({
+                "daemon": "termos",
+                "version": VERSION,
+                "protocol": "verb",
+                "protocol_version": VERB_PROTOCOL_VERSION,
+                "min_version": MIN_VERB_PROTOCOL_VERSION,
+            })),
+            "list-sessions" => {
+                let sessions = self.list_infos();
+                Ok(serde_json::json!({ "sessions": sessions }))
+            }
+            "list-windows" => {
+                let name = verb_session(params)?;
+                let windows = self.windows.lock().unwrap();
+                let wins = windows.get(&name).ok_or_else(|| {
+                    verb_error(ERR_SESSION_NOT_FOUND, format!("session '{name}' not found"))
+                })?;
+                let infos: Vec<WindowInfo> = wins.iter().map(|w| w.info.clone()).collect();
+                Ok(serde_json::json!({ "windows": infos }))
+            }
+            "new-window" => {
+                let name = verb_session(params)?;
+                let shell = verb_param(params, "shell").unwrap_or_else(|| "/bin/sh".to_string());
+                let workspace = verb_param(params, "workspace")
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or(1);
+                let info = self
+                    .add_window(&name, &shell, workspace)
+                    .map_err(|e| verb_error(ERR_COMMAND_FAILED, e))?;
+                Ok(serde_json::json!({ "window": info }))
+            }
+            "close-window" => {
+                let name = verb_session(params)?;
+                let window = verb_param(params, "window");
+                let target = self
+                    .resolve_window(&name, window.as_deref())
+                    .map_err(|e| verb_error(ERR_WINDOW_NOT_FOUND, e))?;
+                self.close_window(&name, &target)
+                    .map_err(|e| verb_error(ERR_COMMAND_FAILED, e))?;
+                Ok(serde_json::json!({ "closed": true }))
+            }
+            "send-keys" | "send-text" => {
+                let name = verb_session(params)?;
+                let window = verb_param(params, "window");
+                let text = verb_param(params, "text")
+                    .or_else(|| verb_param(params, "keys"))
+                    .ok_or_else(|| verb_error(ERR_INVALID_PARAMS, "missing text/keys parameter"))?;
+                self.write_input_to(&name, window.as_deref(), text.as_bytes())
+                    .map_err(|e| verb_error(ERR_COMMAND_FAILED, e))?;
+                Ok(serde_json::json!({ "sent": text }))
+            }
+            "capture-pane" => {
+                let name = verb_session(params)?;
+                let window = verb_param(params, "window");
+                let (target, content) = self
+                    .capture_pane(&name, window.as_deref())
+                    .map_err(|e| verb_error(ERR_COMMAND_FAILED, e))?;
+                Ok(serde_json::json!({ "window": target, "content": content }))
+            }
+            "resize" => {
+                let name = verb_session(params)?;
+                let window = verb_param(params, "window");
+                let cols = verb_param(params, "cols")
+                    .and_then(|s| s.parse::<u16>().ok())
+                    .ok_or_else(|| verb_error(ERR_INVALID_PARAMS, "missing cols parameter"))?;
+                let rows = verb_param(params, "rows")
+                    .and_then(|s| s.parse::<u16>().ok())
+                    .ok_or_else(|| verb_error(ERR_INVALID_PARAMS, "missing rows parameter"))?;
+                let target = self
+                    .resolve_window(&name, window.as_deref())
+                    .map_err(|e| verb_error(ERR_WINDOW_NOT_FOUND, e))?;
+                self.resize(&name, &target, cols, rows);
+                Ok(serde_json::json!({ "resized": true }))
+            }
+            "kill-session" => {
+                let name = verb_session(params)?;
+                self.kill(&name)
+                    .map_err(|e| verb_error(ERR_COMMAND_FAILED, e))?;
+                Ok(serde_json::json!({ "killed": name }))
+            }
+            "set-agent-state" => {
+                let name = verb_session(params)?;
+                let window = verb_param(params, "window");
+                let state = verb_param(params, "state").unwrap_or_default();
+                let message = verb_param(params, "message").unwrap_or_default();
+                let harness = verb_param(params, "harness").unwrap_or_default();
+                let target = self
+                    .set_agent_state(&name, window.as_deref(), &state, &message, &harness)
+                    .map_err(|e| verb_error(ERR_COMMAND_FAILED, e))?;
+                Ok(serde_json::json!({ "window": target, "state": state }))
+            }
+            "get-agent-state" => {
+                let name = verb_session(params)?;
+                let window = verb_param(params, "window");
+                let (target, state, message, harness) = self
+                    .get_agent_state(&name, window.as_deref())
+                    .map_err(|e| verb_error(ERR_WINDOW_NOT_FOUND, e))?;
+                Ok(serde_json::json!({
+                    "window": target,
+                    "state": state,
+                    "message": message,
+                    "harness": harness,
+                }))
+            }
+            "wait-for" => {
+                let name = verb_session(params)?;
+                let window = verb_param(params, "window");
+                let pattern = verb_param(params, "pattern").unwrap_or_default();
+                let timeout_ms = verb_param(params, "timeout")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(30_000);
+                match self.wait_for(&name, window.as_deref(), &pattern, timeout_ms) {
+                    Ok((target, matched)) if matched => Ok(serde_json::json!({
+                        "window": target,
+                        "matched": true,
+                    })),
+                    Ok((_, _)) => Err(verb_error(
+                        ERR_TIMEOUT,
+                        "condition did not match before timeout",
+                    )),
+                    Err(e) => Err(verb_error(ERR_COMMAND_FAILED, e)),
+                }
+            }
+            "list-verbs" => {
+                let registry = VerbRegistry::new();
+                let filter = verb_param(params, "verb");
+                Ok(registry.list_verbs(filter.as_deref()))
+            }
+            "set-option" | "get-option" => Err(verb_error(
+                ERR_OPTION_NOT_FOUND,
+                "option storage is not implemented in this port",
+            )),
+            "session-info"
+            | "set-session-name"
+            | "set-session-accent"
+            | "set-workspace-name"
+            | "explain-agent-screen"
+            | "subscribe"
+            | "unsubscribe" => {
+                // Fall through to the registry, which documents them.
+                self.registry_dispatch(verb, params)
+            }
+            _ => self.registry_dispatch(verb, params),
+        }
+    }
+
+    /// Delegate a verb to the static registry (documentation, list-verbs,
+    /// hello, and the verbs without daemon state).
+    fn registry_dispatch(&self, verb: &str, params: &Value) -> Result<Value, VerbError> {
+        let registry = VerbRegistry::new();
+        let req = VerbRequest {
+            id: None,
+            verb: verb.to_string(),
+            params: Some(params.clone()),
+        };
+        match registry.dispatch(&req) {
+            VerbResponse {
+                result: Some(r), ..
+            } => Ok(r),
+            VerbResponse { error: Some(e), .. } => Err(e),
+            _ => Err(verb_error(ERR_UNKNOWN_VERB, format!("unknown verb {verb}"))),
+        }
+    }
+
     fn add_window(&self, session: &str, shell: &str, workspace: i32) -> Result<WindowInfo, String> {
         let mut windows = self.windows.lock().unwrap();
         let wins = windows
@@ -672,16 +861,89 @@ impl Default for Daemon {
 /// Reads and writes use separate handles so the request loop can block on a
 /// read without holding the write lock that the broadcast-forwarding threads
 /// need.
+/// Extract a string parameter from a verb request's params object.
+fn verb_param(params: &Value, name: &str) -> Option<String> {
+    params
+        .get(name)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// The session a verb targets: the `session` param, else the daemon's single
+/// attached session.
+fn verb_session(params: &Value) -> Result<String, VerbError> {
+    if let Some(name) = verb_param(params, "session") {
+        return Ok(name);
+    }
+    Err(verb_error(ERR_INVALID_PARAMS, "missing session parameter"))
+}
+
+/// Build a `VerbError` with the given stable code and message.
+fn verb_error(code: &str, message: impl Into<String>) -> VerbError {
+    VerbError::new(code, message)
+}
+
+/// Serve one connection speaking the line-delimited JSON verb protocol:
+/// read a request line, dispatch it with daemon state access, write one
+/// response line. Blocks until the client disconnects.
+fn handle_verb_client<R: BufRead>(
+    mut reader: R,
+    writer: &Arc<Mutex<UnixStream>>,
+    daemon: &Arc<Daemon>,
+) {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => return, // EOF or connection gone
+            Ok(_) => {}
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let response = match serde_json::from_str::<VerbRequest>(trimmed) {
+            Ok(req) => daemon.dispatch_verb(&req),
+            Err(e) => VerbResponse::err(
+                None,
+                verb_error(ERR_INVALID_REQUEST, format!("malformed JSON request: {e}")),
+            ),
+        };
+        let mut out = writer.lock().unwrap();
+        if out.write_all(response.to_line().as_bytes()).is_err() {
+            return;
+        }
+        if out.flush().is_err() {
+            return;
+        }
+    }
+}
+
 fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
-    let mut reader = match stream.try_clone() {
+    let reader = match stream.try_clone() {
         Ok(r) => r,
         Err(_) => return,
     };
     let writer = Arc::new(Mutex::new(stream));
+    let mut buf_reader = io::BufReader::new(reader);
+
+    // Detect a JSON verb-protocol client by its first byte: `{` or leading
+    // whitespace. A binary client's first byte is the high byte of a
+    // big-endian length prefix (0x00/0x01 for sub-16MB frames), which never
+    // collides with `{` or whitespace.
+    let first = buf_reader.fill_buf().ok().and_then(|b| b.first().copied());
+    if matches!(
+        first,
+        Some(b'{') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
+    ) {
+        handle_verb_client(buf_reader, &writer, &daemon);
+        return;
+    }
+
     // (session name, subscriber id, stop flag for the forward thread).
     let mut attached: Option<(String, u64, Arc<AtomicBool>)> = None;
 
-    while let Ok(msg) = protocol::read_message(&mut reader) {
+    while let Ok(msg) = protocol::read_message(&mut buf_reader) {
         match msg {
             Message::Hello { .. } => {
                 let sessions = daemon.list_infos();
@@ -1167,5 +1429,123 @@ mod tests {
         assert!(Arc::ptr_eq(&b1, &b2));
         let b3 = d.broadcast_for("s2");
         assert!(!Arc::ptr_eq(&b1, &b3));
+    }
+}
+
+#[cfg(test)]
+mod verb_tests {
+    use super::*;
+    use crate::session::verb::VerbRegistry;
+
+    fn req(verb: &str, params: serde_json::Value) -> VerbRequest {
+        VerbRequest {
+            id: Some(serde_json::json!(1)),
+            verb: verb.to_string(),
+            params: Some(params),
+        }
+    }
+
+    fn call(d: &Daemon, verb: &str, params: serde_json::Value) -> VerbResponse {
+        d.dispatch_verb(&req(verb, params))
+    }
+
+    #[test]
+    fn hello_reports_protocol_version() {
+        let d = Daemon::new();
+        let resp = call(&d, "hello", serde_json::json!({}));
+        assert!(resp.error.is_none());
+        let r = resp.result.unwrap();
+        assert_eq!(r["protocol"], "verb");
+        assert_eq!(r["daemon"], "termos");
+        assert!(r["protocol_version"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn list_sessions_empty() {
+        let d = Daemon::new();
+        let resp = call(&d, "list-sessions", serde_json::json!({}));
+        let r = resp.result.unwrap();
+        assert_eq!(r["sessions"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn list_verbs_delegates_to_registry() {
+        let d = Daemon::new();
+        let resp = call(&d, "list-verbs", serde_json::json!({}));
+        assert!(resp.error.is_none());
+        let r = resp.result.unwrap();
+        let verbs = r["verbs"].as_array().unwrap();
+        assert!(!verbs.is_empty());
+        // The registry documents every verb the daemon also answers.
+        let names: Vec<String> = verbs
+            .iter()
+            .map(|v| v["verb"].as_str().unwrap().to_string())
+            .collect();
+        for expected in [
+            "hello",
+            "list-sessions",
+            "capture-pane",
+            "set-agent-state",
+            "wait-for",
+        ] {
+            assert!(names.contains(&expected.to_string()), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn unknown_verb_returns_error_envelope() {
+        let d = Daemon::new();
+        let resp = call(&d, "frobnicate", serde_json::json!({}));
+        let e = resp.error.unwrap();
+        assert_eq!(e.code, crate::session::verb::ERR_UNKNOWN_VERB);
+    }
+
+    #[test]
+    fn malformed_verb_is_invalid_request() {
+        let d = Daemon::new();
+        let resp = d.dispatch_verb(&VerbRequest {
+            id: None,
+            verb: String::new(),
+            params: None,
+        });
+        let e = resp.error.unwrap();
+        assert_eq!(e.code, crate::session::verb::ERR_INVALID_REQUEST);
+    }
+
+    #[test]
+    fn capture_pane_missing_session_is_error() {
+        let d = Daemon::new();
+        let resp = call(&d, "capture-pane", serde_json::json!({}));
+        assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn get_option_not_implemented() {
+        let d = Daemon::new();
+        let resp = call(&d, "get-option", serde_json::json!({ "option": "theme" }));
+        let e = resp.error.unwrap();
+        assert_eq!(e.code, crate::session::verb::ERR_OPTION_NOT_FOUND);
+    }
+
+    #[test]
+    fn verb_registry_standalone_still_works() {
+        // The static registry answers list-verbs without any daemon.
+        let registry = VerbRegistry::new();
+        let resp = registry.dispatch(&VerbRequest {
+            id: None,
+            verb: "list-verbs".into(),
+            params: None,
+        });
+        assert!(resp.result.is_some());
+    }
+
+    #[test]
+    fn response_round_trips_as_json_line() {
+        let d = Daemon::new();
+        let resp = call(&d, "hello", serde_json::json!({}));
+        let line = resp.to_line();
+        assert!(line.ends_with('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(parsed["result"]["protocol"], "verb");
     }
 }
