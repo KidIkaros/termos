@@ -103,7 +103,7 @@ mod tests {
         let cache = CwdCache::new();
         cache.get(i32::MAX);
         cache.clear();
-        let mut entry = cache.inner.lock().unwrap();
+        let entry = cache.inner.lock().unwrap();
         assert!(entry.value.is_empty());
         assert!(entry.fetched_at.is_none());
     }
