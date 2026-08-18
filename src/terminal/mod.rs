@@ -1,6 +1,7 @@
 //! PTY management and the terminal window — ported from TUIOS
 //! `internal/terminal`.
 
+pub mod cwd;
 pub mod pty;
 pub mod window;
 

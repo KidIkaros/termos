@@ -288,11 +288,7 @@ impl Daemon {
         let size = WinSize { cols: 80, rows: 24 };
         let argv = vec![shell.to_string()];
         // Advertise TermOS to the pane so agents can detect the environment.
-        let env = vec![
-            ("TERMOS_ENV".to_string(), "1".to_string()),
-            ("TERMOS_SESSION_ID".to_string(), session.to_string()),
-            ("TERMOS_WINDOW_ID".to_string(), id.to_string()),
-        ];
+        let env = crate::util::guestenv::base_guest_env(session, id, false, false);
         let (writer, handle, reader) =
             spawn_pty(size, &argv, Box::new(|| {}), &env).map_err(|e| e.to_string())?;
         // Pump this window's PTY output into the session's broadcast hub and

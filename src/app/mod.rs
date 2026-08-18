@@ -1847,7 +1847,7 @@ impl Os {
         let index = self.windows.len();
         let id = format!("win-{index}");
         let size = WinSize { cols: 80, rows: 24 };
-        let env = vec![("TERMOS_ENV".to_string(), "1".to_string())];
+        let env = crate::util::guestenv::base_guest_env("local", &id, false, false);
         let window = Window::spawn(id, "Terminal", size, shell, None, wake, &env)
             .map_err(|e| e.to_string())?;
         self.windows.push(window);
