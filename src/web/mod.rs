@@ -335,6 +335,28 @@ impl EphemeralSessions {
     }
 }
 
+// ─── Transport Security ──────────────────────────────────────────────────
+
+/// Check whether a bind address is loopback (localhost or 127.x.x.x).
+pub fn is_loopback_host(host: &str) -> bool {
+    host == "localhost" || host == "127.0.0.1" || host == "::1" || host.starts_with("127.")
+}
+
+/// Check whether the server should refuse to start without TLS.
+///
+/// Non-loopback addresses require TLS to prevent credential exposure on the
+/// network. Returns an error message if TLS is required but not configured.
+pub fn check_transport_security(host: &str, tls_enabled: bool) -> Result<(), String> {
+    if !tls_enabled && !is_loopback_host(host) {
+        return Err(format!(
+            "Refusing to serve without TLS on non-loopback address {host}.\n\
+             Use --auto-tls or provide --cert and --key files.\n\
+             For local testing, bind to 127.0.0.1 or localhost."
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,5 +482,33 @@ mod tests {
         assert!(!ephem.is_ephemeral("nonexistent"));
         assert_eq!(ephem.client_count("nonexistent"), 0);
         assert!(!ephem.detach("nonexistent"));
+    }
+
+    #[test]
+    fn is_loopback_checks() {
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("127.0.1.1"));
+        assert!(is_loopback_host("::1"));
+        assert!(!is_loopback_host("0.0.0.0"));
+        assert!(!is_loopback_host("192.168.1.1"));
+        assert!(!is_loopback_host("example.com"));
+    }
+
+    #[test]
+    fn transport_security_loopback_ok() {
+        assert!(check_transport_security("localhost", false).is_ok());
+        assert!(check_transport_security("127.0.0.1", false).is_ok());
+    }
+
+    #[test]
+    fn transport_security_non_loopback_requires_tls() {
+        assert!(check_transport_security("0.0.0.0", false).is_err());
+        assert!(check_transport_security("192.168.1.1", false).is_err());
+    }
+
+    #[test]
+    fn transport_security_non_loopback_with_tls_ok() {
+        assert!(check_transport_security("0.0.0.0", true).is_ok());
     }
 }
