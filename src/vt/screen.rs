@@ -274,6 +274,14 @@ impl ScreenBuffer {
         self.clear();
     }
 
+    /// Clear scrollback and screen (ED 3).
+    pub fn clear_scrollback(&mut self) {
+        if self.has_scrollback {
+            self.scrollback.clear();
+        }
+        self.clear();
+    }
+
     // -----------------------------------------------------------------------
     // Cursor movement
     // -----------------------------------------------------------------------

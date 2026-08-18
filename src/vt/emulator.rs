@@ -899,7 +899,8 @@ impl Handler for Emulator {
             b'J' => match p(0, 0) {
                 0 => self.screen_mut().clear_to_end_of_screen(),
                 1 => self.screen_mut().clear_from_start_of_screen(),
-                2 | 3 => self.screen_mut().clear_screen(),
+                2 => self.screen_mut().clear_screen(),
+                3 => self.screen_mut().clear_scrollback(),
                 _ => {}
             },
             // Erase line.
@@ -1554,5 +1555,15 @@ mod esc_osc_completion_tests {
         assert_eq!(e.gsingle, 2);
         e.write(b"\x1bc");
         assert_eq!(e.gsingle, 0);
+    }
+
+    #[test]
+    fn ed3_clears_scrollback() {
+        let mut e = Emulator::new(80, 3);
+        // Fill lines to push content into scrollback.
+        e.write(b"line1\nline2\nline3\nline4\nline5");
+        assert!(e.scrollback_len() > 0, "scrollback should have content");
+        e.write(b"\x1b[3J");
+        assert_eq!(e.scrollback_len(), 0, "ED 3 should clear scrollback");
     }
 }
