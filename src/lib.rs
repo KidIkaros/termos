@@ -32,6 +32,7 @@ pub mod terminal;
 pub mod ui;
 pub mod util;
 pub mod vt;
+pub mod web;
 
 pub use layout::{BSPTree, Rect};
 pub use vt::Emulator;
