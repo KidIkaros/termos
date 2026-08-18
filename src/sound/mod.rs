@@ -155,9 +155,7 @@ pub fn resolve_players() -> Vec<&'static str> {
 
 /// Play a WAV with one player, bounded by a timeout.
 fn play_with(player: &str, wav: &[u8]) -> bool {
-    let dir = match std::env::temp_dir().join(format!("termos-sound-{}", std::process::id())) {
-        d => d,
-    };
+    let dir = std::env::temp_dir().join(format!("termos-sound-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join(format!("{}.wav", player));
     let Ok(mut f) = std::fs::File::create(&path) else {
