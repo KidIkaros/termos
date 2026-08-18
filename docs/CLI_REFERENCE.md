@@ -85,6 +85,61 @@ Delete a saved tape. Accepts `foo` or `foo.tape`.
 
 Print the tape storage directory.
 
+### `tuios resurrect [SESSION]`
+
+Restore saved session(s) from disk. With a name, restores that session;
+without, restores all saved sessions.
+
+### `tuios start-server`
+
+Alias for `tuios daemon`.
+
+### `tuios kill-server`
+
+Stop the running daemon.
+
+### `tuios session-info [SESSION]`
+
+Show session details: window count, creation time, attached/restored status.
+
+### `tuios list-windows [SESSION]`
+
+Show window count for a session.
+
+### `tuios set-session-name <SESSION> <NAME>`
+
+Set a session's display label.
+
+### `tuios set-session-accent <SESSION> <ACCENT>`
+
+Set a session's accent color.
+
+### `tuios logs`
+
+Show the daemon log.
+
+### `tuios layout <list|delete|dir>`
+
+Manage saved layouts:
+- `list`: list saved layout names
+- `delete <NAME>`: delete a saved layout
+- `dir`: print the layout storage directory
+
+### `tuios config <show|path|edit|reset|validate>`
+
+Config management:
+- `show`: print the current config
+- `path`: print the config file path
+- `edit`: open the config in `$EDITOR`/`$VISUAL` (default: vi)
+- `reset`: write the default config to the config path
+- `validate`: check config for errors and warnings
+
+### `tuios keybinds <list|describe>`
+
+Keybind reference:
+- `list`: list all keybindings
+- `describe <ACTION>`: describe a specific action or key
+
 ## Network Modes (requires `--features network`)
 
 ### `tuios --network ssh --host-key <PATH> [--addr <ADDR>]`

@@ -85,7 +85,7 @@ proptest! {
         }
 
         let layout = tree.apply_layout(b, 0);
-        for (_id, r) in layout.values() {
+        for r in layout.values() {
             prop_assert!(r.w > 0 && r.h > 0, "zero-area rect: {:?}", r);
             prop_assert!(
                 r.x + r.w <= width && r.y + r.h <= height,
@@ -109,7 +109,7 @@ proptest! {
             tree.insert_window(i, i - 1, SplitType::Vertical, 0.5, b, 0);
         }
         let layout = tree.apply_layout(b, gap);
-        for (_id, r) in layout.values() {
+        for r in layout.values() {
             prop_assert!(r.w > 0, "zero-width with gap={}: {:?}", gap, r);
             prop_assert!(r.h > 0, "zero-height with gap={}: {:?}", gap, r);
             prop_assert!(

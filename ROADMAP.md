@@ -1,16 +1,21 @@
 # TermOS Rust port — roadmap
 
-Everything not yet shipped, organized into phases by dependency, value, and
-risk. Each phase is independently shippable and leaves the crate building,
-tested, and runnable. Phases are ordered so later work builds on primitives
-from earlier phases.
+The Rust port of TUIOS has reached feature-surface parity with the Go
+reference. All 14 phases of the parity campaign are complete.
 
 Legend: ✅ done · 🚧 in progress · ⬜ not started
 
-> **Phases 1–6 are complete.** Phase 7 (hardening & interactive QA) is in
-> progress; the parity campaign (see plan-26f58d39a48a4a71.md) continues
-> with the message-pump architecture, app overlays, sidebar, session/daemon
-> completion, and the remaining subsystems.
+> **All phases 0–14 are complete.** The parity campaign
+> (plan-26f58d39a48a4a71.md) delivered: message-pump architecture, app
+> overlays, sidebar, session/daemon completion, VT completion (CSI/ESC/OSC/C1/
+> DA/DSR/DECRQM/kitty keyboard), web/mobile (auto-TLS, touch, transport
+> security), SSH server (caps, session picker, HostCapabilities), CLI parity
+> (config edit/reset, resurrect, session/window/layout commands), testing
+> (proptests for VT/BSP/config, daemon multi-client, protocol handlers), and
+> documentation.
+>
+> **Test suite**: 1,360+ tests passing, clippy `-D warnings` clean, release
+> build OK across default, network, and TLS feature sets.
 
 ## Phase 1 — Scrollback & copy UX (self-contained, high value)
 
