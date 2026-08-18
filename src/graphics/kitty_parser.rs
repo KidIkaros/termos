@@ -158,6 +158,8 @@ pub struct KittyCommand {
     pub rows: i32,
     pub z_index: i32,
     pub cursor_move: i32,
+    /// Whether the placement is virtual (`U=1`).
+    pub virtual_placement: bool,
     /// The decoded data (direct medium) or the decoded path/shared-memory id.
     pub payload: Vec<u8>,
 }
@@ -188,6 +190,7 @@ impl Default for KittyCommand {
             rows: 0,
             z_index: 0,
             cursor_move: 0,
+            virtual_placement: false,
             payload: Vec::new(),
         }
     }
@@ -249,10 +252,11 @@ impl KittyCommand {
                 "Y" => cmd.source_y = v.parse().unwrap_or(0),
                 "w" => cmd.source_width = v.parse().unwrap_or(0),
                 "h" => cmd.source_height = v.parse().unwrap_or(0),
-                "C" => cmd.columns = v.parse().unwrap_or(0),
+                "c" => cmd.columns = v.parse().unwrap_or(0),
                 "r" => cmd.rows = v.parse().unwrap_or(0),
                 "z" => cmd.z_index = v.parse().unwrap_or(0),
-                "c" => cmd.cursor_move = v.parse().unwrap_or(0),
+                "C" => cmd.cursor_move = v.parse().unwrap_or(0),
+                "U" => cmd.virtual_placement = v == "1",
                 _ => {}
             }
         }
@@ -337,13 +341,15 @@ mod tests {
 
     #[test]
     fn zlib_compression_and_geometry() {
-        let cmd = KittyCommand::parse("a=t,c=z,z=5,C=2,r=3,x=4,y=6");
+        let cmd = KittyCommand::parse("a=t,c=z,z=5,c=2,r=3,x=4,y=6,C=1,U=1");
         assert_eq!(cmd.compression, KittyCompression::Zlib);
         assert_eq!(cmd.z_index, 5);
         assert_eq!(cmd.columns, 2);
         assert_eq!(cmd.rows, 3);
         assert_eq!(cmd.x_offset, 4);
         assert_eq!(cmd.y_offset, 6);
+        assert_eq!(cmd.cursor_move, 1);
+        assert!(cmd.virtual_placement);
     }
 
     #[test]
