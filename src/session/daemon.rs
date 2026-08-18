@@ -127,8 +127,18 @@ impl SessionBroadcast {
 
 /// The daemon: a session registry plus each session's live windows and
 /// broadcast hubs.
+/// Per-session metadata set through the verbs (`set-session-name`,
+/// `set-session-accent`): the display label and accent colour.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SessionMeta {
+    pub display_name: String,
+    pub accent: String,
+}
+
 pub struct Daemon {
     manager: Manager,
+    /// Session labels/accents keyed by session name.
+    meta: Mutex<HashMap<String, SessionMeta>>,
     windows: Arc<Mutex<HashMap<String, Vec<LiveWindow>>>>,
     broadcast: Mutex<HashMap<String, Arc<SessionBroadcast>>>,
     /// Lifecycle hooks fired daemon-side for the window/session events the
@@ -159,6 +169,7 @@ impl Daemon {
     pub fn new() -> Self {
         Self {
             manager: Manager::new(),
+            meta: Mutex::new(HashMap::new()),
             windows: Arc::new(Mutex::new(HashMap::new())),
             broadcast: Mutex::new(HashMap::new()),
             hook_manager: crate::hooks::Manager::new(),
@@ -725,13 +736,28 @@ impl Daemon {
                 ERR_OPTION_NOT_FOUND,
                 "option storage is not implemented in this port",
             )),
-            "session-info"
-            | "set-session-name"
-            | "set-session-accent"
-            | "set-workspace-name"
-            | "explain-agent-screen"
-            | "subscribe"
-            | "unsubscribe" => {
+            "session-info" => {
+                let name = verb_session(params)?;
+                self.session_info(&name)
+                    .map_err(|e| verb_error(ERR_SESSION_NOT_FOUND, e))
+            }
+            "set-session-name" => {
+                let name = verb_session(params)?;
+                let label = verb_param(params, "name")
+                    .ok_or_else(|| verb_error(ERR_INVALID_PARAMS, "missing name parameter"))?;
+                self.set_session_label(&name, &label)
+                    .map_err(|e| verb_error(ERR_SESSION_NOT_FOUND, e))?;
+                Ok(serde_json::json!({ "renamed": name, "display_name": label }))
+            }
+            "set-session-accent" => {
+                let name = verb_session(params)?;
+                let accent = verb_param(params, "accent")
+                    .ok_or_else(|| verb_error(ERR_INVALID_PARAMS, "missing accent parameter"))?;
+                self.set_session_accent(&name, &accent)
+                    .map_err(|e| verb_error(ERR_SESSION_NOT_FOUND, e))?;
+                Ok(serde_json::json!({ "accented": name, "accent": accent }))
+            }
+            "set-workspace-name" | "explain-agent-screen" | "subscribe" | "unsubscribe" => {
                 // Fall through to the registry, which documents them.
                 self.registry_dispatch(verb, params)
             }
@@ -867,6 +893,63 @@ impl Daemon {
         self.restore_session(&state.name, state)
     }
 
+    /// Set a session's display label (`set-session-name` verb).
+    pub fn set_session_label(&self, session: &str, label: &str) -> Result<(), String> {
+        if self.manager.get(session).is_none() {
+            return Err(format!("session '{session}' not found"));
+        }
+        self.meta
+            .lock()
+            .unwrap()
+            .entry(session.to_string())
+            .or_default()
+            .display_name = label.to_string();
+        Ok(())
+    }
+
+    /// Set a session's accent colour (`set-session-accent` verb).
+    pub fn set_session_accent(&self, session: &str, accent: &str) -> Result<(), String> {
+        if self.manager.get(session).is_none() {
+            return Err(format!("session '{session}' not found"));
+        }
+        self.meta
+            .lock()
+            .unwrap()
+            .entry(session.to_string())
+            .or_default()
+            .accent = accent.to_string();
+        Ok(())
+    }
+
+    /// A session's metadata (label/accent), defaulting to empty.
+    pub fn session_meta(&self, session: &str) -> SessionMeta {
+        self.meta
+            .lock()
+            .unwrap()
+            .get(session)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// `session-info` verb: the session plus its window count and metadata.
+    pub fn session_info(&self, session: &str) -> Result<serde_json::Value, String> {
+        let s = self
+            .manager
+            .get(session)
+            .ok_or_else(|| format!("session '{session}' not found"))?;
+        let windows = self.windows.lock().unwrap();
+        let count = windows.get(session).map(|w| w.len()).unwrap_or(0);
+        let meta = self.session_meta(session);
+        Ok(serde_json::json!({
+            "name": s.name,
+            "display_name": meta.display_name,
+            "accent": meta.accent,
+            "created_at": s.created_at,
+            "restored": s.restored,
+            "windows": count,
+        }))
+    }
+
     /// The canonical [`SessionState`](crate::session::state_merge::SessionState)
     /// for a session: its windows with daemon-owned agent state, built from
     /// the live registry.
@@ -877,10 +960,11 @@ impl Daemon {
             .get(name)
             .map(|wins| wins.iter().map(|w| w.info.clone()).collect())
             .unwrap_or_default();
+        let meta = self.session_meta(name);
         crate::session::state_merge::SessionState {
             name: name.to_string(),
-            display_name: String::new(),
-            accent: String::new(),
+            display_name: meta.display_name,
+            accent: meta.accent,
             restored: false,
             resurrection_version: 0,
             windows: wins
@@ -1959,5 +2043,94 @@ mod state_tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+}
+
+#[cfg(test)]
+mod meta_tests {
+    use super::*;
+
+    fn call(d: &Daemon, verb: &str, params: serde_json::Value) -> VerbResponse {
+        d.dispatch_verb(&VerbRequest {
+            id: Some(serde_json::json!(1)),
+            verb: verb.to_string(),
+            params: Some(params),
+        })
+    }
+
+    #[test]
+    fn session_meta_round_trips() {
+        let d = Daemon::new();
+        assert!(d.manager.create("work", &SessionConfig::default()).is_ok());
+        d.set_session_label("work", "Payments API").unwrap();
+        d.set_session_accent("work", "green").unwrap();
+        let meta = d.session_meta("work");
+        assert_eq!(meta.display_name, "Payments API");
+        assert_eq!(meta.accent, "green");
+        // Unknown session meta is empty.
+        assert_eq!(d.session_meta("nope").display_name, "");
+    }
+
+    #[test]
+    fn set_label_on_missing_session_is_error() {
+        let d = Daemon::new();
+        assert!(d.set_session_label("missing", "x").is_err());
+        assert!(d.set_session_accent("missing", "red").is_err());
+    }
+
+    #[test]
+    fn session_info_verb() {
+        let d = Daemon::new();
+        assert!(d.manager.create("work", &SessionConfig::default()).is_ok());
+        let resp = call(&d, "session-info", serde_json::json!({ "session": "work" }));
+        assert!(resp.error.is_none());
+        let r = resp.result.unwrap();
+        assert_eq!(r["name"], "work");
+        assert_eq!(r["windows"], 0);
+    }
+
+    #[test]
+    fn session_info_missing_is_error() {
+        let d = Daemon::new();
+        let resp = call(&d, "session-info", serde_json::json!({ "session": "nope" }));
+        let e = resp.error.unwrap();
+        assert_eq!(e.code, crate::session::verb::ERR_SESSION_NOT_FOUND);
+    }
+
+    #[test]
+    fn set_session_name_verb() {
+        let d = Daemon::new();
+        assert!(d.manager.create("work", &SessionConfig::default()).is_ok());
+        let resp = call(
+            &d,
+            "set-session-name",
+            serde_json::json!({ "session": "work", "name": "Payments" }),
+        );
+        assert!(resp.error.is_none());
+        assert_eq!(d.session_meta("work").display_name, "Payments");
+    }
+
+    #[test]
+    fn set_session_accent_verb() {
+        let d = Daemon::new();
+        assert!(d.manager.create("work", &SessionConfig::default()).is_ok());
+        let resp = call(
+            &d,
+            "set-session-accent",
+            serde_json::json!({ "session": "work", "accent": "blue" }),
+        );
+        assert!(resp.error.is_none());
+        assert_eq!(d.session_meta("work").accent, "blue");
+    }
+
+    #[test]
+    fn state_for_session_carries_meta() {
+        let d = Daemon::new();
+        assert!(d.manager.create("work", &SessionConfig::default()).is_ok());
+        d.set_session_label("work", "Label").unwrap();
+        d.set_session_accent("work", "red").unwrap();
+        let state = d.state_for_session("work");
+        assert_eq!(state.display_name, "Label");
+        assert_eq!(state.accent, "red");
     }
 }
