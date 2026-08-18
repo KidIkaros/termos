@@ -274,6 +274,11 @@ pub struct Os {
     pub quitting: bool,
     /// Whether a quit confirmation is being shown.
     pub show_quit_confirmation: bool,
+    /// The open quit menu, if any.
+    pub quit_menu: Option<QuitMenu>,
+    /// Kill-and-quit: after the pending session kill, the client quits even
+    /// when other sessions exist.
+    pub quit_after_kill: bool,
     /// Command palette state.
     pub palette_open: bool,
     pub palette_query: String,
@@ -482,6 +487,38 @@ impl ContextMenu {
     }
 }
 
+/// What a quit-menu row does when run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitMenuKind {
+    /// Quit this client; the session keeps running (daemon mode).
+    Detach,
+    /// Close the menu and open the session switcher.
+    SwitchSession,
+    /// Kill the current session and quit this client.
+    KillAndQuit,
+    /// Quit a standalone client (no session to keep).
+    Standalone,
+    /// Close the menu and do nothing.
+    Cancel,
+}
+
+/// One row of the quit menu.
+#[derive(Debug, Clone)]
+pub struct QuitMenuItem {
+    pub label: String,
+    pub key: char,
+    pub kind: QuitMenuKind,
+    /// Destructive rows (kill) draw in the warn color when a pane is busy.
+    pub warn: bool,
+}
+
+/// The open quit menu.
+#[derive(Debug, Clone)]
+pub struct QuitMenu {
+    pub selected: usize,
+    pub items: Vec<QuitMenuItem>,
+}
+
 /// A dock notification.
 #[derive(Debug, Clone)]
 pub struct Notification {
@@ -527,6 +564,8 @@ impl Os {
             notifications: Vec::new(),
             quitting: false,
             show_quit_confirmation: false,
+            quit_menu: None,
+            quit_after_kill: false,
             palette_open: false,
             palette_query: String::new(),
             palette_selected: 0,
@@ -2754,6 +2793,105 @@ impl Os {
         self.rename_dialog = None;
     }
 
+    /// Open the quit menu, building rows from the session state (daemon vs
+    /// standalone). The first row is always the safe default.
+    pub fn open_quit_menu(&mut self) {
+        let busy = self.windows.iter().any(|w| !w.exited);
+        let items = if self.remote_session.is_some() {
+            let has_others = self
+                .remote_sessions
+                .iter()
+                .any(|s| Some(&s.name) != self.remote_session.as_ref());
+            let mut items = vec![QuitMenuItem {
+                label: "Detach — leave session running".into(),
+                key: 'D',
+                kind: QuitMenuKind::Detach,
+                warn: false,
+            }];
+            if has_others {
+                items.push(QuitMenuItem {
+                    label: "Switch session".into(),
+                    key: 'S',
+                    kind: QuitMenuKind::SwitchSession,
+                    warn: false,
+                });
+                items.push(QuitMenuItem {
+                    label: "Kill this session and quit".into(),
+                    key: 'K',
+                    kind: QuitMenuKind::KillAndQuit,
+                    warn: busy,
+                });
+            } else {
+                items.push(QuitMenuItem {
+                    label: "Kill this session and quit".into(),
+                    key: 'K',
+                    kind: QuitMenuKind::KillAndQuit,
+                    warn: busy,
+                });
+            }
+            items.push(QuitMenuItem {
+                label: "Cancel".into(),
+                key: 'C',
+                kind: QuitMenuKind::Cancel,
+                warn: false,
+            });
+            items
+        } else {
+            vec![
+                QuitMenuItem {
+                    label: "Quit".into(),
+                    key: 'Q',
+                    kind: QuitMenuKind::Standalone,
+                    warn: false,
+                },
+                QuitMenuItem {
+                    label: "Cancel".into(),
+                    key: 'C',
+                    kind: QuitMenuKind::Cancel,
+                    warn: false,
+                },
+            ]
+        };
+        self.quit_menu = Some(QuitMenu { selected: 0, items });
+    }
+
+    /// Dismiss the quit menu without running anything.
+    pub fn close_quit_menu(&mut self) {
+        self.quit_menu = None;
+    }
+
+    /// Run the selected quit-menu row. Returns `true` when the client should
+    /// quit.
+    pub fn run_quit_menu_selection(&mut self) -> bool {
+        let Some(menu) = self.quit_menu.take() else {
+            return false;
+        };
+        let Some(item) = menu.items.get(menu.selected) else {
+            return false;
+        };
+        match item.kind {
+            QuitMenuKind::Detach | QuitMenuKind::Standalone => {
+                self.quitting = true;
+                true
+            }
+            QuitMenuKind::SwitchSession => {
+                self.open_switcher(SwitcherKind::Session);
+                false
+            }
+            QuitMenuKind::KillAndQuit => {
+                if let Some(current) = self.remote_session.clone() {
+                    self.pending_kill = Some(current);
+                    self.quit_after_kill = true;
+                } else {
+                    self.quitting = true;
+                    return true;
+                }
+                false
+            }
+            QuitMenuKind::Cancel => false,
+        }
+    }
+
     /// Dismiss the context menu (also called by the next click anywhere).
     pub fn dismiss_context_menu(&mut self) {
         self.context_menu = None;
@@ -4847,5 +4985,125 @@ mod layout_picker_tests {
         os.open_switcher(SwitcherKind::Layout);
         crate::app::input::handle_key(&mut os, &key(KeyCode::Esc));
         assert!(!os.switcher_open);
+    }
+}
+
+#[cfg(test)]
+mod quit_menu_tests {
+    use super::*;
+    use crate::app::input::KeyResult;
+    use crate::config::userconfig::UserConfig;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn standalone_os() -> Os {
+        Os::new(UserConfig::default_config())
+    }
+
+    fn daemon_os() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.remote_session = Some("work".into());
+        os.remote_sessions = vec![
+            crate::session::model::SessionInfo {
+                id: "s1".into(),
+                name: "work".into(),
+                created_at: 0,
+                attached: true,
+                windows: 1,
+                restored: false,
+            },
+            crate::session::model::SessionInfo {
+                id: "s2".into(),
+                name: "play".into(),
+                created_at: 0,
+                attached: false,
+                windows: 1,
+                restored: false,
+            },
+        ];
+        os
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn standalone_menu_has_quit_and_cancel() {
+        let mut os = standalone_os();
+        os.open_quit_menu();
+        let items = os.quit_menu.as_ref().unwrap().items.clone();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].kind, QuitMenuKind::Standalone);
+        assert_eq!(items[1].kind, QuitMenuKind::Cancel);
+    }
+
+    #[test]
+    fn standalone_enter_quits() {
+        let mut os = standalone_os();
+        os.open_quit_menu();
+        let r = crate::app::input::handle_key(&mut os, &key(KeyCode::Enter));
+        assert_eq!(r, KeyResult::Quit);
+        assert!(os.quitting);
+        assert!(os.quit_menu.is_none());
+    }
+
+    #[test]
+    fn daemon_menu_first_row_is_detach() {
+        let mut os = daemon_os();
+        os.open_quit_menu();
+        let items = os.quit_menu.as_ref().unwrap().items.clone();
+        assert_eq!(items[0].kind, QuitMenuKind::Detach);
+        assert!(items.iter().any(|i| i.kind == QuitMenuKind::KillAndQuit));
+    }
+
+    #[test]
+    fn daemon_detach_quits_client() {
+        let mut os = daemon_os();
+        os.open_quit_menu();
+        let r = crate::app::input::handle_key(&mut os, &key(KeyCode::Enter));
+        assert_eq!(r, KeyResult::Quit);
+        assert!(os.quitting);
+    }
+
+    #[test]
+    fn daemon_switch_session_opens_switcher() {
+        let mut os = daemon_os();
+        os.open_quit_menu();
+        // Accelerator 'S' runs the switch-session row.
+        let r = crate::app::input::handle_key(&mut os, &key(KeyCode::Char('S')));
+        assert_eq!(r, KeyResult::Consumed);
+        assert!(os.quit_menu.is_none());
+        assert!(os.switcher_open);
+        assert_eq!(os.switcher_kind, SwitcherKind::Session);
+    }
+
+    #[test]
+    fn daemon_kill_and_quit_sets_pending() {
+        let mut os = daemon_os();
+        os.open_quit_menu();
+        let r = crate::app::input::handle_key(&mut os, &key(KeyCode::Char('K')));
+        assert_eq!(r, KeyResult::Consumed);
+        assert!(os.quit_menu.is_none());
+        assert_eq!(os.pending_kill.as_deref(), Some("work"));
+        assert!(os.quit_after_kill);
+    }
+
+    #[test]
+    fn esc_cancels() {
+        let mut os = daemon_os();
+        os.open_quit_menu();
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Esc));
+        assert!(os.quit_menu.is_none());
+        assert!(!os.quitting);
+    }
+
+    #[test]
+    fn arrow_navigation_wraps() {
+        let mut os = standalone_os();
+        os.open_quit_menu();
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Down));
+        assert_eq!(os.quit_menu.as_ref().unwrap().selected, 1);
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Down));
+        assert_eq!(os.quit_menu.as_ref().unwrap().selected, 0);
     }
 }

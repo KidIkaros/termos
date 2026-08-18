@@ -135,6 +135,14 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         render_overlay(buf, content_area, &lines, "Project tape");
     } else if os.tape_manager_open {
         render_tape_manager(os, buf, content_area);
+    } else if let Some(menu) = &os.quit_menu {
+        let mut lines: Vec<String> = Vec::new();
+        for (i, item) in menu.items.iter().enumerate() {
+            let marker = if i == menu.selected { "› " } else { "  " };
+            let warn = if item.warn { " (loses work)" } else { "" };
+            lines.push(format!("{marker}{}  [{}]{}", item.label, item.key, warn));
+        }
+        render_overlay(buf, content_area, &lines, "Quit");
     } else if os.show_quit_confirmation {
         render_overlay(
             buf,

@@ -205,6 +205,11 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         return handle_tape_manager(os, key);
     }
 
+    // The quit menu consumes its own keys.
+    if os.quit_menu.is_some() {
+        return handle_quit_menu_key(os, key);
+    }
+
     // The rename dialog consumes text input.
     if os.rename_dialog.is_some() {
         return handle_rename_dialog_key(os, key);
@@ -289,6 +294,49 @@ fn handle_rename_dialog_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
     KeyResult::Consumed
 }
 
+fn handle_quit_menu_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let Some(menu) = os.quit_menu.as_mut() {
+                let count = menu.items.len();
+                menu.selected = (menu.selected + count - 1) % count;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if let Some(menu) = os.quit_menu.as_mut() {
+                let count = menu.items.len();
+                menu.selected = (menu.selected + 1) % count;
+            }
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            if os.run_quit_menu_selection() {
+                return KeyResult::Quit;
+            }
+        }
+        KeyCode::Esc => {
+            os.close_quit_menu();
+        }
+        KeyCode::Char(c) => {
+            // Accelerators: the row whose key matches runs.
+            let run = os
+                .quit_menu
+                .as_ref()
+                .map(|m| m.items.iter().position(|item| item.key == c))
+                .flatten();
+            if let Some(idx) = run {
+                if let Some(menu) = os.quit_menu.as_mut() {
+                    menu.selected = idx;
+                }
+                if os.run_quit_menu_selection() {
+                    return KeyResult::Quit;
+                }
+            }
+        }
+        _ => {}
+    }
+    KeyResult::Consumed
+}
+
 fn handle_quit_confirmation(os: &mut Os, key: &KeyEvent) -> KeyResult {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -365,9 +413,9 @@ fn handle_window_management(os: &mut Os, key: &KeyEvent) -> KeyResult {
             os.prefix = Prefix::None;
             return KeyResult::Consumed;
         }
-        // Quit (q).
+        // Quit (q) — the quit menu (daemon-aware rows).
         KeyCode::Char('q') => {
-            os.show_quit_confirmation = true;
+            os.open_quit_menu();
             return KeyResult::Consumed;
         }
         // Next / previous window.

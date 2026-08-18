@@ -1167,8 +1167,17 @@ fn execute_kill(
     let sessions = wait_for_list(events).unwrap_or_else(|_| os.remote_sessions.clone());
     os.remote_sessions = sessions.clone();
 
+    // Kill-and-quit from the quit menu: quit the client even when other
+    // sessions exist.
+    let kill_and_quit = std::mem::take(&mut os.quit_after_kill);
+
     if target == current {
         // We killed the attached session; switch to another or quit.
+        if kill_and_quit {
+            os.remote_session = None;
+            os.notify(format!("session '{target}' killed — quitting"), "info");
+            return Ok(true);
+        }
         if let Some(next) = sessions
             .iter()
             .map(|s| s.name.clone())
