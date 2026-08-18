@@ -19,7 +19,7 @@ use std::time::Duration;
 use crate::config::userconfig::UserConfig;
 use crate::config::Theme;
 use crate::hooks;
-use crate::layout::{AutoScheme, BSPTree, PreselectionDir, Rect, SplitType};
+use crate::layout::{AutoScheme, BSPTree, PreselectionDir, Rect, SerializedBSPTree, SplitType};
 use crate::session::model::WindowInfo;
 use crate::session::protocol::Message;
 use crate::terminal::pty::{PtySink, WinSize};
@@ -331,6 +331,8 @@ pub struct Os {
     /// A pending split direction to apply when the next remote window is
     /// announced (set by split keybindings in remote mode).
     pub pending_split: Option<SplitType>,
+    /// Saved layout templates: name → serialized BSP tree.
+    pub layouts: HashMap<String, SerializedBSPTree>,
     /// Lifecycle hooks, loaded from the `[hooks]` config section.
     pub hook_manager: hooks::Manager,
     /// Agent alerts parked in their settle window, keyed by window id.
@@ -463,6 +465,7 @@ impl Os {
             pending_kill: None,
             remote_commands: None,
             pending_split: None,
+            layouts: HashMap::new(),
             hook_manager,
             pending_agent_alerts: HashMap::new(),
             sound_cue: agent_alert::SoundCue::new(),
@@ -3229,12 +3232,22 @@ impl crate::tape::executor::TapeExecutor for Os {
         Ok(())
     }
 
-    fn save_layout(&mut self, _name: &str) -> Result<(), String> {
-        Err("SaveLayout is not implemented in this port".into())
+    fn save_layout(&mut self, name: &str) -> Result<(), String> {
+        let tree = self.workspace(self.current_workspace).tree.serialize();
+        self.layouts.insert(name.to_string(), tree);
+        Ok(())
     }
 
-    fn load_layout(&mut self, _name: &str) -> Result<(), String> {
-        Err("LoadLayout is not implemented in this port".into())
+    fn load_layout(&mut self, name: &str) -> Result<(), String> {
+        if let Some(serialized) = self.layouts.get(name) {
+            let tree = BSPTree::deserialize(serialized);
+            if let Some(ws) = self.workspaces.get_mut(&self.current_workspace) {
+                ws.tree = tree;
+            }
+            Ok(())
+        } else {
+            Err(format!("Layout '{name}' not found"))
+        }
     }
 
     fn set_config(&mut self, _path: &str, _value: &str) -> Result<(), String> {

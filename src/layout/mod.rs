@@ -10,7 +10,7 @@ pub mod scrolling;
 pub mod tiling;
 
 pub use bsp::{
-    AutoScheme, BSPTree, PreselectionDir, Rect, ResizeEdge, SplitLine, SplitType, TileNode,
+    AutoScheme, BSPTree, PreselectionDir, Rect, ResizeEdge, SplitLine, SplitType, TileNode, SerializedBSPTree,
 };
 pub use scrolling::ScrollingLayout;
 pub use tiling::{calculate_tiling_layout, TileLayout};
