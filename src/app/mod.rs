@@ -4052,10 +4052,10 @@ mod tests {
                 raw: "ToggleZoom".into(),
             };
             ce.execute(&zoom_cmd).unwrap();
-            drop(ce);
-            let zoomed = os.windows[os.focused_window.unwrap()].zoomed;
-            assert!(zoomed);
         }
+        // `ce` is dropped: the app-level zoom state is observable now.
+        let zoomed = os.windows[os.focused_window.unwrap()].zoomed;
+        assert!(zoomed);
 
         assert_eq!(os.windows.len(), 2);
         assert_eq!(os.focused_window_id(), os.windows[1].id.clone().into());
