@@ -850,7 +850,7 @@ impl Handler for Emulator {
             (None, b'~') => self.gr = 1,
             // ESC Z — DECID (respond with DA1).
             (None, b'Z') => {
-                let seq = b"\x1b[?1;2c".to_vec();
+                let seq = b"\x1b[?62;1;4;6;9;15;18;22c".to_vec();
                 self.queue_response(&seq);
             }
             _ => {}
@@ -870,7 +870,7 @@ impl Handler for Emulator {
 
         // Private (DEC) sequences.
         if seq.private {
-            self.private_csi(final_byte, &params, p, p_or1);
+            self.private_csi(final_byte, seq.private_marker, &params, p, p_or1);
             return;
         }
 
@@ -954,7 +954,8 @@ impl Handler for Emulator {
             },
             // Device attributes.
             b'c' => {
-                let seq = b"\x1b[?1;2c".to_vec();
+                // DA1 — Primary Device Attributes (VT220).
+                let seq = b"\x1b[?62;1;4;6;9;15;18;22c".to_vec();
                 self.queue_response(&seq);
             }
             // Set tab stop.
@@ -1246,28 +1247,39 @@ impl Emulator {
 }
 
 impl Emulator {
-    fn private_csi<F1, F2>(&mut self, final_byte: u8, params: &[i64], p: F1, _p_or1: F2)
-    where
+    fn private_csi<F1, F2>(
+        &mut self,
+        final_byte: u8,
+        private_marker: u8,
+        params: &[i64],
+        p: F1,
+        _p_or1: F2,
+    ) where
         F1: Fn(usize, i32) -> i32,
         F2: Fn(usize) -> i32,
     {
-        match final_byte {
+        match (private_marker, final_byte) {
+            // DA2 — Secondary Device Attributes (CSI > c).
+            (b'>', b'c') => {
+                let seq = b"\x1b[>1;10;0c".to_vec();
+                self.queue_response(&seq);
+            }
             // DEC private mode set.
-            b'h' => {
+            (b'?', b'h') => {
                 for &mode in params {
                     self.set_mode(mode, true);
                 }
             }
             // DEC private mode reset.
-            b'l' => {
+            (b'?', b'l') => {
                 for &mode in params {
                     self.set_mode(mode, false);
                 }
             }
             // DEC private mode query.
-            b'$' | b'p' => {}
+            (b'?', b'$') | (b'?', b'p') => {}
             // DECSTBM — set top/bottom margins.
-            b'r' => {
+            (b'?', b'r') => {
                 let top = p(0, 1) - 1;
                 let bottom = p(1, self.height()) - 1;
                 let screen = self.screen_mut();
@@ -1277,14 +1289,12 @@ impl Emulator {
                 screen.cursor.pos.y = 0;
             }
             // DECSLRM — set left/right margins (requires DECLRMM).
-            b's' => {}
-            // DECST8C — set tab at every 8 columns. With fixed 8-column
-            // tabs this is a no-op: the tab() method always uses multiples
-            // of 8.
-            b'W' => {}
+            (b'?', b's') => {}
+            // DECST8C — set tab at every 8 columns.
+            (b'?', b'W') => {}
             // DECSCUSR — set cursor style.
-            b'q' => {}
-            b't' => {}
+            (b'?', b'q') => {}
+            (b'?', b't') => {}
             _ => {}
         }
     }
@@ -1604,5 +1614,32 @@ mod esc_osc_completion_tests {
         let s = String::from_utf8_lossy(&resp);
         // 24 rows * 20 px = 480, 80 cols * 10 px = 800
         assert!(s.contains("\x1b[4;480;800t"), "got: {s}");
+    }
+
+    #[test]
+    fn da1_reports_vt220_attributes() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[c");
+        let resp = e.take_response();
+        let s = String::from_utf8_lossy(&resp);
+        assert!(s.contains("\x1b[?62;"), "DA1 should report VT220, got: {s}");
+    }
+
+    #[test]
+    fn da2_reports_secondary_attributes() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[>c");
+        let resp = e.take_response();
+        let s = String::from_utf8_lossy(&resp);
+        assert!(s.contains("\x1b[>1;10;0c"), "DA2 got: {s}");
+    }
+
+    #[test]
+    fn decid_matches_da1() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1bZ");
+        let resp = e.take_response();
+        let s = String::from_utf8_lossy(&resp);
+        assert!(s.contains("\x1b[?62;"), "DECID got: {s}");
     }
 }

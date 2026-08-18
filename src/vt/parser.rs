@@ -62,6 +62,8 @@ pub struct CsiSequence {
     pub intermediates: Vec<u8>,
     pub final_byte: u8,
     pub private: bool,
+    /// The specific private marker byte (0 if none): `<`, `=`, `>`, or `?`.
+    pub private_marker: u8,
 }
 
 /// A parsed DCS sequence.
@@ -124,6 +126,8 @@ pub struct Parser {
     intermediates: Vec<u8>,
     /// Whether a CSI sequence is private (starts with `?`, `>`, `!`, `=`).
     private: bool,
+    /// The specific private marker byte (0 if none).
+    private_marker: u8,
     /// String-sequence (OSC/DCS/APC/PM/SOS) data.
     string_data: Vec<u8>,
     /// Raw bytes for the current string sequence.
@@ -151,6 +155,7 @@ impl Parser {
             param_has_value: false,
             intermediates: Vec::new(),
             private: false,
+            private_marker: 0,
             string_data: Vec::new(),
             string_raw: Vec::new(),
             dcs_final: 0,
@@ -285,6 +290,7 @@ impl Parser {
     fn escape<H: Handler>(&mut self, byte: u8, handler: &mut H) -> State {
         self.intermediates.clear();
         self.private = false;
+        self.private_marker = 0;
         match byte {
             0x18 | 0x1a => {
                 handler.execute(byte);
@@ -352,6 +358,7 @@ impl Parser {
         self.param_has_value = false;
         self.intermediates.clear();
         self.private = false;
+        self.private_marker = 0;
         match byte {
             0x18 | 0x1a => {
                 handler.execute(byte);
@@ -377,6 +384,7 @@ impl Parser {
             0x3c..=0x3f => {
                 // Private marker.
                 self.private = true;
+                self.private_marker = byte;
                 State::CsiParam
             }
             0x30..=0x39 => {
@@ -398,6 +406,7 @@ impl Parser {
                     intermediates: self.intermediates.clone(),
                     final_byte: byte,
                     private: self.private,
+                    private_marker: self.private_marker,
                 });
                 State::Ground
             }
@@ -428,6 +437,7 @@ impl Parser {
                     intermediates: self.intermediates.clone(),
                     final_byte: byte,
                     private: self.private,
+                    private_marker: self.private_marker,
                 });
                 State::Ground
             }
@@ -477,6 +487,7 @@ impl Parser {
                     intermediates: self.intermediates.clone(),
                     final_byte: byte,
                     private: self.private,
+                    private_marker: self.private_marker,
                 });
                 State::Ground
             }
@@ -522,6 +533,7 @@ impl Parser {
         self.param_has_value = false;
         self.intermediates.clear();
         self.private = false;
+        self.private_marker = 0;
         match byte {
             0x18 | 0x1a => {
                 handler.execute(byte);
