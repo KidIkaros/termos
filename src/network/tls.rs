@@ -41,5 +41,5 @@ fn load_private_key(
             .collect();
     keys.into_iter()
         .next()
-        .ok_or("no private key found in file")
+        .ok_or::<Box<dyn std::error::Error>>("no private key found in file".into())
 }

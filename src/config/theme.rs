@@ -152,11 +152,9 @@ pub fn themes_dir() -> Option<PathBuf> {
 
 /// Load every custom theme from `~/.config/termos/themes/*.json`.
 ///
-/// Each file must match the JSON shape:
-/// ```json
-/// { "name": "...", "foreground": "#hex", "background": "#hex",
-///   "cursor": "#hex", "ansi": ["#hex", ...16 entries...] }
-/// ```
+/// Each file must match the JSON shape: an object with `name` (string),
+/// `foreground`, `background`, `cursor` (hex color strings like `#rrggbb`),
+/// and `ansi` (an array of exactly 16 hex color strings).
 ///
 /// Invalid files log a warning and are skipped; the function never fails.
 pub fn load_custom_themes() -> Vec<Theme> {
@@ -240,7 +238,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_hex_works() {
+    fn rgb_parse() {
         assert_eq!(Rgb::parse("#1e1e2e"), Some(Rgb::new(0x1e, 0x1e, 0x2e)));
         assert_eq!(Rgb::parse("1E1E2E"), Some(Rgb::new(0x1e, 0x1e, 0x2e)));
         assert_eq!(Rgb::parse("xyz"), None);

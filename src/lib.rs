@@ -11,12 +11,15 @@
 //! - [`keys`] — key-name encoding for verbs and tape scripting
 //! - [`tape`] — the `.tape` scripting language (lexer, parser, executor)
 //! - [`graphics`] — Kitty/Sixel graphics passthrough and placement tracking
+//! - [`harness`] — agent harness detection and manifests
+//! - [`util`] — buffer pools and shared utilities
 
 #![deny(clippy::all)]
 
 pub mod app;
 pub mod config;
 pub mod graphics;
+pub mod harness;
 pub mod hooks;
 pub mod keys;
 pub mod layout;
@@ -26,6 +29,7 @@ pub mod session;
 pub mod tape;
 pub mod terminal;
 pub mod ui;
+pub mod util;
 pub mod vt;
 
 pub use layout::{BSPTree, Rect};

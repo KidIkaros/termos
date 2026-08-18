@@ -315,10 +315,6 @@ pub struct Os {
     pub theme_picker_selected: usize,
     /// Cached list of available theme names.
     pub theme_list: Vec<String>,
-    /// Mouse border-drag resize state: (window_id being resized, edge, start_pos).
-    /// Multi-click tracking: (last click time, last position, click count).
-    /// Whether the help modal overlay is open.
-    /// The last key chord pressed, for the showkeys overlay.
     /// The current daemon session name (Some = daemon/attach mode).
     pub remote_session: Option<String>,
     /// Cached session list for the session switcher.
@@ -459,8 +455,6 @@ impl Os {
             theme_picker_open: false,
             theme_picker_selected: 0,
             theme_list: Vec::new(),
-            last_sound_played: None,
-            sound_player: None,
             remote_session: None,
             remote_sessions: Vec::new(),
             pending_switch: None,
@@ -487,6 +481,8 @@ impl Os {
             kitty_passthrough: None,
             sixel_passthrough: None,
             graphics_caps: crate::graphics::capability::Capabilities::default(),
+            last_sound_played: None,
+            sound_player: None,
         }
     }
 
@@ -2522,8 +2518,8 @@ impl Os {
         let chars: Vec<char> = text.chars().collect();
         let start = self.copy_cursor_col as usize;
         if forward {
-            for (i, &c) in chars.iter().enumerate().skip(start + 1) {
-                if c == target {
+            for (i, &ch) in chars.iter().enumerate().skip(start + 1) {
+                if ch == target {
                     self.copy_cursor_col = if till { i as i32 - 1 } else { i as i32 };
                     self.sync_selection_cursor();
                     self.copy_last_char_search = Some((target, forward, till));
@@ -2531,8 +2527,8 @@ impl Os {
                 }
             }
         } else if start > 0 {
-            for (i, &c) in chars.iter().enumerate().take(start).rev() {
-                if c == target {
+            for i in (0..start).rev() {
+                if chars[i] == target {
                     self.copy_cursor_col = if till { i as i32 + 1 } else { i as i32 };
                     self.sync_selection_cursor();
                     self.copy_last_char_search = Some((target, forward, till));
@@ -2840,9 +2836,8 @@ impl Os {
         let ws = self.current_workspace;
         let bounds = self.workspace_bounds(ws);
         let gap = self.gap;
-        self.workspace_mut(ws)
-            .tree
-            .resize_split(wid, edge, pos, bounds, gap);
+        let tree = &mut self.workspace_mut(ws).tree;
+        tree.resize_split(wid, edge, pos, bounds, gap);
     }
 
     /// End the border-drag resize.

@@ -1,5 +1,8 @@
 //! Shared rendering helpers — borders, the dock bar, and style conversion.
 
+pub mod overlay;
+pub mod style_cache;
+
 use ratatui::style::{Color as TuiColor, Modifier, Style as TuiStyle};
 
 use crate::config::theme::Rgb;

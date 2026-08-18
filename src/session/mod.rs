@@ -4,6 +4,7 @@
 
 pub mod client;
 pub mod daemon;
+pub mod events;
 pub mod manager;
 pub mod model;
 pub mod persistence;
