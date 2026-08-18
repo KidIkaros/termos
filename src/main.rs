@@ -104,9 +104,30 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
             let name = args.get(2).ok_or("usage: tuios attach <name>")?;
             cmd_attach(name)
         }
-        "run" => {
+        "run" | "new" => {
             let name = args.get(2).map(|s| s.as_str());
             cmd_run(name)
+        }
+        "resurrect" => {
+            let name = args.get(2).map(|s| s.as_str());
+            cmd_resurrect(name)
+        }
+        "start-server" => {
+            let daemon = Arc::new(Daemon::new());
+            daemon.load_hooks(&UserConfig::load().hooks);
+            daemon.restore_saved();
+            daemon.run_default()?;
+            Ok(())
+        }
+        "kill-server" => cmd_kill_server(),
+        "session-info" => cmd_session_info(args.get(2).map(|s| s.as_str())),
+        "list-windows" => cmd_list_windows(args.get(2).map(|s| s.as_str())),
+        "set-session-name" => cmd_set_session_name(&args[2..]),
+        "set-session-accent" => cmd_set_session_accent(&args[2..]),
+        "logs" => cmd_logs(),
+        "layout" => {
+            let sub = args.get(2).map(|s| s.as_str()).unwrap_or("list");
+            cmd_layout(sub, &args[3..])
         }
         "set-agent-state" => cmd_set_agent_state(&args[2..]),
         "get-agent-state" => cmd_agent_verb(&args[2..], Verb::GetAgentState),
@@ -145,6 +166,28 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
                     }
                     for w in &result.warnings {
                         println!("warning: {}", w.message);
+                    }
+                    Ok(())
+                }
+                Some(termos::cli::ConfigCommand::Edit) => {
+                    let path = termos::cli::config_path();
+                    let editor = std::env::var("EDITOR")
+                        .or_else(|_| std::env::var("VISUAL"))
+                        .unwrap_or_else(|_| "vi".into());
+                    std::process::Command::new(&editor)
+                        .arg(&path)
+                        .status()?;
+                    Ok(())
+                }
+                Some(termos::cli::ConfigCommand::Reset) => {
+                    let path = termos::cli::config_path();
+                    if path.exists() {
+                        std::fs::write(&path, termos::cli::default_config_toml())?;
+                        println!("config reset to defaults at {}", path.display());
+                    } else {
+                        std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
+                        std::fs::write(&path, termos::cli::default_config_toml())?;
+                        println!("config created at {}", path.display());
                     }
                     Ok(())
                 }
@@ -292,10 +335,21 @@ fn print_help() {
     println!();
     println!("SUBCOMMANDS:");
     println!("    daemon                     Start the session daemon");
-    println!("    run [name]                 Create and attach a new session");
+    println!("    run, new [name]            Create and attach a new session");
     println!("    attach <name>              Attach to an existing session");
     println!("    list, ls                   List sessions");
     println!("    kill <name>                Kill a session");
+    println!("    resurrect [name]           Restore saved session(s)");
+    println!("    start-server               Start the daemon (alias for daemon)");
+    println!("    kill-server                Stop the daemon");
+    println!("    session-info [name]        Show session details");
+    println!("    list-windows [session]     List windows in a session");
+    println!("    set-session-name <s> <n>   Rename a session");
+    println!("    set-session-accent <s> <a> Set session accent color");
+    println!("    logs                       Show daemon logs");
+    println!("    layout <list|delete|dir>   Manage saved layouts");
+    println!("    config <show|path|edit|reset|validate>  Config management");
+    println!("    keybinds <list|describe>   Keybind reference");
     println!("    tape <play|validate|list|show|delete|dir|exec>  Tape scripting");
     println!("    set-agent-state <args>     Set agent state on a pane");
     println!("    get-agent-state <args>     Get agent state from a pane");
@@ -1416,6 +1470,159 @@ fn drain_local_effects(effects: Vec<Effect>, host_buf: &mut Vec<u8>) -> bool {
         }
     }
     quit
+}
+
+// ─── New CLI commands ────────────────────────────────────────────────────
+
+fn cmd_resurrect(name: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let client = DaemonClient::connect()?;
+    if let Some(n) = name {
+        client.send(&Message::Resurrect {
+            name: n.to_string(),
+        })?;
+        println!("resurrected session '{n}'");
+    } else {
+        client.send(&Message::ResurrectAll)?;
+        println!("resurrected all saved sessions");
+    }
+    Ok(())
+}
+
+fn cmd_kill_server() -> Result<(), Box<dyn std::error::Error>> {
+    let client = DaemonClient::connect()?;
+    client.send(&Message::KillServer)?;
+    println!("daemon stopped");
+    Ok(())
+}
+
+fn cmd_session_info(name: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let client = DaemonClient::connect()?;
+    let sessions = client.list()?;
+    let target = match name {
+        Some(n) => sessions.into_iter().find(|s| s.name == n),
+        None => sessions.into_iter().next(),
+    };
+    match target {
+        Some(s) => {
+            println!("Session: {}", s.name);
+            println!("  Windows: {}", s.windows);
+            println!("  Created: {}", s.created_at);
+            println!("  Attached: {}", s.attached);
+            println!("  Restored: {}", s.restored);
+            Ok(())
+        }
+        None => Err("no session found".into()),
+    }
+}
+
+fn cmd_list_windows(name: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let client = DaemonClient::connect()?;
+    let sessions = client.list()?;
+    let target = match name {
+        Some(n) => sessions.into_iter().find(|s| s.name == n),
+        None => sessions.into_iter().next(),
+    };
+    match target {
+        Some(s) => {
+            println!("Session '{}' has {} window(s)", s.name, s.windows);
+            // Window details require attaching; the list endpoint only gives a count.
+            Ok(())
+        }
+        None => Err("no session found".into()),
+    }
+}
+
+fn cmd_set_session_name(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let session = args
+        .first()
+        .ok_or("usage: tuios set-session-name <session> <new-name>")?;
+    let new_name = args
+        .get(1)
+        .ok_or("usage: tuios set-session-name <session> <new-name>")?;
+    let client = DaemonClient::connect()?;
+    client.send(&Message::SetSessionName {
+        session: session.clone(),
+        name: new_name.clone(),
+    })?;
+    println!("renamed session '{session}' to '{new_name}'");
+    Ok(())
+}
+
+fn cmd_set_session_accent(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let session = args
+        .first()
+        .ok_or("usage: tuios set-session-accent <session> <accent>")?;
+    let accent = args
+        .get(1)
+        .ok_or("usage: tuios set-session-accent <session> <accent>")?;
+    let client = DaemonClient::connect()?;
+    client.send(&Message::SetSessionAccent {
+        session: session.clone(),
+        accent: accent.clone(),
+    })?;
+    println!("set accent for session '{session}' to '{accent}'");
+    Ok(())
+}
+
+fn cmd_logs() -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join("termos-daemon.log");
+    if path.exists() {
+        let content = std::fs::read_to_string(&path)?;
+        print!("{content}");
+    } else {
+        println!("(no daemon log at {})", path.display());
+    }
+    Ok(())
+}
+
+fn cmd_layout(sub: &str, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    match sub {
+        "list" | "ls" => {
+            let dir = termos::cli::config_path()
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("layouts");
+            if !dir.exists() {
+                println!("(no saved layouts)");
+                return Ok(());
+            }
+            for entry in std::fs::read_dir(&dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "toml") {
+                    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+                    println!("{name}");
+                }
+            }
+            Ok(())
+        }
+        "delete" | "rm" => {
+            let name = args.first().ok_or("usage: tuios layout delete <name>")?;
+            let path = termos::cli::config_path()
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("layouts")
+                .join(format!("{name}.toml"));
+            if path.exists() {
+                std::fs::remove_file(&path)?;
+                println!("deleted layout '{name}'");
+            } else {
+                return Err(format!("layout '{name}' not found").into());
+            }
+            Ok(())
+        }
+        "dir" => {
+            let dir = termos::cli::config_path()
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("layouts");
+            println!("{}", dir.display());
+            Ok(())
+        }
+        other => {
+            Err(format!("unknown layout subcommand '{other}' (try: list, delete, dir)").into())
+        }
+    }
 }
 
 #[cfg(test)]

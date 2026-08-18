@@ -92,6 +92,8 @@ pub enum ConfigCommand {
     Show,
     Path,
     Validate,
+    Edit,
+    Reset,
 }
 
 impl ConfigCommand {
@@ -101,6 +103,8 @@ impl ConfigCommand {
             "show" => Some(Self::Show),
             "path" => Some(Self::Path),
             "validate" => Some(Self::Validate),
+            "edit" => Some(Self::Edit),
+            "reset" => Some(Self::Reset),
             _ => None,
         }
     }
@@ -125,6 +129,32 @@ pub fn config_path() -> std::path::PathBuf {
     } else {
         std::path::PathBuf::from("config.toml")
     }
+}
+
+/// Default config TOML (written by `config reset`).
+pub fn default_config_toml() -> &'static str {
+    r#"# TermOS configuration
+# See https://github.com/Gaurav-Gosain/tuios for documentation
+
+[theme]
+name = "catppuccin-mocha"
+
+[ui]
+border_style = "rounded"
+dockbar_position = "bottom"
+ascii_only = false
+which_key = true
+
+[leader]
+key = "ctrl+b"
+
+[scrollback]
+max_lines = 10000
+
+[hooks]
+# Add shell commands to run on events
+# on_window_create = "echo 'window created'"
+"#
 }
 
 // ─── Keybind Commands ────────────────────────────────────────────────────

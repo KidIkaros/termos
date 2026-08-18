@@ -131,6 +131,14 @@ pub enum Message {
     Pong,
     /// Client → daemon: resurrect a saved session by name.
     Resurrect { name: String },
+    /// Client → daemon: resurrect all saved sessions.
+    ResurrectAll,
+    /// Client → daemon: stop the daemon.
+    KillServer,
+    /// Client → daemon: rename a session.
+    SetSessionName { session: String, name: String },
+    /// Client → daemon: set a session's accent color.
+    SetSessionAccent { session: String, accent: String },
     /// Daemon → client: a client attached to a session (broadcast).
     ClientJoined { session: String, name: String },
     /// Daemon → client: a client detached from a session (broadcast).
