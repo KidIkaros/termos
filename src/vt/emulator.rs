@@ -66,6 +66,7 @@ pub struct Emulator {
     /// OSC 133 semantic markers (prompt/command boundaries), recorded as the
     /// stream is parsed. Used by the structured scrollback browser.
     semantic_markers: crate::vt::semantic_markers::SemanticMarkerList,
+    last_printed_char: Option<char>,
     /// How many scrollback lines are currently shown above the live screen.
     /// 0 means the live screen is shown; a positive value means the view is
     /// scrolled back that many lines (copy mode).
@@ -100,6 +101,7 @@ impl Emulator {
             pending_sixel: Vec::new(),
             pending_progress: None,
             semantic_markers: crate::vt::semantic_markers::SemanticMarkerList::new(10_000),
+            last_printed_char: None,
             viewport: 0,
         };
         // Alt screen keeps no scrollback.
@@ -557,6 +559,7 @@ impl Emulator {
             self.screen_mut().cursor.pos.x = (self.screen_mut().cursor.pos.x - 1).max(0);
             return;
         }
+        self.last_printed_char = Some(c);
 
         let width = UnicodeWidthChar::width(c).unwrap_or(1) as i32;
         let auto_wrap = self.is_mode_set(MODE_AUTO_WRAP);
@@ -623,8 +626,10 @@ impl Emulator {
                 );
             }
 
-            // Advance the cursor.
-            screen.cursor.pos.x += width;
+            // Advance the cursor, clamped to at most width (the pending-wrap
+            // position). A wide char on a narrow screen must not leave the
+            // cursor past the screen bounds.
+            screen.cursor.pos.x = (screen.cursor.pos.x + width).min(screen.width());
             phantom = x + width >= screen.width();
         }
         self.at_phantom = phantom;
@@ -913,8 +918,35 @@ impl Handler for Emulator {
                 let x = p(0, 1) - 1;
                 self.screen_mut().cursor.pos.x = x.clamp(0, self.width() - 1);
             }
-            // Repeat preceding character.
-            b'b' => {}
+            // Repeat preceding character (REP).
+            b'b' => {
+                if let Some(c) = self.last_printed_char {
+                    for _ in 0..p_or1(0) {
+                        self.print_char(c);
+                    }
+                }
+            }
+            // Scroll region set (DECSTBM).
+            b'r' => {
+                let top = p(0, 1) - 1;
+                let bottom = if seq.params.is_empty() {
+                    self.height()
+                } else {
+                    p(1, self.height())
+                };
+                let top = top.clamp(0, self.height() - 1);
+                let bottom = bottom.clamp(top + 1, self.height());
+                self.screen_mut().scroll.top = top;
+                self.screen_mut().scroll.bottom = bottom;
+                self.screen_mut().cursor.pos.x = 0;
+                self.screen_mut().cursor.pos.y = 0;
+            }
+            // Cursor next line (CNL).
+            b'e' => {
+                let y = self.screen().cursor.pos.y + p_or1(0);
+                self.screen_mut().cursor.pos.y = y.clamp(0, self.height() - 1);
+                self.screen_mut().cursor.pos.x = 0;
+            }
             _ => {}
         }
     }
@@ -1190,5 +1222,57 @@ mod osc133_tests {
         let blocks = crate::scrollback::parse_blocks(&markers, count, text);
         assert!(!blocks.is_empty());
         assert_eq!(blocks[0].method, "osc133");
+    }
+}
+
+#[cfg(test)]
+mod csi_completion_tests {
+    use super::*;
+
+    #[test]
+    fn rep_repeats_last_char() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"abc");
+        e.write(b"\x1b[3b");
+        // REP repeats 'c' 3 times: "abcccc"
+        let line = e.screen().line_text(0);
+        assert!(line.contains("abcccc"), "line: {line}");
+    }
+
+    #[test]
+    fn decstbm_sets_scroll_region() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[5;10r");
+        assert_eq!(e.screen().scroll.top, 4);
+        assert_eq!(e.screen().scroll.bottom, 10);
+        // Cursor moves to home.
+        assert_eq!(e.cursor_position().x, 0);
+        assert_eq!(e.cursor_position().y, 0);
+    }
+
+    #[test]
+    fn decstbm_full_screen_when_no_params() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[5;10r");
+        e.write(b"\x1b[r");
+        assert_eq!(e.screen().scroll.top, 0);
+        assert_eq!(e.screen().scroll.bottom, 24);
+    }
+
+    #[test]
+    fn cnl_moves_down_and_cr() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[5;10H");
+        e.write(b"\x1b[2e");
+        assert_eq!(e.cursor_position().y, 6);
+        assert_eq!(e.cursor_position().x, 0);
+    }
+
+    #[test]
+    fn rep_with_no_last_char_is_noop() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[5b");
+        // No panic, cursor at origin.
+        assert_eq!(e.cursor_position().x, 0);
     }
 }
