@@ -1933,7 +1933,7 @@ impl Os {
         let anchor = ids.first().copied().unwrap_or(-1);
         let dir = crate::layout::SplitType::Vertical;
         tree.insert_window(focused as i32, anchor, dir, 0.5, bounds, gap);
-        drop(tree);
+        let _ = tree;
         self.sync_window_sizes();
         self.log_action(if left { "snap_left" } else { "snap_right" });
     }
