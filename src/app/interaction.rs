@@ -110,6 +110,34 @@ pub fn pointer_shape_for_border(
     PointerShape::Default
 }
 
+/// Compute the pointer shape for a screen position given the pane layout
+/// (`(window_id, Rect)` pairs, as produced by `Os::current_layout`) and the
+/// border offset (1 when borders are drawn, 0 for borderless).
+pub fn pointer_shape_at(
+    x: i32,
+    y: i32,
+    layout: &[(i32, crate::layout::Rect)],
+    border_off: i32,
+) -> PointerShape {
+    if border_off == 0 {
+        return PointerShape::Default;
+    }
+    for (_, rect) in layout {
+        let on_left = x == rect.x;
+        let on_right = x == rect.x + rect.w - 1;
+        let on_top = y == rect.y;
+        let on_bottom = y == rect.y + rect.h - 1;
+        let inside_x = x >= rect.x && x < rect.x + rect.w;
+        let inside_y = y >= rect.y && y < rect.y + rect.h;
+        // Only positions on the pane's rim (or one cell outside) count.
+        let near = inside_x && (on_top || on_bottom) || inside_y && (on_left || on_right);
+        if near {
+            return pointer_shape_for_border(x, y, rect.x, rect.y, rect.w, rect.h, border_off);
+        }
+    }
+    PointerShape::Default
+}
+
 // ─── Resize Deferral ─────────────────────────────────────────────────────
 
 /// How long after the last resize event the deferral still counts as live.
@@ -778,5 +806,91 @@ mod tests {
     #[test]
     fn base64_encode_basic() {
         assert_eq!(base64_encode(b"hello"), "aGVsbG8");
+    }
+}
+
+#[cfg(test)]
+mod pointer_shape_tests {
+    use super::*;
+    use crate::layout::Rect;
+
+    fn layout() -> Vec<(i32, Rect)> {
+        vec![
+            (
+                0,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 40,
+                    h: 12,
+                },
+            ),
+            (
+                1,
+                Rect {
+                    x: 40,
+                    y: 0,
+                    w: 40,
+                    h: 12,
+                },
+            ),
+            (
+                2,
+                Rect {
+                    x: 0,
+                    y: 12,
+                    w: 80,
+                    h: 12,
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn inside_pane_is_default() {
+        assert_eq!(pointer_shape_at(10, 6, &layout(), 1), PointerShape::Default);
+    }
+
+    #[test]
+    fn left_edge_is_ew_resize() {
+        // Left edge of pane 1 (x=40).
+        assert_eq!(
+            pointer_shape_at(40, 6, &layout(), 1),
+            PointerShape::EwResize
+        );
+    }
+
+    #[test]
+    fn top_edge_is_grab() {
+        assert_eq!(pointer_shape_at(10, 0, &layout(), 1), PointerShape::Grab);
+    }
+
+    #[test]
+    fn corner_is_diagonal() {
+        // Top-right corner of pane 0 (x=39, y=0).
+        assert_eq!(
+            pointer_shape_at(39, 0, &layout(), 1),
+            PointerShape::NeswResize
+        );
+    }
+
+    #[test]
+    fn bottom_edge_is_ns_resize() {
+        assert_eq!(
+            pointer_shape_at(10, 11, &layout(), 1),
+            PointerShape::NsResize
+        );
+    }
+
+    #[test]
+    fn borderless_is_default() {
+        assert_eq!(pointer_shape_at(40, 6, &layout(), 0), PointerShape::Default);
+    }
+
+    #[test]
+    fn pointer_shape_str() {
+        assert_eq!(PointerShape::Default.as_str(), "default");
+        assert_eq!(PointerShape::EwResize.as_str(), "ew-resize");
+        assert_eq!(PointerShape::Grabbing.as_str(), "grabbing");
     }
 }

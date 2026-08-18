@@ -22,6 +22,9 @@ use crate::tape::command::Command;
 pub enum Msg {
     /// A key press (or repeat) from any input source.
     Key(KeyEvent),
+    /// A key release (reported when the keyboard-enhancement flags are on);
+    /// used to end hold mode.
+    KeyRelease(KeyEvent),
     /// A mouse event from the local terminal.
     Mouse(MouseEvent),
     /// The terminal was resized.

@@ -349,6 +349,15 @@ pub struct Os {
     /// Host-terminal sequences queued by alerts (OSC 9 / BEL), flushed by the
     /// event loop after each draw so they never interleave a frame.
     host_output: Vec<u8>,
+    /// The last OSC 22 pointer shape sent to the host, so a hover over the
+    /// same border region does not re-emit it every mouse event.
+    pointer_shape: interaction::PointerShape,
+    /// The last mouse position, for pointer-shape computation.
+    last_mouse_pos: (i32, i32),
+    /// Hold-mode state: a held key suppresses repeat spam until release.
+    pub hold_mode: interaction::HoldMode,
+    /// Frame timing statistics for the trace overlay.
+    pub tick_stats: interaction::TickStats,
     /// Whether tape playback is active (`tape play`).
     pub script_mode: bool,
     /// Whether tape playback is paused (Ctrl+P).
@@ -478,6 +487,10 @@ impl Os {
             agent_state_holds: HashMap::new(),
             sound_cue: agent_alert::SoundCue::new(),
             host_output: Vec::new(),
+            pointer_shape: interaction::PointerShape::Default,
+            last_mouse_pos: (0, 0),
+            hold_mode: interaction::HoldMode::new(),
+            tick_stats: interaction::TickStats::new(),
             script_mode: false,
             script_paused: false,
             script_player: None,
@@ -866,6 +879,49 @@ impl Os {
     /// Drain the queued host-terminal sequences.
     pub fn take_host_sequence(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.host_output)
+    }
+
+    /// Recompute the pointer shape for a mouse position and queue an OSC 22
+    /// host sequence when it changes (hover over a border/corner).
+    pub fn update_pointer_shape(&mut self, x: i32, y: i32) {
+        self.last_mouse_pos = (x, y);
+        let border_off = if self.config.appearance.border_style == "none" {
+            0
+        } else {
+            1
+        };
+        let layout: Vec<(i32, crate::layout::Rect)> = self.current_layout().into_iter().collect();
+        let shape = interaction::pointer_shape_at(x, y, &layout, border_off);
+        if shape != self.pointer_shape {
+            self.pointer_shape = shape;
+            let mut buf = Vec::new();
+            let mut current = interaction::PointerShape::Default;
+            // Write the shape sequence into a scratch writer; track as sent.
+            let _ = interaction::set_pointer_shape(&mut buf, shape, &mut current);
+            self.queue_host_sequence(buf);
+        }
+    }
+
+    /// Queue a one-time tip when the host terminal is a macOS terminal and
+    /// the Option key behaves as Meta (Go's `mac_option_advice`).
+    pub fn queue_mac_option_advice(&mut self) {
+        let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+        if let Some(advice) = interaction::mac_option_advice(&term_program) {
+            self.notify(advice, "info");
+        }
+    }
+
+    /// Emit the kitty keyboard-enhancement flags once, at startup, so the
+    /// host reports key releases/repeats (needed by hold mode).
+    pub fn queue_keyboard_enhancements(&mut self) {
+        let flags = interaction::KeyboardEnhancements {
+            disambiguate_escape: true,
+            report_event_types: true,
+            report_alternate_keys: true,
+            report_all_keys_as_escapes: false,
+            report_associated_text: false,
+        };
+        self.queue_host_sequence(flags.set_flags_sequence().into_bytes());
     }
 
     /// The focused window's agent state wire value ("" = none), for the dock

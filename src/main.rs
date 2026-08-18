@@ -39,6 +39,24 @@ use termos::session::{self, protocol, Daemon, DaemonClient, Message, RemoteSink}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
+    // Write a crash report on panic (Go's WriteCrashLog), so a malformed
+    // guest stream or a rare UI branch leaves an artifact instead of nothing.
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "unknown".into());
+        let report = format!("panic: {info}\n  at {location}");
+        let path = std::env::temp_dir().join(format!("termos-crash-{}.log", std::process::id()));
+        let _ = termos::app::interaction::write_crash_report(&path, &report);
+        eprintln!(
+            "termos: panic at {location} (crash log: {})",
+            path.display()
+        );
+        default_panic(info);
+    }));
+
     let raw_args: Vec<String> = std::env::args().collect();
     let (overrides, remaining) = Overrides::parse(&raw_args[1..]);
     if !remaining.is_empty() {
@@ -427,6 +445,7 @@ fn cmd_tape_play(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     set_os_size(&mut os);
+    os.queue_keyboard_enhancements();
 
     let result = run_event_loop(&mut os, &mut terminal, None);
 
@@ -757,6 +776,8 @@ fn run_remote_tui(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     set_os_size(&mut os);
+    os.queue_keyboard_enhancements();
+    os.queue_keyboard_enhancements();
 
     let result = run_remote_event_loop(
         &mut os,
@@ -957,6 +978,10 @@ fn run_remote_event_loop(
         if poll(Duration::from_millis(8))? {
             match read()? {
                 Event::Key(key) => {
+                    if key.kind == KeyEventKind::Release {
+                        os.update(Msg::KeyRelease(key));
+                        continue;
+                    }
                     if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
                         continue;
                     }
@@ -1173,6 +1198,8 @@ fn run_local_tui_with_overrides(overrides: &Overrides) -> Result<(), Box<dyn std
     let mut terminal = Terminal::new(backend)?;
 
     set_os_size(&mut os);
+    os.queue_keyboard_enhancements();
+    os.queue_mac_option_advice();
 
     // Spawn the first shell.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
@@ -1264,6 +1291,12 @@ fn run_event_loop(
         if poll(Duration::from_millis(8))? {
             match read()? {
                 Event::Key(key) => {
+                    if key.kind == KeyEventKind::Release {
+                        // Releases only end a hold; the press was already
+                        // forwarded when it went down.
+                        os.update(Msg::KeyRelease(key));
+                        continue;
+                    }
                     if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
                         continue;
                     }

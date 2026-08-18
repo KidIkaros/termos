@@ -8,6 +8,8 @@
 //! host-sequence flushing, and the session switch/kill requests that the
 //! switcher sets as pending state).
 
+use std::time::Duration;
+
 use super::effect::Effect;
 use super::input::{handle_key, handle_mouse, KeyResult};
 use super::msg::Msg;
@@ -28,6 +30,15 @@ impl Os {
             }
             Msg::Mouse(mouse) => {
                 handle_mouse(self, &mouse);
+                // Hovering a border changes the host pointer shape (OSC 22).
+                self.update_pointer_shape(mouse.column as i32, mouse.row as i32);
+                let mut effects = Vec::new();
+                self.append_loop_effects(&mut effects);
+                effects
+            }
+            Msg::KeyRelease(_key) => {
+                // A release ends a hold; nothing else consumes releases.
+                self.hold_mode.end();
                 let mut effects = Vec::new();
                 self.append_loop_effects(&mut effects);
                 effects
@@ -42,6 +53,7 @@ impl Os {
                 self.tick_agent_progress();
                 self.tick_agent_alerts();
                 self.tick_script();
+                self.tick_stats.record_frame(Duration::ZERO);
                 self.sync_window_sizes();
                 self.flush_graphics();
                 let mut effects = Vec::new();
