@@ -135,6 +135,33 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         render_overlay(buf, content_area, &lines, "Project tape");
     } else if os.tape_manager_open {
         render_tape_manager(os, buf, content_area);
+    } else if os.aggregate_open {
+        let items = os.aggregate_items();
+        let mut lines: Vec<String> = Vec::new();
+        let mut last_ws = -1;
+        for (i, (ws, _, title, preview)) in items.iter().enumerate() {
+            if *ws != last_ws {
+                lines.push(format!("── workspace {ws} ──"));
+                last_ws = *ws;
+            }
+            let marker = if i == os.aggregate_selected {
+                "› "
+            } else {
+                "  "
+            };
+            let preview_trim: String = preview.chars().take(50).collect();
+            if preview_trim.is_empty() {
+                lines.push(format!("{marker}{title}"));
+            } else {
+                lines.push(format!("{marker}{title}  —  {preview_trim}"));
+            }
+        }
+        if lines.is_empty() {
+            lines.push("(no windows)".into());
+        }
+        lines.push(String::new());
+        lines.push("↑↓ select · Enter focus · Esc close".into());
+        render_overlay(buf, content_area, &lines, "Aggregate view");
     } else if os.settings_open {
         let rows = os.settings_rows();
         let mut lines: Vec<String> = Vec::new();

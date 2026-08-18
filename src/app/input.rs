@@ -205,6 +205,11 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         return handle_tape_manager(os, key);
     }
 
+    // The aggregate view consumes its own keys.
+    if os.aggregate_open {
+        return handle_aggregate_key(os, key);
+    }
+
     // The settings overlay consumes its own keys.
     if os.settings_open {
         return handle_settings_key(os, key);
@@ -298,6 +303,30 @@ fn handle_rename_dialog_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
             if let Some((_, text)) = os.rename_dialog.as_mut() {
                 text.push(c);
             }
+        }
+        _ => {}
+    }
+    KeyResult::Consumed
+}
+
+fn handle_aggregate_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    let count = os.aggregate_items().len();
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            os.close_aggregate_view();
+        }
+        KeyCode::Up | KeyCode::BackTab | KeyCode::Char('k') => {
+            if count > 0 {
+                os.aggregate_selected = (os.aggregate_selected + count - 1) % count;
+            }
+        }
+        KeyCode::Down | KeyCode::Tab | KeyCode::Char('j') => {
+            if count > 0 {
+                os.aggregate_selected = (os.aggregate_selected + 1) % count;
+            }
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            os.activate_aggregate_selection();
         }
         _ => {}
     }
@@ -591,6 +620,12 @@ fn handle_leader_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         // Layout picker.
         KeyCode::Char('L') => {
             os.open_switcher(crate::app::SwitcherKind::Layout);
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // Aggregate view (all windows, all workspaces).
+        KeyCode::Char('A') => {
+            os.open_aggregate_view();
             os.prefix = Prefix::None;
             KeyResult::Consumed
         }

@@ -287,6 +287,9 @@ pub struct Os {
     pub session_close: Option<(String, usize)>,
     /// The visible tooltip: (text, x, y).
     pub tooltip: Option<(String, i32, i32)>,
+    /// Whether the aggregate view (all windows across workspaces) is open.
+    pub aggregate_open: bool,
+    pub aggregate_selected: usize,
     /// A hover awaiting the delay window: (text, position, since).
     pub tooltip_pending: Option<(String, (i32, i32), std::time::Instant)>,
     /// Command palette state.
@@ -581,6 +584,8 @@ impl Os {
             quit_after_kill: false,
             session_close: None,
             tooltip: None,
+            aggregate_open: false,
+            aggregate_selected: 0,
             tooltip_pending: None,
             palette_open: false,
             palette_query: String::new(),
@@ -2866,6 +2871,61 @@ impl Os {
     /// Cancel the rename dialog without applying.
     pub fn cancel_rename_dialog(&mut self) {
         self.rename_dialog = None;
+    }
+
+    /// Open the aggregate view.
+    pub fn open_aggregate_view(&mut self) {
+        self.aggregate_open = true;
+        self.aggregate_selected = 0;
+    }
+
+    /// Close the aggregate view.
+    pub fn close_aggregate_view(&mut self) {
+        self.aggregate_open = false;
+        self.aggregate_selected = 0;
+    }
+
+    /// Every window across every workspace, grouped by workspace: returns
+    /// (workspace, window index, title, first content line).
+    pub fn aggregate_items(&self) -> Vec<(i32, usize, String, String)> {
+        let mut items = Vec::new();
+        for ws in 1..=9 {
+            let ids = self.workspace(ws).tree.get_all_window_ids();
+            if ids.is_empty() {
+                continue;
+            }
+            for wid in ids {
+                let idx = wid as usize;
+                let Some(window) = self.windows.get(idx) else {
+                    continue;
+                };
+                let preview = window
+                    .emulator
+                    .lock()
+                    .ok()
+                    .and_then(|emu| {
+                        (0..emu.content_line_count())
+                            .map(|i| emu.content_line_text(i))
+                            .find(|l| !l.trim().is_empty())
+                    })
+                    .unwrap_or_default();
+                items.push((ws, idx, window.title.clone(), preview));
+            }
+        }
+        items
+    }
+
+    /// Activate the selected aggregate row: switch to its workspace and focus
+    /// the window.
+    pub fn activate_aggregate_selection(&mut self) {
+        let items = self.aggregate_items();
+        let Some((ws, idx, _, _)) = items.get(self.aggregate_selected) else {
+            self.close_aggregate_view();
+            return;
+        };
+        self.close_aggregate_view();
+        self.switch_workspace(*ws);
+        self.focus_window(*idx);
     }
 
     /// Open the quit menu, building rows from the session state (daemon vs
@@ -5552,5 +5612,95 @@ mod tooltip_tests {
         os.clear_tooltip();
         assert!(os.tooltip.is_none());
         assert!(os.tooltip_pending.is_none());
+    }
+}
+
+#[cfg(test)]
+mod aggregate_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crate::terminal::pty::WinSize;
+    use crate::terminal::window::Window;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn os_with_two_workspaces() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.width = 80;
+        os.height = 25;
+        let w1 = Window::without_pty(
+            "w0".to_string(),
+            "alpha".to_string(),
+            WinSize { cols: 40, rows: 12 },
+        );
+        let w2 = Window::without_pty(
+            "w1".to_string(),
+            "beta".to_string(),
+            WinSize { cols: 40, rows: 12 },
+        );
+        os.windows.push(w1);
+        os.windows.push(w2);
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        let bounds2 = os.workspace_bounds(2);
+        os.workspace_mut(2)
+            .tree
+            .insert_window(1, -1, SplitType::None, 0.5, bounds2, 0);
+        os
+    }
+
+    #[test]
+    fn items_group_all_workspaces() {
+        let os = os_with_two_workspaces();
+        let items = os.aggregate_items();
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|(ws, _, t, _)| *ws == 1 && t == "alpha"));
+        assert!(items.iter().any(|(ws, _, t, _)| *ws == 2 && t == "beta"));
+    }
+
+    #[test]
+    fn empty_when_no_windows() {
+        let os = Os::new(UserConfig::default_config());
+        assert!(os.aggregate_items().is_empty());
+    }
+
+    #[test]
+    fn leader_a_opens_and_esc_closes() {
+        let mut os = os_with_two_workspaces();
+        os.prefix = Prefix::Leader;
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('A')));
+        assert!(os.aggregate_open);
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Esc));
+        assert!(!os.aggregate_open);
+    }
+
+    #[test]
+    fn enter_focuses_selected_window() {
+        let mut os = os_with_two_workspaces();
+        os.current_workspace = 1;
+        os.open_aggregate_view();
+        // Select the second item (workspace 2, beta).
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Char('j')));
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Enter));
+        assert!(!os.aggregate_open);
+        assert_eq!(os.current_workspace, 2);
+        assert_eq!(os.focused_window, Some(1));
+    }
+
+    #[test]
+    fn preview_comes_from_emulator() {
+        let mut os = os_with_two_workspaces();
+        {
+            let mut emu = os.windows[0].emulator.lock().unwrap();
+            emu.write(b"hello world\nsecond line");
+        }
+        let items = os.aggregate_items();
+        let (_, _, _, preview) = items.iter().find(|(_, i, _, _)| *i == 0).unwrap();
+        assert!(preview.contains("hello world"));
     }
 }
