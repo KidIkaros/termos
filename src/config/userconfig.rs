@@ -234,6 +234,45 @@ pub struct AppearanceConfig {
     /// Maximum width (in cells) for zoomed panes; 0 = unlimited.
     #[serde(default)]
     pub zoom_max_width: i32,
+    /// Give every session its own colour (default: true).
+    #[serde(default = "default_true")]
+    pub session_colors: bool,
+    /// ASCII fallback instead of Nerd Fonts (default: false).
+    #[serde(default)]
+    pub use_ascii_only: bool,
+    /// Hide the clock overlay (deprecated, use show_clock).
+    #[serde(default)]
+    pub hide_clock: bool,
+    /// Copy a mouse selection to the clipboard on release (default: true).
+    #[serde(default = "default_true")]
+    pub copy_on_select: bool,
+    /// Focus the pane under the cursor as the mouse moves (default: false).
+    #[serde(default)]
+    pub focus_follows_mouse: bool,
+    /// Alt + left-drag moves a pane (default: true).
+    #[serde(default = "default_true")]
+    pub alt_drag: bool,
+    /// What a click on pane content does: single, double, off (default: single).
+    #[serde(default = "default_click_to_type")]
+    pub click_to_type: String,
+    /// Punctuation that counts as part of a word for double-click.
+    #[serde(default = "default_word_characters")]
+    pub word_characters: String,
+    /// Format string for window titles: {title}, {index}, {cwd}.
+    #[serde(default)]
+    pub window_title_format: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_click_to_type() -> String {
+    "single".into()
+}
+
+fn default_word_characters() -> String {
+    "@-./_~".into()
 }
 
 impl Default for AppearanceConfig {
@@ -269,6 +308,15 @@ impl Default for AppearanceConfig {
                 width: 28,
                 ..Default::default()
             },
+            session_colors: true,
+            use_ascii_only: false,
+            hide_clock: false,
+            copy_on_select: true,
+            focus_follows_mouse: false,
+            alt_drag: true,
+            click_to_type: "single".into(),
+            word_characters: "@-./_~".into(),
+            window_title_format: String::new(),
         }
     }
 }
@@ -371,10 +419,6 @@ pub struct DaemonConfig {
     /// Known agent binary names for foreground-process detection.
     #[serde(default)]
     pub agent_binaries: Vec<String>,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_agent_detect_seconds() -> u64 {

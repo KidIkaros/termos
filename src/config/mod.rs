@@ -1,6 +1,8 @@
 //! User configuration, keybindings, and themes — ported from TUIOS
 //! `internal/config` and `internal/theme`.
 
+pub mod constants;
+pub mod hostterm;
 pub mod keybindings;
 pub mod keynormalizer;
 pub mod overrides;
@@ -11,6 +13,7 @@ pub mod userconfig;
 pub mod validation;
 pub mod watcher;
 
+pub use hostterm::HostTerminal;
 pub use keybindings::Keybinding;
 pub use overrides::Overrides;
 pub use theme::Theme;

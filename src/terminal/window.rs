@@ -133,6 +133,33 @@ pub struct Window {
     /// `0` means unknown — pixel size is not reported in that case.
     cell_pixel_width: u16,
     cell_pixel_height: u16,
+
+    // --- Phase G: Terminal completion ---
+
+    /// Whether the window is in scrollback viewing mode.
+    scrollback_mode: bool,
+    /// The scrollback offset (0 = live screen, positive = scrolled back).
+    scrollback_offset: usize,
+    /// The last announced content width (for resize deduplication).
+    announced_width: i32,
+    /// The last announced content height (for resize deduplication).
+    announced_height: i32,
+    /// Whether resize announcements are held (deferred until released).
+    announce_held: bool,
+    /// Whether the window is in copy mode.
+    copy_mode: bool,
+    /// Whether copy mode was entered implicitly (via scroll/drag gesture).
+    copy_mode_implicit: bool,
+    /// Copy mode cursor X position.
+    copy_cursor_x: i32,
+    /// Copy mode cursor Y position.
+    copy_cursor_y: i32,
+    /// Copy mode scroll offset.
+    copy_scroll_offset: usize,
+    /// Whether the window is tiled (no individual borders).
+    pub tiled: bool,
+    /// The daemon output writer (set for daemon-mode windows).
+    daemon_writer: Option<Arc<super::window_io::DaemonOutputWriter>>,
 }
 
 impl Window {
@@ -187,6 +214,18 @@ impl Window {
             pending_resize: Mutex::new(None),
             cell_pixel_width: 0,
             cell_pixel_height: 0,
+            scrollback_mode: false,
+            scrollback_offset: 0,
+            announced_width: 0,
+            announced_height: 0,
+            announce_held: false,
+            copy_mode: false,
+            copy_mode_implicit: false,
+            copy_cursor_x: 0,
+            copy_cursor_y: 0,
+            copy_scroll_offset: 0,
+            tiled: false,
+            daemon_writer: None,
         };
         // Publish the initial geometry before the PTY reader starts, so
         // callbacks always have a snapshot to read.
@@ -238,6 +277,18 @@ impl Window {
             pending_resize: Mutex::new(None),
             cell_pixel_width: 0,
             cell_pixel_height: 0,
+            scrollback_mode: false,
+            scrollback_offset: 0,
+            announced_width: 0,
+            announced_height: 0,
+            announce_held: false,
+            copy_mode: false,
+            copy_mode_implicit: false,
+            copy_cursor_x: 0,
+            copy_cursor_y: 0,
+            copy_scroll_offset: 0,
+            tiled: false,
+            daemon_writer: None,
         };
         win.publish_geometry(0, 0, size.cols as i32, size.rows as i32, 0);
         win
@@ -276,6 +327,18 @@ impl Window {
             pending_resize: Mutex::new(None),
             cell_pixel_width: 0,
             cell_pixel_height: 0,
+            scrollback_mode: false,
+            scrollback_offset: 0,
+            announced_width: 0,
+            announced_height: 0,
+            announce_held: false,
+            copy_mode: false,
+            copy_mode_implicit: false,
+            copy_cursor_x: 0,
+            copy_cursor_y: 0,
+            copy_scroll_offset: 0,
+            tiled: false,
+            daemon_writer: None,
         };
         win.publish_geometry(0, 0, size.cols as i32, size.rows as i32, 0);
         win
@@ -574,6 +637,283 @@ impl Window {
     /// The configured cell pixel height, or 0 when unknown.
     pub fn cell_pixel_height(&self) -> u16 {
         self.cell_pixel_height
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase G: Scrollback / copy mode
+    // -----------------------------------------------------------------------
+
+    /// Whether the window is in scrollback viewing mode.
+    pub fn scrollback_mode(&self) -> bool {
+        self.scrollback_mode
+    }
+
+    /// The current scrollback offset (0 = live screen).
+    pub fn scrollback_offset(&self) -> usize {
+        self.scrollback_offset
+    }
+
+    /// The number of lines in the scrollback buffer (lock-free, try-lock).
+    pub fn scrollback_len(&self) -> usize {
+        match self.emulator.try_lock() {
+            Ok(emu) => emu.scrollback_len(),
+            Err(_) => 0,
+        }
+    }
+
+    /// Clear the scrollback buffer.
+    pub fn clear_scrollback(&self) {
+        if let Ok(mut emu) = self.emulator.lock() {
+            emu.clear_scrollback();
+        }
+    }
+
+    /// Set the maximum number of scrollback lines.
+    pub fn set_scrollback_max_lines(&self, max: usize) {
+        if let Ok(mut emu) = self.emulator.lock() {
+            emu.set_scrollback_max_lines(max);
+        }
+    }
+
+    /// Enter scrollback viewing mode, starting at the bottom (most recent).
+    pub fn enter_scrollback_mode(&mut self) {
+        self.scrollback_mode = true;
+        self.scrollback_offset = 0;
+    }
+
+    /// Exit scrollback viewing mode.
+    pub fn exit_scrollback_mode(&mut self) {
+        self.scrollback_mode = false;
+        self.scrollback_offset = 0;
+    }
+
+    /// Scroll up (back in history) by `lines` lines in scrollback mode.
+    pub fn scroll_up(&mut self, lines: usize) {
+        if !self.scrollback_mode {
+            return;
+        }
+        let max = self.scrollback_len();
+        self.scrollback_offset = (self.scrollback_offset + lines).min(max);
+    }
+
+    /// Scroll down (toward live output) by `lines` lines in scrollback mode.
+    pub fn scroll_down(&mut self, lines: usize) {
+        if !self.scrollback_mode {
+            return;
+        }
+        self.scrollback_offset = self.scrollback_offset.saturating_sub(lines);
+        if self.scrollback_offset == 0 {
+            self.exit_scrollback_mode();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Copy mode
+    // -----------------------------------------------------------------------
+
+    /// Whether copy mode is active (including implicit sessions).
+    pub fn in_copy_mode(&self) -> bool {
+        self.copy_mode
+    }
+
+    /// Whether copy mode should present itself as a mode (not implicit).
+    pub fn copy_mode_visible(&self) -> bool {
+        self.copy_mode && !self.copy_mode_implicit
+    }
+
+    /// Whether copy mode is active only because a scroll/drag gesture needed it.
+    pub fn in_implicit_copy_mode(&self) -> bool {
+        self.copy_mode && self.copy_mode_implicit
+    }
+
+    /// Enter vim-style copy mode.
+    pub fn enter_copy_mode(&mut self) {
+        self.copy_mode = true;
+        self.copy_mode_implicit = false;
+        self.copy_cursor_x = 0;
+        self.copy_cursor_y = self.last_geometry().map(|g| g.height / 2).unwrap_or(0);
+        self.copy_scroll_offset = 0;
+        self.scrollback_offset = 0;
+    }
+
+    /// Enter copy mode implicitly (via mouse wheel / scrollbar drag).
+    pub fn enter_copy_mode_implicit(&mut self) {
+        self.enter_copy_mode();
+        self.copy_mode_implicit = true;
+    }
+
+    /// Exit copy mode and return to live terminal mode.
+    pub fn exit_copy_mode(&mut self) {
+        self.copy_mode = false;
+        self.copy_mode_implicit = false;
+        self.copy_scroll_offset = 0;
+        self.scrollback_offset = 0;
+    }
+
+    /// Copy mode cursor position.
+    pub fn copy_cursor(&self) -> (i32, i32) {
+        (self.copy_cursor_x, self.copy_cursor_y)
+    }
+
+    /// Set the copy mode cursor position.
+    pub fn set_copy_cursor(&mut self, x: i32, y: i32) {
+        self.copy_cursor_x = x;
+        self.copy_cursor_y = y;
+    }
+
+    /// Copy mode scroll offset.
+    pub fn copy_scroll_offset(&self) -> usize {
+        self.copy_scroll_offset
+    }
+
+    /// Set the copy mode scroll offset.
+    pub fn set_copy_scroll_offset(&mut self, offset: usize) {
+        self.copy_scroll_offset = offset;
+        self.scrollback_offset = offset;
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase G: Geometry extras
+    // -----------------------------------------------------------------------
+
+    /// Convert screen coordinates to terminal-relative coordinates.
+    /// Returns `(term_x, term_y, inside)` where `inside` is true when the
+    /// coordinates fall within the content area.
+    ///
+    /// Ported from Go `ScreenToTerminal`.
+    pub fn screen_to_terminal(&self, screen_x: i32, screen_y: i32) -> (i32, i32, bool) {
+        let geom = self.last_geometry().unwrap_or_default();
+        let off = geom.border_offset;
+        let term_x = screen_x - geom.x - off;
+        let term_y = screen_y - geom.y - off;
+        let inside = term_x >= 0
+            && term_y >= 0
+            && term_x < geom.content_width()
+            && term_y < geom.content_height();
+        (term_x, term_y, inside)
+    }
+
+    /// The last announced content width (what the guest was told).
+    pub fn announced_width(&self) -> i32 {
+        self.announced_width
+    }
+
+    /// The last announced content height (what the guest was told).
+    pub fn announced_height(&self) -> i32 {
+        self.announced_height
+    }
+
+    /// Record the emulator size the guest already believes it has, so a later
+    /// resize to the same size does not re-announce it.
+    ///
+    /// Ported from Go `SeedAnnouncedSize`.
+    pub fn seed_announced_size(&mut self, width: i32, height: i32) {
+        self.announced_width = width;
+        self.announced_height = height;
+    }
+
+    /// Stop resize from telling the guest anything until
+    /// [`release_announcements`] is called.
+    ///
+    /// Ported from Go `HoldAnnouncements`.
+    pub fn hold_announcements(&mut self) {
+        self.announce_held = true;
+    }
+
+    /// End a hold and send the size the pane settled at if it differs from
+    /// what the guest already has.
+    ///
+    /// Ported from Go `ReleaseAnnouncements`.
+    pub fn release_announcements(&mut self) {
+        if !self.announce_held {
+            return;
+        }
+        self.announce_held = false;
+        // If the announced size differs from the last applied size, re-announce.
+        let geom = self.last_geometry().unwrap_or_default();
+        let cw = geom.content_width();
+        let ch = geom.content_height();
+        if self.announced_width != cw || self.announced_height != ch {
+            self.announced_width = cw;
+            self.announced_height = ch;
+            if let Some(writer) = &self.writer {
+                if let Some(size) = self.last_size {
+                    writer.resize(size);
+                }
+            }
+        }
+    }
+
+    /// Set whether the window is tiled (no individual borders).
+    pub fn set_tiled(&mut self, tiled: bool) {
+        self.tiled = tiled;
+    }
+
+    /// The border offset: 0 for tiled windows, 1 otherwise.
+    pub fn border_offset(&self) -> i32 {
+        if self.tiled {
+            0
+        } else {
+            1
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase G: Unix SIGWINCH
+    // -----------------------------------------------------------------------
+
+    /// Send SIGWINCH to the child process to notify it of a resize. The
+    /// kernel PTY size is already updated by `resize`; this signal tells the
+    /// shell to query the new size via `ioctl(TIOCGWINSZ)` and redraw.
+    ///
+    /// Ported from Go `TriggerRedraw`.
+    pub fn trigger_redraw(&self) {
+        if let Some(pid) = self.pid() {
+            // SAFETY: kill is a simple libc call. SIGWINCH is a benign signal.
+            unsafe {
+                nix::libc::kill(pid, nix::libc::SIGWINCH);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase G: Cleanup — reset terminal on exit
+    // -----------------------------------------------------------------------
+
+    /// Reset the host terminal to a clean state on application exit.
+    /// Sends RIS, disables mouse tracking, shows cursor, exits alt screen,
+    /// and resets all text attributes.
+    ///
+    /// Ported from Go `ResetTerminal` (cleanup.go).
+    pub fn reset_host_terminal() {
+        use std::io::Write;
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(
+            b"\x1bc\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l\x1b[?25h\x1b[?47l\x1b[0m\r\n",
+        );
+        let _ = stdout.flush();
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase G: Daemon output writer
+    // -----------------------------------------------------------------------
+
+    /// Set the daemon output writer for this window (daemon mode only).
+    pub fn set_daemon_writer(&mut self, writer: Arc<super::window_io::DaemonOutputWriter>) {
+        self.daemon_writer = Some(writer);
+    }
+
+    /// The daemon output writer, if set.
+    pub fn daemon_writer(&self) -> Option<&Arc<super::window_io::DaemonOutputWriter>> {
+        self.daemon_writer.as_ref()
+    }
+
+    /// Signal that new output is available. Used by the diff protocol and
+    /// the daemon output writer to wake the render path.
+    pub fn signal_new_output(&self) {
+        // The render wake is handled by the coalescer's render_signal channel
+        // in daemon mode. For local mode, the PTY reader's wake callback
+        // handles this. This method is a no-op hook for future wiring.
     }
 }
 
@@ -890,5 +1230,119 @@ mod tests {
         let emu = emulator.lock().unwrap();
         assert_eq!(emu.width(), 80);
         assert_eq!(emu.height(), 24);
+    }
+
+    // --- Phase G tests ---
+
+    #[test]
+    fn scrollback_mode_enter_and_exit() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        assert!(!win.scrollback_mode());
+        win.enter_scrollback_mode();
+        assert!(win.scrollback_mode());
+        assert_eq!(win.scrollback_offset(), 0);
+        win.exit_scrollback_mode();
+        assert!(!win.scrollback_mode());
+    }
+
+    #[test]
+    fn scroll_up_and_down() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        win.enter_scrollback_mode();
+        // Without scrollback content, scroll_up is clamped to 0.
+        win.scroll_up(10);
+        assert_eq!(win.scrollback_offset(), 0);
+        // scroll_down at offset 0 exits scrollback mode.
+        win.scroll_down(5);
+        assert!(!win.scrollback_mode());
+    }
+
+    #[test]
+    fn copy_mode_enter_and_exit() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        assert!(!win.in_copy_mode());
+        win.enter_copy_mode();
+        assert!(win.in_copy_mode());
+        assert!(win.copy_mode_visible());
+        assert!(!win.in_implicit_copy_mode());
+        win.exit_copy_mode();
+        assert!(!win.in_copy_mode());
+    }
+
+    #[test]
+    fn copy_mode_implicit() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        win.enter_copy_mode_implicit();
+        assert!(win.in_copy_mode());
+        assert!(!win.copy_mode_visible());
+        assert!(win.in_implicit_copy_mode());
+        win.exit_copy_mode();
+    }
+
+    #[test]
+    fn copy_cursor_set_and_get() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        win.enter_copy_mode();
+        win.set_copy_cursor(10, 5);
+        assert_eq!(win.copy_cursor(), (10, 5));
+    }
+
+    #[test]
+    fn screen_to_terminal_inside() {
+        let win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        win.publish_geometry(10, 20, 80, 24, 1);
+        let (tx, ty, inside) = win.screen_to_terminal(15, 25);
+        assert!(inside);
+        assert_eq!(tx, 4);
+        assert_eq!(ty, 4);
+    }
+
+    #[test]
+    fn screen_to_terminal_outside() {
+        let win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        win.publish_geometry(10, 20, 80, 24, 1);
+        let (_tx, _ty, inside) = win.screen_to_terminal(5, 5);
+        assert!(!inside);
+    }
+
+    #[test]
+    fn seed_announced_size() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        win.seed_announced_size(78, 22);
+        assert_eq!(win.announced_width(), 78);
+        assert_eq!(win.announced_height(), 22);
+    }
+
+    #[test]
+    fn hold_and_release_announcements() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        win.hold_announcements();
+        // Release without a change should be a no-op (no panic).
+        win.release_announcements();
+    }
+
+    #[test]
+    fn border_offset_tiled_vs_bordered() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        assert_eq!(win.border_offset(), 1);
+        win.set_tiled(true);
+        assert_eq!(win.border_offset(), 0);
+    }
+
+    #[test]
+    fn trigger_redraw_without_pty_is_safe() {
+        let win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        // Should not panic even without a PTY.
+        win.trigger_redraw();
+    }
+
+    #[test]
+    fn daemon_writer_set_and_get() {
+        let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
+        assert!(win.daemon_writer().is_none());
+        let emulator = Arc::clone(&win.emulator);
+        let writer = Arc::new(super::super::window_io::DaemonOutputWriter::new(emulator, None));
+        win.set_daemon_writer(writer);
+        assert!(win.daemon_writer().is_some());
     }
 }

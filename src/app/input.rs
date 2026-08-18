@@ -1585,6 +1585,13 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             true
         }
         MouseEventKind::Moved => {
+            // Forward motion to the focused pane's application if it requested
+            // all-motion or cell-motion tracking (DEC 1003/1002).
+            if os.mode == Mode::Terminal {
+                if let Some(idx) = os.window_at(column, row) {
+                    forward_motion_to_app(os, idx, column, row, None);
+                }
+            }
             // Hovering a pane title bar arms the tooltip delay.
             os.arm_tooltip(column, row);
             os.update_pointer_shape(column, row);
@@ -1665,6 +1672,59 @@ fn forward_wheel_to_app(os: &Os, index: usize, mouse: &MouseEvent, direction: i3
     let button = if direction < 0 { 64u8 } else { 65u8 };
     let seq = format!("\x1b[<{button};{x};{y}M\x1b[<{button};{x};{y}m");
     window.write(seq.as_bytes());
+    true
+}
+
+/// Forward mouse motion to a pane's application if it requested motion
+/// tracking (DEC 1003 all-motion or 1002 cell-motion with a button held).
+/// Returns true when the event was forwarded.
+fn forward_motion_to_app(
+    os: &Os,
+    index: usize,
+    column: i32,
+    row: i32,
+    button: Option<MouseButton>,
+) -> bool {
+    if os.mode != Mode::Terminal {
+        return false;
+    }
+    let Some(window) = os.windows.get(index) else {
+        return false;
+    };
+    let Ok(emu) = window.emulator.lock() else {
+        return false;
+    };
+    // DEC 1003 = all motion; DEC 1002 = cell motion (only with a button).
+    let all_motion = emu.is_mode_set(crate::vt::emulator::MODE_MOUSE_ANY_EVENT);
+    let cell_motion = emu.is_mode_set(crate::vt::emulator::MODE_MOUSE_BUTTON_EVENT);
+    if !all_motion && !(cell_motion && button.is_some()) {
+        return false;
+    }
+    let layout = os.current_layout();
+    let Some(rect) = layout.get(&(index as i32)) else {
+        return false;
+    };
+    let x = (column - rect.x).max(0) as u16 + 1;
+    let y = (row - rect.y).max(0) as u16 + 1;
+    // SGR mouse mode uses CSI < button ; x ; y M/m.
+    let sgr = emu.is_mode_set(crate::vt::emulator::MODE_MOUSE_EXT_SGR);
+    let btn_code = match button {
+        Some(MouseButton::Left) => 0,
+        Some(MouseButton::Right) => 2,
+        Some(MouseButton::Middle) => 1,
+        _ => 3, // release / no button
+    };
+    if sgr {
+        let seq = format!("\x1b[<{btn_code};{x};{y}M");
+        window.write(seq.as_bytes());
+    } else {
+        // Legacy CSI M encoding: button encoded as 32 + btn_code.
+        let b = (32 + btn_code) as u8;
+        let cx = (32 + x.min(255) as u8) as char;
+        let cy = (32 + y.min(255) as u8) as char;
+        let seq = format!("\x1b[M{b}{cx}{cy}");
+        window.write(seq.as_bytes());
+    }
     true
 }
 
