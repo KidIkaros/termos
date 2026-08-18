@@ -172,6 +172,15 @@ impl Animation {
     }
 }
 
+/// The default duration for window animations (Go's minimize/restore
+/// transitions use ~300ms).
+pub const DEFAULT_ANIMATION_DURATION: Duration = Duration::from_millis(300);
+
+/// The default animation duration, respecting a zero/negative override.
+pub fn animation_duration() -> Duration {
+    DEFAULT_ANIMATION_DURATION
+}
+
 /// Cubic easing for smooth transitions.
 pub fn ease_in_out_cubic(t: f64) -> f64 {
     if t < 0.5 {

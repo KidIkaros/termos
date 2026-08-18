@@ -52,6 +52,7 @@ impl Os {
             Msg::Tick => {
                 self.tick_agent_progress();
                 self.tick_agent_alerts();
+                self.tick_animations();
                 self.tick_script();
                 self.tick_stats.record_frame(Duration::ZERO);
                 self.sync_window_sizes();

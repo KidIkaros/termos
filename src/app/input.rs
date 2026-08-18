@@ -443,6 +443,9 @@ fn handle_leader_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         // Fullscreen/zoom.
         KeyCode::Char('z') => {
             os.prefix = Prefix::None;
+            if let Err(e) = os.toggle_zoom_internal() {
+                os.notify(e, "error");
+            }
             KeyResult::Consumed
         }
         // Command palette.

@@ -49,6 +49,7 @@ pub fn render(os: &Os, buf: &mut Buffer) {
 
     // Composite each pane.
     let layout = os.current_layout();
+    let bounds = os.workspace_bounds(os.current_workspace);
     let focused = os.focused_window;
     let ws = os.current_workspace;
     let all_ids = os.workspace(ws).tree.get_all_window_ids();
@@ -58,14 +59,32 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     sorted_ids.sort_unstable();
 
     for &window_id in &all_ids {
-        let Some(rect) = layout.get(&window_id) else {
-            continue;
-        };
         let Some(window) = os.windows.get(window_id as usize) else {
             continue;
         };
+        // A zoomed window fills the workspace.
+        let rect = if window.zoomed {
+            &bounds
+        } else {
+            match layout.get(&window_id) {
+                Some(r) => r,
+                None => continue,
+            }
+        };
 
-        let tui_rect = rect_to_tui(*rect, content_area);
+        // An active minimize/restore/snap animation overrides the pane rect.
+        let animated = os.animation_position(window_id);
+        let tui_rect = if let Some((ax, ay, aw, ah)) = animated {
+            let ar = Rect {
+                x: ax,
+                y: ay,
+                w: aw,
+                h: ah,
+            };
+            rect_to_tui(ar, content_area)
+        } else {
+            rect_to_tui(*rect, content_area)
+        };
         let is_focused = focused == Some(window_id as usize);
         let selection = os
             .selection

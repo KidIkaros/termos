@@ -358,6 +358,8 @@ pub struct Os {
     pub hold_mode: interaction::HoldMode,
     /// Frame timing statistics for the trace overlay.
     pub tick_stats: interaction::TickStats,
+    /// Active window animations (minimize/restore/snap), keyed by window id.
+    animations: HashMap<i32, crate::ui::animation::Animation>,
     /// Whether tape playback is active (`tape play`).
     pub script_mode: bool,
     /// Whether tape playback is paused (Ctrl+P).
@@ -491,6 +493,7 @@ impl Os {
             last_mouse_pos: (0, 0),
             hold_mode: interaction::HoldMode::new(),
             tick_stats: interaction::TickStats::new(),
+            animations: HashMap::new(),
             script_mode: false,
             script_paused: false,
             script_player: None,
@@ -874,6 +877,86 @@ impl Os {
         if !bytes.is_empty() {
             self.host_output.extend_from_slice(&bytes);
         }
+    }
+
+    /// Begin a minimize animation for a window (from its current layout rect
+    /// to the dock strip). No-op when animations are disabled or the window
+    /// has no rect.
+    pub fn begin_minimize(&mut self, window_id: i32) {
+        if !self.config.appearance.animations_enabled {
+            return;
+        }
+        let Some(rect) = self.current_layout().get(&window_id).copied() else {
+            return;
+        };
+        let duration = crate::ui::animation::animation_duration();
+        if let Some(anim) = crate::ui::animation::Animation::new_minimize(
+            rect.x, rect.y, rect.w, rect.h, rect.x, rect.y, duration,
+        ) {
+            self.animations.insert(window_id, anim);
+        }
+    }
+
+    /// Begin a restore animation for a window (from the dock strip to its
+    /// layout rect).
+    pub fn begin_restore(&mut self, window_id: i32) {
+        if !self.config.appearance.animations_enabled {
+            return;
+        }
+        let Some(rect) = self.current_layout().get(&window_id).copied() else {
+            return;
+        };
+        let duration = crate::ui::animation::animation_duration();
+        if let Some(anim) = crate::ui::animation::Animation::new_restore(
+            rect.x, rect.y, rect.x, rect.y, rect.w, rect.h, duration,
+        ) {
+            self.animations.insert(window_id, anim);
+        }
+    }
+
+    /// Begin a snap animation from the window's current layout rect to
+    /// `target`.
+    pub fn begin_snap(&mut self, window_id: i32, target: crate::layout::Rect) {
+        if !self.config.appearance.animations_enabled {
+            return;
+        }
+        let Some(rect) = self.current_layout().get(&window_id).copied() else {
+            return;
+        };
+        let duration = crate::ui::animation::animation_duration();
+        if let Some(anim) = crate::ui::animation::Animation::new_snap(
+            rect.x, rect.y, rect.w, rect.h, target.x, target.y, target.w, target.h, duration,
+        ) {
+            self.animations.insert(window_id, anim);
+        }
+    }
+
+    /// Advance every active animation; finished ones are removed. Called from
+    /// the maintenance tick.
+    pub fn tick_animations(&mut self) {
+        if self.animations.is_empty() {
+            return;
+        }
+        self.animations.retain(|_, anim| anim.update().is_some());
+    }
+
+    /// The current interpolated position of a window's animation, if one is
+    /// running. The returned rect is in content coordinates (clamped by the
+    /// caller to the pane area).
+    pub fn animation_position(&self, window_id: i32) -> Option<(i32, i32, i32, i32)> {
+        let anim = self.animations.get(&window_id)?;
+        let elapsed = anim.start_time.elapsed();
+        let mut progress = elapsed.as_secs_f64() / anim.duration.as_secs_f64();
+        if progress >= 1.0 {
+            progress = 1.0;
+        }
+        let t = crate::ui::animation::ease_in_out_cubic(progress);
+        Some((
+            crate::ui::animation::interpolate(anim.start_x, anim.end_x, t),
+            crate::ui::animation::interpolate(anim.start_y, anim.end_y, t),
+            crate::ui::animation::interpolate(anim.start_width, anim.end_width, t),
+            crate::ui::animation::interpolate(anim.start_height, anim.end_height, t),
+        ))
     }
 
     /// Drain the queued host-terminal sequences.
@@ -1926,6 +2009,42 @@ impl Os {
                 window.write(data);
             }
         }
+    }
+
+    /// Toggle zoom on the focused window: a zoomed window fills the
+    /// workspace (with a snap animation); zooming out restores its layout
+    /// rect. Used by the `z` key and the tape `ToggleZoom` command.
+    pub fn toggle_zoom_internal(&mut self) -> Result<(), String> {
+        let Some(index) = self.focused_window else {
+            return Err("no focused window".into());
+        };
+        let Some(rect) = self.current_layout().get(&(index as i32)).copied() else {
+            return Err("window has no layout rect".into());
+        };
+        let bounds = self.workspace_bounds(self.current_workspace);
+        let window = self
+            .windows
+            .get_mut(index)
+            .ok_or_else(|| "window not found".to_string())?;
+        if window.zoomed {
+            window.zoomed = false;
+            window.pre_zoom_x = 0;
+            window.pre_zoom_y = 0;
+            window.pre_zoom_width = 0;
+            window.pre_zoom_height = 0;
+            let _ = window;
+            self.sync_window_sizes();
+            return Ok(());
+        }
+        window.zoomed = true;
+        window.pre_zoom_x = rect.x;
+        window.pre_zoom_y = rect.y;
+        window.pre_zoom_width = rect.w;
+        window.pre_zoom_height = rect.h;
+        let _ = window;
+        self.begin_snap(index as i32, bounds);
+        self.sync_window_sizes();
+        Ok(())
     }
 
     /// Resize all windows to their BSP layout rects. Windows whose size
@@ -3296,7 +3415,7 @@ impl crate::tape::executor::TapeExecutor for Os {
     }
 
     fn toggle_zoom(&mut self) -> Result<(), String> {
-        Err("zoom is not implemented in this port".into())
+        self.toggle_zoom_internal()
     }
 
     fn smart_split_focused(&mut self) -> Result<(), String> {
@@ -3923,7 +4042,7 @@ mod tests {
                 raw: "RenameWindow".into(),
             };
             ce.execute(&rename_cmd).unwrap();
-            // Unsupported ops report why.
+            // Zoom is implemented: toggles the focused window.
             let zoom_cmd = Command {
                 type_: CommandType::ToggleZoom,
                 args: vec![],
@@ -3932,7 +4051,10 @@ mod tests {
                 column: 1,
                 raw: "ToggleZoom".into(),
             };
-            assert!(ce.execute(&zoom_cmd).is_err());
+            ce.execute(&zoom_cmd).unwrap();
+            drop(ce);
+            let zoomed = os.windows[os.focused_window.unwrap()].zoomed;
+            assert!(zoomed);
         }
 
         assert_eq!(os.windows.len(), 2);
@@ -4155,5 +4277,99 @@ mod agent_progress_tests {
         let mut os = os_with_window();
         feed_progress(&mut os, b"\x1b]0;my title\x07");
         assert_eq!(os.windows[0].agent_state, "");
+    }
+}
+
+#[cfg(test)]
+mod animation_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crate::terminal::pty::WinSize;
+    use crate::terminal::window::Window;
+
+    fn os_with_window() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.width = 80;
+        os.height = 25;
+        for i in 0..2 {
+            let win = Window::without_pty(
+                format!("w{i}"),
+                format!("w{i}"),
+                WinSize { cols: 40, rows: 12 },
+            );
+            os.windows.push(win);
+        }
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(1, 0, SplitType::Horizontal, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+        os
+    }
+
+    #[test]
+    fn zoom_toggles_and_restores() {
+        let mut os = os_with_window();
+        os.config.appearance.animations_enabled = false;
+        assert!(!os.windows[0].zoomed);
+        os.toggle_zoom_internal().unwrap();
+        assert!(os.windows[0].zoomed);
+        // Zoomed rect was recorded.
+        assert!(os.windows[0].pre_zoom_width > 0);
+        os.toggle_zoom_internal().unwrap();
+        assert!(!os.windows[0].zoomed);
+    }
+
+    #[test]
+    fn zoom_with_animation_registers_snap() {
+        let mut os = os_with_window();
+        os.config.appearance.animations_enabled = true;
+        os.toggle_zoom_internal().unwrap();
+        assert!(os.animations.contains_key(&0));
+        assert_eq!(
+            os.animations.get(&0).unwrap().ty,
+            crate::ui::animation::AnimationType::Snap
+        );
+    }
+
+    #[test]
+    fn tick_animations_removes_finished() {
+        let mut os = os_with_window();
+        os.config.appearance.animations_enabled = true;
+        os.toggle_zoom_internal().unwrap();
+        // A finished animation (zero duration forced) is pruned on tick.
+        if let Some(anim) = os.animations.get_mut(&0) {
+            anim.duration = std::time::Duration::ZERO;
+        }
+        os.tick_animations();
+        assert!(!os.animations.contains_key(&0));
+    }
+
+    #[test]
+    fn animations_disabled_means_no_animation() {
+        let mut os = os_with_window();
+        os.config.appearance.animations_enabled = false;
+        os.toggle_zoom_internal().unwrap();
+        assert!(os.animations.is_empty());
+    }
+
+    #[test]
+    fn animation_position_interpolates() {
+        let mut os = os_with_window();
+        os.config.appearance.animations_enabled = true;
+        os.toggle_zoom_internal().unwrap();
+        let pos = os.animation_position(0);
+        assert!(pos.is_some());
+        let (x, y, w, h) = pos.unwrap();
+        // At progress ~0 the position is the start rect; it interpolates
+        // toward the workspace bounds (80x24) as the animation runs.
+        assert_eq!(x, 0);
+        assert_eq!(w, 80);
+        assert!((0..=12).contains(&y));
+        assert!((12..=24).contains(&h));
     }
 }
