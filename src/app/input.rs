@@ -321,8 +321,7 @@ fn handle_quit_menu_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
             let run = os
                 .quit_menu
                 .as_ref()
-                .map(|m| m.items.iter().position(|item| item.key == c))
-                .flatten();
+                .and_then(|m| m.items.iter().position(|item| item.key == c));
             if let Some(idx) = run {
                 if let Some(menu) = os.quit_menu.as_mut() {
                     menu.selected = idx;
@@ -1491,11 +1490,11 @@ mod tests {
     }
 
     #[test]
-    fn quit_opens_confirmation() {
+    fn quit_opens_quit_menu() {
         let mut os = test_os();
         let result = handle_key(&mut os, &key(KeyCode::Char('q')));
         assert_eq!(result, KeyResult::Consumed);
-        assert!(os.show_quit_confirmation);
+        assert!(os.quit_menu.is_some());
     }
 
     fn leader() -> KeyEvent {
@@ -1806,11 +1805,11 @@ mod tests {
     }
 
     #[test]
-    fn handle_key_window_mode_q_opens_quit() {
+    fn handle_key_window_mode_q_opens_quit_menu() {
         let mut os = test_os();
         let result = handle_key(&mut os, &key(KeyCode::Char('q')));
         assert_eq!(result, KeyResult::Consumed);
-        assert!(os.show_quit_confirmation);
+        assert!(os.quit_menu.is_some());
     }
 
     #[test]
