@@ -233,7 +233,7 @@ impl KittyCommand {
                         cmd.medium = KittyMedium::from_char(c);
                     }
                 }
-                "c" => {
+                "o" => {
                     if let Some(c) = v.chars().next() {
                         cmd.compression = KittyCompression::from_char(c);
                     }
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn zlib_compression_and_geometry() {
-        let cmd = KittyCommand::parse("a=t,c=z,z=5,c=2,r=3,x=4,y=6,C=1,U=1");
+        let cmd = KittyCommand::parse("a=t,o=z,z=5,c=2,r=3,x=4,y=6,C=1,U=1");
         assert_eq!(cmd.compression, KittyCompression::Zlib);
         assert_eq!(cmd.z_index, 5);
         assert_eq!(cmd.columns, 2);
