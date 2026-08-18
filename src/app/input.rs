@@ -1469,6 +1469,13 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             if let Some(idx) = os.window_at(column, row) {
                 os.focus_window(idx);
                 os.prefix = Prefix::None;
+                // Click-to-type: in window-management mode a clean press arms
+                // terminal-mode entry; a drag turns it into a selection.
+                if os.mode == Mode::WindowManagement {
+                    os.click_to_type = Some((column, row));
+                    os.last_click = None;
+                    return true;
+                }
                 // Multi-click detection.
                 let now = std::time::Instant::now();
                 let pos = (mouse.column, mouse.row);
@@ -1503,6 +1510,13 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             true
         }
         MouseEventKind::Drag(MouseButton::Left) => {
+            // A drag cancels click-to-type and becomes a selection.
+            if os.click_to_type.take().is_some() && os.selection.is_none() {
+                if let Some(idx) = os.window_at(column, row) {
+                    os.begin_mouse_selection(idx, column, row);
+                }
+                return true;
+            }
             // Handle border-drag resize.
             if os.drag_resize.is_some() {
                 let pos = if matches!(
@@ -1525,6 +1539,12 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             // End border-drag resize.
             if os.drag_resize.is_some() {
                 os.end_border_drag();
+                return true;
+            }
+            // Click-to-type: a clean press in window-management mode enters
+            // terminal mode on release.
+            if os.click_to_type.take().is_some() {
+                os.enter_terminal_mode();
                 return true;
             }
             // Auto-copy on mouse release if there's a selection.
@@ -3022,5 +3042,73 @@ mod swap_snap_tests {
     fn action_dispatch_snap_left() {
         let mut os = os_with_two();
         assert!(crate::app::actions::dispatch(&mut os, "snap_left"));
+    }
+}
+
+#[cfg(test)]
+mod click_to_type_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crate::terminal::pty::WinSize;
+    use crate::terminal::window::Window;
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    fn os_with_window() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.width = 80;
+        os.height = 25;
+        let w = Window::without_pty(
+            "w0".to_string(),
+            "w0".to_string(),
+            WinSize { cols: 10, rows: 3 },
+        );
+        os.windows.push(w);
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.mode = Mode::WindowManagement;
+        os
+    }
+
+    fn mouse(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn clean_click_enters_terminal_mode() {
+        let mut os = os_with_window();
+        handle_mouse(&mut os, &mouse(MouseEventKind::Down(MouseButton::Left)));
+        assert!(os.click_to_type.is_some());
+        handle_mouse(&mut os, &mouse(MouseEventKind::Up(MouseButton::Left)));
+        assert!(os.click_to_type.is_none());
+        assert_eq!(os.mode, Mode::Terminal);
+        assert_eq!(os.focused_window, Some(0));
+    }
+
+    #[test]
+    fn drag_cancels_click_to_type() {
+        let mut os = os_with_window();
+        handle_mouse(&mut os, &mouse(MouseEventKind::Down(MouseButton::Left)));
+        handle_mouse(&mut os, &mouse(MouseEventKind::Drag(MouseButton::Left)));
+        assert!(os.click_to_type.is_none());
+        assert_eq!(os.mode, Mode::WindowManagement);
+        // A selection was started instead.
+        assert!(os.selection.is_some());
+    }
+
+    #[test]
+    fn terminal_mode_click_still_selects() {
+        let mut os = os_with_window();
+        os.mode = Mode::Terminal;
+        handle_mouse(&mut os, &mouse(MouseEventKind::Down(MouseButton::Left)));
+        assert!(os.click_to_type.is_none());
+        handle_mouse(&mut os, &mouse(MouseEventKind::Up(MouseButton::Left)));
+        assert_eq!(os.mode, Mode::Terminal);
     }
 }

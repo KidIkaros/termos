@@ -340,6 +340,10 @@ pub struct Os {
     pub drag_resize: Option<(i32, crate::layout::ResizeEdge, i32)>,
     /// Multi-click tracking: (last click time, last position, click count).
     pub last_click: Option<(std::time::Instant, (u16, u16), u8)>,
+    /// Click-to-type: a clean left press in window-management mode arms this
+    /// with the press cell; a release without a drag enters terminal mode
+    /// (Go's ClickToTypePending). A drag cancels it and starts a selection.
+    pub click_to_type: Option<(i32, i32)>,
     /// Whether the help modal overlay is open.
     pub help_open: bool,
     /// Whether the debug stats overlay is open (leader D, then `c`).
@@ -626,6 +630,7 @@ impl Os {
             clipboard: String::new(),
             drag_resize: None,
             last_click: None,
+            click_to_type: None,
             help_open: false,
             last_key_chord: String::new(),
             debug_overlay_open: false,
