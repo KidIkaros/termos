@@ -864,6 +864,11 @@ fn handle_scrollback_mode(os: &mut Os, key: &KeyEvent) -> KeyResult {
             os.copy_char_search_repeat(true);
             KeyResult::Consumed
         }
+        // Bracket matching.
+        KeyCode::Char('%') => {
+            os.copy_bracket_match();
+            KeyResult::Consumed
+        }
         // Regex search.
         KeyCode::Char('/') => {
             os.copy_search_typing = true;

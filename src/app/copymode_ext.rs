@@ -191,6 +191,14 @@ pub enum WordMotion {
     WordEnd,
     /// End of word backward (ge).
     WordEndBackward,
+    /// Whitespace-delimited word forward (W).
+    WordForwardBig,
+    /// Whitespace-delimited word backward (B).
+    WordBackwardBig,
+    /// Whitespace-delimited end of word forward (E).
+    WordEndBig,
+    /// Whitespace-delimited end of word backward (gE).
+    WordEndBackwardBig,
 }
 
 /// Find the next word boundary on a line.
@@ -203,17 +211,39 @@ pub fn word_motion(line: &str, start_col: usize, motion: WordMotion) -> usize {
     }
 
     let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
+    // The "big" motions (W/B/E) split on whitespace only.
+    let big = matches!(
+        motion,
+        WordMotion::WordForwardBig
+            | WordMotion::WordBackwardBig
+            | WordMotion::WordEndBig
+            | WordMotion::WordEndBackwardBig
+    );
+    let is_boundary = |c: char| {
+        if big {
+            c.is_whitespace()
+        } else {
+            !is_word_char(c) && !c.is_whitespace()
+        }
+    };
 
     match motion {
-        WordMotion::WordForward => {
+        WordMotion::WordForward | WordMotion::WordForwardBig => {
             let mut i = start_col;
             // Skip current word
-            if i < len && is_word_char(chars[i]) {
-                while i < len && is_word_char(chars[i]) {
+            let word_char = |c: char| {
+                if big {
+                    !c.is_whitespace()
+                } else {
+                    is_word_char(c)
+                }
+            };
+            if i < len && word_char(chars[i]) {
+                while i < len && word_char(chars[i]) {
                     i += 1;
                 }
             } else if i < len && !chars[i].is_whitespace() {
-                while i < len && !is_word_char(chars[i]) && !chars[i].is_whitespace() {
+                while i < len && !word_char(chars[i]) && !chars[i].is_whitespace() {
                     i += 1;
                 }
             }
@@ -223,29 +253,43 @@ pub fn word_motion(line: &str, start_col: usize, motion: WordMotion) -> usize {
             }
             i.min(len)
         }
-        WordMotion::WordBackward => {
+        WordMotion::WordBackward | WordMotion::WordBackwardBig => {
             if start_col == 0 {
                 return 0;
             }
             let mut i = start_col - 1;
+            let word_char = |c: char| {
+                if big {
+                    !c.is_whitespace()
+                } else {
+                    is_word_char(c)
+                }
+            };
             // Skip whitespace
             while i > 0 && chars[i].is_whitespace() {
                 i -= 1;
             }
             // Skip current word
-            if is_word_char(chars[i]) {
-                while i > 0 && is_word_char(chars[i - 1]) {
+            if word_char(chars[i]) {
+                while i > 0 && word_char(chars[i - 1]) {
                     i -= 1;
                 }
             } else if !chars[i].is_whitespace() {
-                while i > 0 && !is_word_char(chars[i - 1]) && !chars[i - 1].is_whitespace() {
+                while i > 0 && !word_char(chars[i - 1]) && !chars[i - 1].is_whitespace() {
                     i -= 1;
                 }
             }
             i
         }
-        WordMotion::WordEnd => {
+        WordMotion::WordEnd | WordMotion::WordEndBig => {
             let mut i = start_col + 1;
+            let word_char = |c: char| {
+                if big {
+                    !c.is_whitespace()
+                } else {
+                    is_word_char(c)
+                }
+            };
             // Skip whitespace
             while i < len && chars[i].is_whitespace() {
                 i += 1;
@@ -254,44 +298,43 @@ pub fn word_motion(line: &str, start_col: usize, motion: WordMotion) -> usize {
                 return len.saturating_sub(1);
             }
             // Move to end of word
-            if is_word_char(chars[i]) {
-                while i + 1 < len && is_word_char(chars[i + 1]) {
+            if word_char(chars[i]) {
+                while i + 1 < len && word_char(chars[i + 1]) {
                     i += 1;
                 }
             } else {
-                while i + 1 < len && !is_word_char(chars[i + 1]) && !chars[i + 1].is_whitespace() {
+                while i + 1 < len && !word_char(chars[i + 1]) && !chars[i + 1].is_whitespace() {
                     i += 1;
                 }
             }
             i.min(len.saturating_sub(1))
         }
-        WordMotion::WordEndBackward => {
+        WordMotion::WordEndBackward | WordMotion::WordEndBackwardBig => {
             if start_col == 0 {
                 return 0;
             }
             let mut i = start_col - 1;
-            // Skip whitespace
+            let word_char = |c: char| {
+                if big {
+                    !c.is_whitespace()
+                } else {
+                    is_word_char(c)
+                }
+            };
+            // Skip whitespace, then the current word, to its first char.
             while i > 0 && chars[i].is_whitespace() {
                 i -= 1;
             }
-            if i == 0 {
-                return 0;
+            while i > 0 && word_char(chars[i - 1]) {
+                i -= 1;
             }
-            // Move to end of previous word
-            if is_word_char(chars[i]) {
-                while i > 0 && is_word_char(chars[i - 1]) {
-                    i -= 1;
-                }
-                if i > 0 {
-                    i = i.saturating_sub(1);
-                }
-            } else {
-                while i > 0 && !is_word_char(chars[i - 1]) && !chars[i - 1].is_whitespace() {
-                    i -= 1;
-                }
-                if i > 0 {
-                    i = i.saturating_sub(1);
-                }
+            // One more left clears the current word; trailing whitespace
+            // lands us on the last char of the previous word (ge/gE).
+            if i > 0 {
+                i = i.saturating_sub(1);
+            }
+            while i > 0 && chars[i].is_whitespace() {
+                i -= 1;
             }
             i
         }
@@ -508,5 +551,48 @@ mod tests {
     #[test]
     fn scroll_copy_mode_no_scrollback() {
         assert_eq!(scroll_copy_mode(0, 10, 0, 24), 0);
+    }
+}
+
+#[cfg(test)]
+mod big_motion_tests {
+    use super::*;
+
+    #[test]
+    fn w_forward_alnum() {
+        let line = "hello world foo";
+        assert_eq!(word_motion(line, 0, WordMotion::WordForward), 6);
+    }
+
+    #[test]
+    fn w_big_forward_whitespace() {
+        // "foo-bar" is one big word (hyphen not whitespace).
+        let line = "foo-bar baz";
+        assert_eq!(word_motion(line, 0, WordMotion::WordForwardBig), 8);
+        // Plain w treats punctuation as its own word (established behavior).
+        assert_eq!(word_motion(line, 0, WordMotion::WordForward), 3);
+    }
+
+    #[test]
+    fn b_big_backward() {
+        let line = "foo-bar baz";
+        // From inside "baz", big-b goes to the start of "baz".
+        assert_eq!(word_motion(line, 9, WordMotion::WordBackwardBig), 8);
+    }
+
+    #[test]
+    fn e_big_end() {
+        let line = "foo-bar baz";
+        // From 0, big-e lands on the end of "foo-bar".
+        assert_eq!(word_motion(line, 0, WordMotion::WordEndBig), 6);
+        // Plain e lands on the end of "foo".
+        assert_eq!(word_motion(line, 0, WordMotion::WordEnd), 2);
+    }
+
+    #[test]
+    fn ge_big_end_backward() {
+        let line = "foo bar baz";
+        // From the end, ge lands on the last char of "bar".
+        assert_eq!(word_motion(line, 10, WordMotion::WordEndBackwardBig), 6);
     }
 }

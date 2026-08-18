@@ -729,8 +729,7 @@ impl Os {
                     false
                 }
             } else {
-                self.agent_state_holds
-                    .insert(w.id.clone(), (next, now));
+                self.agent_state_holds.insert(w.id.clone(), (next, now));
                 false
             };
             if publish {
@@ -2483,141 +2482,78 @@ impl Os {
     /// Move to the next word start (`w` motion).
     /// `big` true uses whitespace-only word boundaries (`W`).
     pub fn copy_word_forward(&mut self, big: bool) {
-        let line = self.copy_cursor_line;
-        let text = self.copy_line_text(line);
-        let chars: Vec<char> = text.chars().collect();
-        let mut pos = self.copy_cursor_col as usize;
-        if pos >= chars.len() {
+        let text = self.copy_line_text(self.copy_cursor_line);
+        if self.copy_cursor_col as usize >= text.chars().count() {
             // At end of line — move to next line.
             self.copy_move_line(1);
             self.copy_cursor_col = 0;
             self.sync_selection_cursor();
             return;
         }
-        // Skip current word.
-        let is_word = |c: char| {
-            if big {
-                !c.is_whitespace()
-            } else {
-                c.is_alphanumeric() || c == '_'
-            }
+        let motion = if big {
+            copymode_ext::WordMotion::WordForwardBig
+        } else {
+            copymode_ext::WordMotion::WordForward
         };
-        if pos < chars.len() && is_word(chars[pos]) {
-            while pos < chars.len() && is_word(chars[pos]) {
-                pos += 1;
-            }
-        } else if pos < chars.len() && !chars[pos].is_whitespace() {
-            // Skip punctuation.
-            while pos < chars.len() && !is_word(chars[pos]) && !chars[pos].is_whitespace() {
-                pos += 1;
-            }
-        }
-        // Skip whitespace.
-        while pos < chars.len() && chars[pos].is_whitespace() {
-            pos += 1;
-        }
-        self.copy_cursor_col = pos as i32;
+        self.copy_cursor_col =
+            copymode_ext::word_motion(&text, self.copy_cursor_col as usize, motion) as i32;
         self.sync_selection_cursor();
     }
 
     /// Move to the previous word start (`b` motion).
     pub fn copy_word_backward(&mut self, big: bool) {
-        let line = self.copy_cursor_line;
-        let text = self.copy_line_text(line);
-        let chars: Vec<char> = text.chars().collect();
-        if chars.is_empty() {
+        let text = self.copy_line_text(self.copy_cursor_line);
+        if text.chars().count() == 0 {
             self.copy_move_line(-1);
             self.copy_last_non_blank();
             return;
         }
-        let mut pos = (self.copy_cursor_col as usize).saturating_sub(1);
-        let is_word = |c: char| {
-            if big {
-                !c.is_whitespace()
-            } else {
-                c.is_alphanumeric() || c == '_'
-            }
+        let motion = if big {
+            copymode_ext::WordMotion::WordBackwardBig
+        } else {
+            copymode_ext::WordMotion::WordBackward
         };
-        // Skip whitespace backward.
-        while pos > 0 && chars[pos].is_whitespace() {
-            pos -= 1;
-        }
-        // Skip word backward.
-        if pos < chars.len() && is_word(chars[pos]) {
-            while pos > 0 && is_word(chars[pos - 1]) {
-                pos -= 1;
-            }
-        } else if pos < chars.len() && !chars[pos].is_whitespace() {
-            while pos > 0 && !is_word(chars[pos - 1]) && !chars[pos - 1].is_whitespace() {
-                pos -= 1;
-            }
-        }
-        self.copy_cursor_col = pos as i32;
+        self.copy_cursor_col =
+            copymode_ext::word_motion(&text, self.copy_cursor_col as usize, motion) as i32;
         self.sync_selection_cursor();
     }
 
     /// Move to the next word end (`e` motion).
     pub fn copy_word_end(&mut self, big: bool) {
-        let line = self.copy_cursor_line;
-        let text = self.copy_line_text(line);
-        let chars: Vec<char> = text.chars().collect();
-        let mut pos = (self.copy_cursor_col as usize + 1).min(chars.len().saturating_sub(1));
-        let is_word = |c: char| {
-            if big {
-                !c.is_whitespace()
-            } else {
-                c.is_alphanumeric() || c == '_'
-            }
-        };
-        // Skip whitespace forward.
-        while pos < chars.len() && chars[pos].is_whitespace() {
-            pos += 1;
-        }
-        if pos >= chars.len() {
-            return;
-        }
-        // Skip word forward.
-        if is_word(chars[pos]) {
-            while pos + 1 < chars.len() && is_word(chars[pos + 1]) {
-                pos += 1;
-            }
+        let text = self.copy_line_text(self.copy_cursor_line);
+        let motion = if big {
+            copymode_ext::WordMotion::WordEndBig
         } else {
-            while pos + 1 < chars.len()
-                && !is_word(chars[pos + 1])
-                && !chars[pos + 1].is_whitespace()
-            {
-                pos += 1;
-            }
-        }
-        self.copy_cursor_col = pos as i32;
+            copymode_ext::WordMotion::WordEnd
+        };
+        self.copy_cursor_col =
+            copymode_ext::word_motion(&text, self.copy_cursor_col as usize, motion) as i32;
         self.sync_selection_cursor();
     }
 
     /// Move to the next/previous occurrence of `target` on the current line.
     /// `forward` true = `f`/`t`, false = `F`/`T`.
     /// `till` true = `t`/`T` (stop before), false = `f`/`F` (land on).
+    /// Delegates to `copymode_ext::find_char_on_line` (wide-character aware).
     pub fn copy_char_search(&mut self, target: char, forward: bool, till: bool) {
         let text = self.copy_line_text(self.copy_cursor_line);
-        let chars: Vec<char> = text.chars().collect();
-        let start = self.copy_cursor_col as usize;
-        if forward {
-            for (i, &ch) in chars.iter().enumerate().skip(start + 1) {
-                if ch == target {
-                    self.copy_cursor_col = if till { i as i32 - 1 } else { i as i32 };
-                    self.sync_selection_cursor();
-                    self.copy_last_char_search = Some((target, forward, till));
-                    return;
-                }
+        let search = if forward {
+            if till {
+                copymode_ext::CharSearch::forward_till(target)
+            } else {
+                copymode_ext::CharSearch::forward_find(target)
             }
-        } else if start > 0 {
-            for i in (0..start).rev() {
-                if chars[i] == target {
-                    self.copy_cursor_col = if till { i as i32 + 1 } else { i as i32 };
-                    self.sync_selection_cursor();
-                    self.copy_last_char_search = Some((target, forward, till));
-                    return;
-                }
-            }
+        } else if till {
+            copymode_ext::CharSearch::backward_till(target)
+        } else {
+            copymode_ext::CharSearch::backward_find(target)
+        };
+        if let Some(col) =
+            copymode_ext::find_char_on_line(&text, self.copy_cursor_col as usize, &search)
+        {
+            self.copy_cursor_col = col as i32;
+            self.sync_selection_cursor();
+            self.copy_last_char_search = Some((target, forward, till));
         }
     }
 
@@ -2626,6 +2562,16 @@ impl Os {
         if let Some((target, forward, till)) = self.copy_last_char_search {
             let fwd = if reverse { !forward } else { forward };
             self.copy_char_search(target, fwd, till);
+        }
+    }
+
+    /// Jump to the matching bracket (`%` motion), if the cursor is on one.
+    pub fn copy_bracket_match(&mut self) {
+        let text = self.copy_line_text(self.copy_cursor_line);
+        if let Some(col) = copymode_ext::find_matching_bracket(&text, self.copy_cursor_col as usize)
+        {
+            self.copy_cursor_col = col as i32;
+            self.sync_selection_cursor();
         }
     }
 
