@@ -32,6 +32,31 @@ pub struct UserConfig {
     /// Alert/notification sinks, including the `[notifications.agent]` table.
     #[serde(default)]
     pub notifications: NotificationsConfig,
+    /// Tape scripting preferences.
+    #[serde(default)]
+    pub tape: TapeConfig,
+    /// Debug/diagnostic settings.
+    #[serde(default)]
+    pub debug: DebugConfig,
+}
+
+/// Tape (project automation) settings (`[tape]`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TapeConfig {
+    /// `"off"`, `"ask"`, or `"auto"`.
+    #[serde(default)]
+    pub autorun: String,
+    /// Auto-open the review dialog on detection.
+    #[serde(default)]
+    pub auto_review: bool,
+}
+
+/// Diagnostic settings (`[debug]`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DebugConfig {
+    /// Show the on-screen showkeys overlay.
+    #[serde(default)]
+    pub show_key_events: bool,
 }
 
 /// The `[notifications]` table.
@@ -40,6 +65,24 @@ pub struct NotificationsConfig {
     /// What tuios does when a pane's agent state changes.
     #[serde(default)]
     pub agent: AgentAlertsConfig,
+    /// Make errors wait for esc instead of expiring.
+    #[serde(default)]
+    pub sticky_errors: bool,
+    /// Master switch for agent alerts.
+    #[serde(default)]
+    pub agent_alerts: bool,
+    /// Go duration string for how long a done alert stays.
+    #[serde(default)]
+    pub agent_done_duration: String,
+    /// Go duration string for how long an attention alert stays.
+    #[serde(default)]
+    pub agent_attention_duration: String,
+    /// Go duration string for how long a working alert stays.
+    #[serde(default)]
+    pub agent_working_duration: String,
+    /// Go duration string for how long an idle alert stays.
+    #[serde(default)]
+    pub agent_idle_duration: String,
 }
 
 /// The `[notifications.agent]` table. Every toggle is an `Option` so `None`
@@ -122,6 +165,34 @@ pub struct AgentAlertSounds {
     pub needs_input: String,
 }
 
+/// Scrollbar configuration (`[appearance.scrollbar]`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ScrollbarConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub width: u32,
+    /// `"thin"`, `"thick"`, or `"blocks"`.
+    #[serde(default)]
+    pub style: String,
+}
+
+/// Sidebar configuration (`[appearance.sidebar]`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SidebarConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub width: u32,
+    /// `"left"` or `"right"`.
+    #[serde(default)]
+    pub position: String,
+    #[serde(default)]
+    pub show_agents: bool,
+    #[serde(default)]
+    pub show_unread: bool,
+}
+
 /// Appearance settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppearanceConfig {
@@ -145,6 +216,24 @@ pub struct AppearanceConfig {
     pub show_cpu: bool,
     pub show_ram: bool,
     pub max_fps: i32,
+    /// Clickable workspace strip in the dock.
+    #[serde(default)]
+    pub dock_workspace_tabs: bool,
+    /// Pop a truncated workspace name in full on hover.
+    #[serde(default)]
+    pub dock_workspace_tooltip: bool,
+    /// Powerline caps on the dock's pills.
+    #[serde(default)]
+    pub dock_pill_caps: bool,
+    /// Pane scrollbar configuration.
+    #[serde(default)]
+    pub scrollbar: ScrollbarConfig,
+    /// Session sidebar / rail configuration.
+    #[serde(default)]
+    pub sidebar: SidebarConfig,
+    /// Maximum width (in cells) for zoomed panes; 0 = unlimited.
+    #[serde(default)]
+    pub zoom_max_width: i32,
 }
 
 impl Default for AppearanceConfig {
@@ -170,6 +259,16 @@ impl Default for AppearanceConfig {
             show_cpu: false,
             show_ram: false,
             max_fps: 60,
+            zoom_max_width: 0,
+            dock_workspace_tabs: true,
+            dock_workspace_tooltip: true,
+            dock_pill_caps: false,
+            scrollbar: ScrollbarConfig::default(),
+            sidebar: SidebarConfig {
+                position: "left".into(),
+                width: 28,
+                ..Default::default()
+            },
         }
     }
 }
@@ -254,9 +353,32 @@ pub struct StartupConfig {
 /// Daemon settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DaemonConfig {
+    /// `"debug"`, `"info"`, `"warn"`, `"error"`.
+    #[serde(default)]
     pub log_level: String,
+    /// `"json"` or `"gob"`.
+    #[serde(default)]
     pub default_codec: String,
+    /// Custom socket path (empty = default XDG path).
+    #[serde(default)]
     pub socket_path: String,
+    /// Whether to automatically detect foreground agent processes.
+    #[serde(default = "default_true")]
+    pub agent_auto_detect: bool,
+    /// How often (in seconds) to poll for foreground agent processes.
+    #[serde(default = "default_agent_detect_seconds")]
+    pub agent_detect_seconds: u64,
+    /// Known agent binary names for foreground-process detection.
+    #[serde(default)]
+    pub agent_binaries: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_agent_detect_seconds() -> u64 {
+    2
 }
 
 impl UserConfig {
@@ -266,9 +388,18 @@ impl UserConfig {
             appearance: AppearanceConfig::default(),
             keybindings: KeybindingsConfig::default(),
             startup: StartupConfig::default(),
-            daemon: DaemonConfig::default(),
+            daemon: DaemonConfig {
+                log_level: "off".into(),
+                default_codec: "gob".into(),
+                socket_path: String::new(),
+                agent_auto_detect: true,
+                agent_detect_seconds: 2,
+                agent_binaries: Vec::new(),
+            },
             hooks: std::collections::HashMap::new(),
             notifications: NotificationsConfig::default(),
+            tape: TapeConfig::default(),
+            debug: DebugConfig::default(),
         };
         cfg.keybindings.fill_missing();
         cfg
@@ -355,86 +486,6 @@ impl UserConfig {
         };
         cfg.keybindings.fill_missing();
         cfg
-    }
-}
-
-/// CLI flag overrides that take precedence over config file values.
-/// Zero values indicate the flag was not set.
-#[derive(Debug, Default, Clone)]
-pub struct Overrides {
-    pub border_style: Option<String>,
-    pub dockbar_position: Option<String>,
-    pub ascii_only: Option<bool>,
-    pub theme: Option<String>,
-    pub no_which_key: Option<bool>,
-}
-
-impl Overrides {
-    /// Parse CLI flags from args. Returns (overrides, remaining_args).
-    /// Recognized flags:
-    /// --border-style <style>
-    /// --dockbar-position <top|bottom>
-    /// --ascii-only
-    /// --theme <name>
-    /// --no-which-key
-    pub fn parse(args: &[String]) -> (Self, Vec<String>) {
-        let mut ov = Self::default();
-        let mut remaining = Vec::new();
-        let mut i = 0;
-        while i < args.len() {
-            match args[i].as_str() {
-                "--border-style" => {
-                    i += 1;
-                    if let Some(v) = args.get(i) {
-                        ov.border_style = Some(v.clone());
-                    }
-                }
-                "--dockbar-position" => {
-                    i += 1;
-                    if let Some(v) = args.get(i) {
-                        ov.dockbar_position = Some(v.clone());
-                    }
-                }
-                "--ascii-only" => {
-                    ov.ascii_only = Some(true);
-                }
-                "--theme" => {
-                    i += 1;
-                    if let Some(v) = args.get(i) {
-                        ov.theme = Some(v.clone());
-                    }
-                }
-                "--no-which-key" => {
-                    ov.no_which_key = Some(true);
-                }
-                _ => {
-                    remaining.push(args[i].clone());
-                }
-            }
-            i += 1;
-        }
-        (ov, remaining)
-    }
-
-    /// Apply overrides to a loaded config.
-    pub fn apply(&self, config: &mut UserConfig) {
-        if let Some(ref bs) = self.border_style {
-            config.appearance.border_style = bs.clone();
-        }
-        if let Some(ref dp) = self.dockbar_position {
-            config.appearance.dockbar_position = dp.clone();
-        }
-        if let Some(true) = self.ascii_only {
-            // ASCII-only mode: use plain borders and disable animations.
-            config.appearance.border_style = "plain".into();
-            config.appearance.animations_enabled = false;
-        }
-        if let Some(ref theme) = self.theme {
-            config.appearance.theme = theme.clone();
-        }
-        if let Some(true) = self.no_which_key {
-            config.appearance.which_key_enabled = false;
-        }
     }
 }
 
@@ -638,108 +689,6 @@ mod tests {
     }
 
     #[test]
-    fn overrides_parse_all_flags() {
-        let args = vec![
-            "--border-style".into(),
-            "double".into(),
-            "--dockbar-position".into(),
-            "top".into(),
-            "--ascii-only".into(),
-            "--theme".into(),
-            "dracula".into(),
-            "--no-which-key".into(),
-            "remaining".into(),
-        ];
-        let (ov, remaining) = Overrides::parse(&args);
-        assert_eq!(ov.border_style.as_deref(), Some("double"));
-        assert_eq!(ov.dockbar_position.as_deref(), Some("top"));
-        assert_eq!(ov.ascii_only, Some(true));
-        assert_eq!(ov.theme.as_deref(), Some("dracula"));
-        assert_eq!(ov.no_which_key, Some(true));
-        assert_eq!(remaining, vec!["remaining"]);
-    }
-
-    #[test]
-    fn overrides_parse_empty() {
-        let (ov, remaining) = Overrides::parse(&[]);
-        assert!(ov.border_style.is_none());
-        assert!(remaining.is_empty());
-    }
-
-    #[test]
-    fn overrides_parse_unknown_flags() {
-        let args = vec!["--unknown".into(), "value".into()];
-        let (ov, remaining) = Overrides::parse(&args);
-        assert!(ov.border_style.is_none());
-        assert_eq!(remaining, vec!["--unknown", "value"]);
-    }
-
-    #[test]
-    fn overrides_apply_border_style() {
-        let mut cfg = UserConfig::default_config();
-        let ov = Overrides {
-            border_style: Some("double".into()),
-            ..Default::default()
-        };
-        ov.apply(&mut cfg);
-        assert_eq!(cfg.appearance.border_style, "double");
-    }
-
-    #[test]
-    fn overrides_apply_dockbar_position() {
-        let mut cfg = UserConfig::default_config();
-        let ov = Overrides {
-            dockbar_position: Some("top".into()),
-            ..Default::default()
-        };
-        ov.apply(&mut cfg);
-        assert_eq!(cfg.appearance.dockbar_position, "top");
-    }
-
-    #[test]
-    fn overrides_apply_ascii_only() {
-        let mut cfg = UserConfig::default_config();
-        let ov = Overrides {
-            ascii_only: Some(true),
-            ..Default::default()
-        };
-        ov.apply(&mut cfg);
-        assert_eq!(cfg.appearance.border_style, "plain");
-        assert!(!cfg.appearance.animations_enabled);
-    }
-
-    #[test]
-    fn overrides_apply_theme() {
-        let mut cfg = UserConfig::default_config();
-        let ov = Overrides {
-            theme: Some("dracula".into()),
-            ..Default::default()
-        };
-        ov.apply(&mut cfg);
-        assert_eq!(cfg.appearance.theme, "dracula");
-    }
-
-    #[test]
-    fn overrides_apply_no_which_key() {
-        let mut cfg = UserConfig::default_config();
-        let ov = Overrides {
-            no_which_key: Some(true),
-            ..Default::default()
-        };
-        ov.apply(&mut cfg);
-        assert!(!cfg.appearance.which_key_enabled);
-    }
-
-    #[test]
-    fn overrides_apply_noop_when_none() {
-        let mut cfg = UserConfig::default_config();
-        let original_border = cfg.appearance.border_style.clone();
-        let ov = Overrides::default();
-        ov.apply(&mut cfg);
-        assert_eq!(cfg.appearance.border_style, original_border);
-    }
-
-    #[test]
     fn fill_missing_leader_key() {
         let mut kb = KeybindingsConfig {
             leader_key: String::new(),
@@ -935,39 +884,5 @@ mod tests {
     fn appearance_config_window_title_position_default() {
         let a = AppearanceConfig::default();
         assert_eq!(a.window_title_position, "bottom");
-    }
-
-    #[test]
-    fn overrides_parse_partial_flags() {
-        let args = vec!["--border-style".into(), "double".into()];
-        let (ov, remaining) = Overrides::parse(&args);
-        assert_eq!(ov.border_style.as_deref(), Some("double"));
-        assert!(ov.dockbar_position.is_none());
-        assert!(remaining.is_empty());
-    }
-
-    #[test]
-    fn overrides_parse_missing_value() {
-        // --border-style without a value
-        let args = vec!["--border-style".into()];
-        let (ov, _) = Overrides::parse(&args);
-        assert!(ov.border_style.is_none());
-    }
-
-    #[test]
-    fn overrides_apply_multiple() {
-        let mut cfg = UserConfig::default_config();
-        let ov = Overrides {
-            border_style: Some("double".into()),
-            dockbar_position: Some("top".into()),
-            theme: Some("dracula".into()),
-            no_which_key: Some(true),
-            ..Default::default()
-        };
-        ov.apply(&mut cfg);
-        assert_eq!(cfg.appearance.border_style, "double");
-        assert_eq!(cfg.appearance.dockbar_position, "top");
-        assert_eq!(cfg.appearance.theme, "dracula");
-        assert!(!cfg.appearance.which_key_enabled);
     }
 }

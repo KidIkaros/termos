@@ -34,6 +34,16 @@ pub struct Window {
     pub agent_message: String,
     /// The harness id the last agent report named.
     pub agent_harness: String,
+    /// The typed agent state (parallel to `agent_state` wire string).
+    pub agent_state_typed: Option<crate::session::agent_state::AgentState>,
+    /// The agent message (typed, parallel to `agent_message`).
+    pub agent_message_opt: Option<String>,
+    /// The agent harness id (typed, parallel to `agent_harness`).
+    pub agent_harness_opt: Option<String>,
+    /// When the agent state was last set.
+    pub agent_state_at: Option<std::time::Instant>,
+    /// The foreground command running in the pane (base name, or empty).
+    pub foreground_cmd: Option<String>,
     /// Memoised shell working-directory read (per-window).
     pub cwd_cache: super::cwd::CwdCache,
 }
@@ -73,6 +83,11 @@ impl Window {
             agent_state: String::new(),
             agent_message: String::new(),
             agent_harness: String::new(),
+            agent_state_typed: None,
+            agent_message_opt: None,
+            agent_harness_opt: None,
+            agent_state_at: None,
+            foreground_cmd: None,
             cwd_cache: super::cwd::CwdCache::new(),
             last_size: None,
             zoomed: false,
@@ -110,6 +125,11 @@ impl Window {
             agent_state: String::new(),
             agent_message: String::new(),
             agent_harness: String::new(),
+            agent_state_typed: None,
+            agent_message_opt: None,
+            agent_harness_opt: None,
+            agent_state_at: None,
+            foreground_cmd: None,
             cwd_cache: super::cwd::CwdCache::new(),
             last_size: None,
             zoomed: false,
@@ -136,6 +156,11 @@ impl Window {
             agent_state: String::new(),
             agent_message: String::new(),
             agent_harness: String::new(),
+            agent_state_typed: None,
+            agent_message_opt: None,
+            agent_harness_opt: None,
+            agent_state_at: None,
+            foreground_cmd: None,
             cwd_cache: super::cwd::CwdCache::new(),
             last_size: None,
             zoomed: false,

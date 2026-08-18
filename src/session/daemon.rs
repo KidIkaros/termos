@@ -133,6 +133,12 @@ impl SessionBroadcast {
 pub struct SessionMeta {
     pub display_name: String,
     pub accent: String,
+    /// Runtime config options set via `set-config` / `get-config`.
+    #[serde(default)]
+    pub options: HashMap<String, String>,
+    /// Workspace names keyed by workspace number (as a string).
+    #[serde(default)]
+    pub workspace_names: HashMap<String, String>,
 }
 
 pub struct Daemon {
@@ -930,6 +936,105 @@ impl Daemon {
             .unwrap_or_default()
     }
 
+    /// Set a runtime config option on a session (`set-config`).
+    pub fn set_session_option(&self, session: &str, path: &str, value: &str) {
+        if self.manager.get(session).is_none() {
+            return;
+        }
+        self.meta
+            .lock()
+            .unwrap()
+            .entry(session.to_string())
+            .or_default()
+            .options
+            .insert(path.to_string(), value.to_string());
+    }
+
+    /// Get a runtime config option from a session (`get-config`).
+    pub fn get_session_option(&self, session: &str, path: &str) -> String {
+        self.meta
+            .lock()
+            .unwrap()
+            .get(session)
+            .and_then(|m| m.options.get(path).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Name a workspace (`set-workspace-name`).
+    pub fn set_workspace_name(&self, session: &str, workspace: i32, name: &str) {
+        if self.manager.get(session).is_none() {
+            return;
+        }
+        self.meta
+            .lock()
+            .unwrap()
+            .entry(session.to_string())
+            .or_default()
+            .workspace_names
+            .insert(workspace.to_string(), name.to_string());
+    }
+
+    /// Explain what a harness's screen rules make of a pane
+    /// (`explain-agent-screen`). Returns a JSON object with the pane's tail
+    /// and rule evaluation.
+    pub fn explain_agent_screen(
+        &self,
+        session: &str,
+        window: Option<&str>,
+        harness: &str,
+        lines: i32,
+    ) -> serde_json::Value {
+        let target = match self.resolve_window(session, window) {
+            Ok(t) => t,
+            Err(e) => {
+                return serde_json::json!({
+                    "error": e,
+                    "window_id": null,
+                    "harness_id": harness,
+                    "state": "none",
+                    "tail": [],
+                    "rules": [],
+                });
+            }
+        };
+        // Read the window's output ring tail.
+        let tail: Vec<String> = {
+            let rings = self.rings.lock().unwrap();
+            rings
+                .get(&(session.to_string(), target.clone()))
+                .map(|r| {
+                    let content = r.as_lossy();
+                    let all_lines: Vec<&str> = content.lines().collect();
+                    let n = if lines > 0 {
+                        lines as usize
+                    } else {
+                        all_lines.len().min(20)
+                    };
+                    let start = all_lines.len().saturating_sub(n);
+                    all_lines[start..].iter().map(|s| s.to_string()).collect()
+                })
+                .unwrap_or_default()
+        };
+        // Get the window's current agent state.
+        let (_wid, state, _message, _harness) = self
+            .get_agent_state(session, Some(&target))
+            .unwrap_or((target.clone(), String::new(), String::new(), String::new()));
+
+        serde_json::json!({
+            "window_id": target,
+            "harness_id": harness,
+            "state": if state.is_empty() { "none" } else { &state },
+            "source": "screen",
+            "enabled": !harness.is_empty(),
+            "lines": tail.len(),
+            "tail": tail,
+            "matched": false,
+            "rule": -1,
+            "rule_state": "none",
+            "rules": [],
+        })
+    }
+
     /// `session-info` verb: the session plus its window count and metadata.
     pub fn session_info(&self, session: &str) -> Result<serde_json::Value, String> {
         let s = self
@@ -1547,6 +1652,175 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                 let _ = send(&writer, &Message::StateResult { state });
             }
             Message::StateResult { .. } => {}
+            Message::NewWindowInSession { session, name } => {
+                let Some(target_session) = resolve_session(&attached, &session) else {
+                    let _ = send(
+                        &writer,
+                        &Message::Error {
+                            message: "no session targeted (attach to one or pass -s)".into(),
+                        },
+                    );
+                    continue;
+                };
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                match daemon.add_window(&target_session, &shell, 1) {
+                    Ok(mut info) => {
+                        if !name.is_empty() {
+                            info.title = name.clone();
+                        }
+                        let _ = send(&writer, &Message::NewWindowResult { window: info });
+                    }
+                    Err(e) => {
+                        let _ = send(&writer, &Message::Error { message: e });
+                    }
+                }
+            }
+            Message::NewWindowResult { .. } => {}
+            Message::RunCommand { session, command, args } => {
+                let Some(target_session) = resolve_session(&attached, &session) else {
+                    let _ = send(
+                        &writer,
+                        &Message::Error {
+                            message: "no session targeted (attach to one or pass -s)".into(),
+                        },
+                    );
+                    continue;
+                };
+                // Execute the tape command by broadcasting it to attached
+                // clients (same flow as `tape exec` for single commands).
+                let cmd = crate::tape::command::Command::from_name_and_args(&command, &args);
+                daemon.broadcast_event(
+                    &target_session,
+                    &Message::TapeCommand {
+                        index: 0,
+                        total: 1,
+                        command: cmd,
+                    },
+                );
+                daemon.broadcast_event(&target_session, &Message::TapeFinished { total: 1 });
+                let _ = send(
+                    &writer,
+                    &Message::RunCommandResult {
+                        result: serde_json::json!({ "executed": command }),
+                    },
+                );
+            }
+            Message::RunCommandResult { .. } => {}
+            Message::SetConfig { session, path, value } => {
+                let Some(target_session) = resolve_session(&attached, &session) else {
+                    let _ = send(
+                        &writer,
+                        &Message::Error {
+                            message: "no session targeted (attach to one or pass -s)".into(),
+                        },
+                    );
+                    continue;
+                };
+                // Record the config option in session meta as a key-value pair.
+                daemon.set_session_option(&target_session, &path, &value);
+                let _ = send(
+                    &writer,
+                    &Message::ConfigValue {
+                        path: path.clone(),
+                        value: value.clone(),
+                    },
+                );
+            }
+            Message::GetConfig { session, path } => {
+                let Some(target_session) = resolve_session(&attached, &session) else {
+                    let _ = send(
+                        &writer,
+                        &Message::Error {
+                            message: "no session targeted (attach to one or pass -s)".into(),
+                        },
+                    );
+                    continue;
+                };
+                let value = daemon.get_session_option(&target_session, &path);
+                let _ = send(&writer, &Message::ConfigValue { path, value });
+            }
+            Message::ConfigValue { .. } => {}
+            Message::GetWindow { session, window } => {
+                let Some(target_session) = resolve_session(&attached, &session) else {
+                    let _ = send(
+                        &writer,
+                        &Message::Error {
+                            message: "no session targeted (attach to one or pass -s)".into(),
+                        },
+                    );
+                    continue;
+                };
+                match daemon.resolve_window(&target_session, window.as_deref()) {
+                    Ok(target) => {
+                        let windows = daemon.windows.lock().unwrap();
+                        let info = windows
+                            .get(&target_session)
+                            .and_then(|wins| wins.iter().find(|w| w.info.id == target))
+                            .map(|w| w.info.clone());
+                        drop(windows);
+                        match info {
+                            Some(info) => {
+                                let detail = serde_json::json!({
+                                    "window_id": info.id,
+                                    "title": info.title,
+                                    "workspace": info.workspace,
+                                    "size": format!("{}x{}", info.cols, info.rows),
+                                    "cols": info.cols,
+                                    "rows": info.rows,
+                                    "agent_state": info.agent_state,
+                                    "agent_message": info.agent_message,
+                                    "agent_harness": info.agent_harness,
+                                });
+                                let _ = send(&writer, &Message::WindowDetail { detail });
+                            }
+                            None => {
+                                let _ = send(&writer, &Message::Error {
+                                    message: format!("window '{target}' not found"),
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = send(&writer, &Message::Error { message: e });
+                    }
+                }
+            }
+            Message::WindowDetail { .. } => {}
+            Message::SetWorkspaceName { session, workspace, name } => {
+                let Some(target_session) = resolve_session(&attached, &session) else {
+                    let _ = send(
+                        &writer,
+                        &Message::Error {
+                            message: "no session targeted (attach to one or pass -s)".into(),
+                        },
+                    );
+                    continue;
+                };
+                // Record the workspace name in session meta.
+                daemon.set_workspace_name(&target_session, workspace, &name);
+                let _ = send(
+                    &writer,
+                    &Message::ConfigValue {
+                        path: format!("workspace_{workspace}_name"),
+                        value: name,
+                    },
+                );
+            }
+            Message::ExplainAgentScreen { session, window, harness, lines } => {
+                let Some(target_session) = resolve_session(&attached, &session) else {
+                    let _ = send(
+                        &writer,
+                        &Message::Error {
+                            message: "no session targeted (attach to one or pass -s)".into(),
+                        },
+                    );
+                    continue;
+                };
+                // Build the explanation from the window's output ring.
+                let explanation = daemon.explain_agent_screen(&target_session, window.as_deref(), &harness, lines);
+                let _ = send(&writer, &Message::ExplainResult { explanation });
+            }
+            Message::ExplainResult { .. } => {}
             _ => {}
         }
     }

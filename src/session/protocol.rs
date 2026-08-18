@@ -149,6 +149,60 @@ pub enum Message {
     StateResult {
         state: crate::session::state_merge::SessionState,
     },
+    /// Client → daemon: create a new window in a named session (`new-window`).
+    /// Unlike `NewWindow` (which targets the attached session), this carries
+    /// an explicit session name so it works headlessly.
+    NewWindowInSession {
+        session: Option<String>,
+        name: String,
+    },
+    /// Daemon → client: the new window's info (reply to `NewWindowInSession`).
+    NewWindowResult { window: WindowInfo },
+    /// Client → daemon: execute a tape command in a running session
+    /// (`run-command`).
+    RunCommand {
+        session: Option<String>,
+        command: String,
+        args: Vec<String>,
+    },
+    /// Daemon → client: the result of a `run-command` call.
+    RunCommandResult { result: serde_json::Value },
+    /// Client → daemon: set a runtime config option (`set-config`).
+    SetConfig {
+        session: Option<String>,
+        path: String,
+        value: String,
+    },
+    /// Client → daemon: read a runtime config option (`get-config`).
+    GetConfig {
+        session: Option<String>,
+        path: String,
+    },
+    /// Daemon → client: the value of a runtime config option.
+    ConfigValue { path: String, value: String },
+    /// Client → daemon: get detailed window info (`get-window`).
+    GetWindow {
+        session: Option<String>,
+        window: Option<String>,
+    },
+    /// Daemon → client: detailed window info (reply to `GetWindow`).
+    WindowDetail { detail: serde_json::Value },
+    /// Client → daemon: name a workspace (`set-workspace-name`).
+    SetWorkspaceName {
+        session: Option<String>,
+        workspace: i32,
+        name: String,
+    },
+    /// Client → daemon: explain what a harness's screen rules make of a pane
+    /// (`explain-agent-screen`).
+    ExplainAgentScreen {
+        session: Option<String>,
+        window: Option<String>,
+        harness: String,
+        lines: i32,
+    },
+    /// Daemon → client: the screen-rule explanation.
+    ExplainResult { explanation: serde_json::Value },
 }
 
 /// Write a length-prefixed (u32 BE) JSON frame.

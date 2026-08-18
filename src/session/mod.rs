@@ -2,6 +2,10 @@
 //! ported from TUIOS `internal/session`. The daemon owns PTYs; clients run
 //! their own emulator and renderer and exchange raw bytes with the daemon.
 
+pub mod agent_detect;
+pub mod agent_hold;
+pub mod agent_screen;
+pub mod agent_source;
 pub mod agent_state;
 pub mod client;
 pub mod daemon;

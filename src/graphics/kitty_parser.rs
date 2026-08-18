@@ -164,6 +164,57 @@ pub struct KittyCommand {
     pub payload: Vec<u8>,
 }
 
+impl KittyCommand {
+    /// Whether the payload is zlib-compressed.
+    pub fn compressed(&self) -> bool {
+        matches!(self.compression, KittyCompression::Zlib)
+    }
+
+    /// Delete all images and placements.
+    pub fn delete_all(&self) -> bool {
+        matches!(self.delete, KittyDeleteTarget::AllImages)
+    }
+
+    /// Delete the placement at the cursor position.
+    pub fn delete_at_cursor(&self) -> bool {
+        // `d=c` would be cursor-based delete; the Go implementation uses
+        // the absence of image/placement ids with a column/row offset of
+        // zero to signal cursor-based delete.
+        self.action == KittyAction::Delete
+            && self.image_id == 0
+            && self.image_number == 0
+            && self.placement_id == 0
+            && !self.delete_all()
+            && self.x_offset == 0
+            && self.y_offset == 0
+    }
+
+    /// Delete placements in the cursor's column.
+    pub fn delete_in_column(&self) -> bool {
+        self.action == KittyAction::Delete && self.x_offset != 0
+    }
+
+    /// Delete placements in the cursor's row.
+    pub fn delete_in_row(&self) -> bool {
+        self.action == KittyAction::Delete && self.y_offset != 0
+    }
+
+    /// Delete placements by z-index.
+    pub fn delete_by_z_index(&self) -> bool {
+        self.action == KittyAction::Delete && self.z_index != 0
+    }
+
+    /// The column offset for delete-in-column operations.
+    pub fn column_offset(&self) -> i32 {
+        self.x_offset
+    }
+
+    /// The row offset for delete-in-row operations.
+    pub fn row_offset(&self) -> i32 {
+        self.y_offset
+    }
+}
+
 impl Default for KittyCommand {
     fn default() -> Self {
         Self {
@@ -194,6 +245,13 @@ impl Default for KittyCommand {
             payload: Vec::new(),
         }
     }
+}
+
+/// Parse an APC payload (bytes, without the `\x1b_G`/`\x1b\` wrappers).
+/// Returns `None` if the payload is not valid UTF-8.
+pub fn parse_kitty_command(payload: &[u8]) -> Option<KittyCommand> {
+    let s = std::str::from_utf8(payload).ok()?;
+    Some(KittyCommand::parse(s))
 }
 
 impl KittyCommand {
@@ -229,7 +287,12 @@ impl KittyCommand {
                     }
                 }
                 "m" => {
-                    if let Some(c) = v.chars().next() {
+                    // `m` is dual-purpose: a numeric value (0/1) is the
+                    // more-flag for chunked transmission; a character value
+                    // (d/f/t/s) is the transmission medium.
+                    if let Ok(n) = v.parse::<i32>() {
+                        cmd.more = n != 0;
+                    } else if let Some(c) = v.chars().next() {
                         cmd.medium = KittyMedium::from_char(c);
                     }
                 }
@@ -260,10 +323,7 @@ impl KittyCommand {
                 _ => {}
             }
         }
-        // The `m` parameter doubles as the more-flag when it has no `=`.
-        if data.is_empty() {
-            cmd.more = true;
-        }
+        // Decode the data part (base64 for direct medium, path/id otherwise).
         if !data.is_empty() {
             use base64::Engine;
             if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(data.trim()) {

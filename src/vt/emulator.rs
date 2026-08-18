@@ -89,6 +89,10 @@ pub struct Emulator {
     cell_height: u16,
     /// Kitty keyboard protocol flag stack.
     kitty_kbd_stack: Vec<u32>,
+    /// Kitty graphics protocol state (images, placements, pending chunks).
+    kitty_state: crate::vt::kitty_state::KittyState,
+    /// Sixel graphics state (placements tracked by absolute scrollback line).
+    sixel_state: crate::vt::sixel_state::SixelState,
 }
 
 impl Default for Emulator {
@@ -126,6 +130,8 @@ impl Emulator {
             cell_width: 8,
             cell_height: 16,
             kitty_kbd_stack: vec![0],
+            kitty_state: crate::vt::kitty_state::KittyState::new(),
+            sixel_state: crate::vt::sixel_state::SixelState::new(),
         };
         // Alt screen keeps no scrollback.
         emu.screens[1].set_scrollback_enabled(false);
@@ -844,6 +850,7 @@ impl Handler for Emulator {
                 self.gr = 1;
                 self.gsingle = 0;
                 self.kitty_kbd_stack = vec![0];
+                self.clear_graphics();
                 self.screen_mut().clear();
                 self.screen_mut().set_cursor(0, 0, false);
                 self.screen_mut().scroll = ScrollRegion::full(self.width(), self.height());
@@ -1141,6 +1148,22 @@ impl Handler for Emulator {
         if seq.final_byte == b'q' {
             let mut data = Vec::with_capacity(seq.data.len());
             data.extend_from_slice(&seq.data);
+            // Track the sixel placement in the state machine. The absolute
+            // line is the current scrollback depth so the placement scrolls
+            // naturally with content.
+            if let Some(cmd) = crate::vt::sixel_parser::parse_sixel_command(&data) {
+                let absolute_line = self.screen().scrollback.len() as i32;
+                let cursor_col = self.screen().cursor.pos.x;
+                self.sixel_state.add(crate::vt::sixel_state::SixelPlacement {
+                    absolute_line,
+                    column: cursor_col,
+                    width: cmd.width,
+                    height: cmd.height,
+                    rows: cmd.rows_for_height(self.cell_height as i32),
+                    cols: cmd.cols_for_width(self.cell_width as i32),
+                    raw_sequence: data.clone(),
+                });
+            }
             self.pending_sixel.push(data);
         }
     }
@@ -1297,6 +1320,11 @@ impl Handler for Emulator {
         // Only APC sequences starting with 'G' (Kitty graphics) are tracked;
         // other APC uses are rare and can be dropped.
         if seq.data.first().copied() == Some(b'G') {
+            // Process the Kitty command through the state machine before
+            // forwarding for passthrough. The state tracks images, placements,
+            // and chunked transmissions so that the app layer can answer
+            // queries and manage lifecycle without the host terminal.
+            self.process_kitty_apc(&seq.data);
             self.pending_apc.push(seq.data.clone());
         }
     }
@@ -1323,6 +1351,183 @@ impl Emulator {
     /// Drain pending Sixel DCS payloads (the bytes after `DCS ... q`).
     pub fn drain_pending_sixel(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.pending_sixel)
+    }
+
+    /// Process a Kitty APC payload through the graphics state machine.
+    /// The `data` slice includes the leading `G` introducer.
+    fn process_kitty_apc(&self, data: &[u8]) {
+        use crate::graphics::kitty_parser::{parse_kitty_command, KittyAction, KittyFormat as ParserFmt};
+        use crate::vt::kitty_state::{
+            KittyCompression, KittyFormat as StateFmt, KittyImage, KittyPendingChunk, KittyPlacement,
+        };
+
+        // Skip the leading 'G'.
+        let payload = if data.first() == Some(&b'G') {
+            &data[1..]
+        } else {
+            data
+        };
+
+        let Some(cmd) = parse_kitty_command(payload) else {
+            return;
+        };
+
+        let map_fmt = |f: ParserFmt| match f {
+            ParserFmt::Rgb => StateFmt::Rgb,
+            ParserFmt::Png => StateFmt::Png,
+            _ => StateFmt::Rgba,
+        };
+
+        match cmd.action {
+            KittyAction::Query => {
+                // Query: the host terminal answers; we don't synthesize a
+                // response here. The passthrough layer handles it.
+            }
+            KittyAction::Transmit | KittyAction::TransmitAndDisplay | KittyAction::TransmitPlace => {
+                let image_id = if cmd.image_id > 0 {
+                    cmd.image_id
+                } else {
+                    self.kitty_state.allocate_id()
+                };
+
+                if cmd.more {
+                    // Chunked transmission — accumulate.
+                    if !self.kitty_state.has_pending() {
+                        self.kitty_state.set_pending(KittyPendingChunk {
+                            image_id,
+                            image_number: cmd.image_number,
+                            format: map_fmt(cmd.format),
+                            compression: if cmd.compressed() {
+                                KittyCompression::Zlib
+                            } else {
+                                KittyCompression::None
+                            },
+                            width: cmd.width,
+                            height: cmd.height,
+                            data_buffer: Vec::new(),
+                        });
+                    }
+                    self.kitty_state.append_to_pending(&cmd.payload);
+                } else {
+                    // Single-shot transmission.
+                    let img = KittyImage {
+                        id: image_id,
+                        number: cmd.image_number,
+                        width: cmd.width,
+                        height: cmd.height,
+                        format: map_fmt(cmd.format),
+                        compression: if cmd.compressed() {
+                            KittyCompression::Zlib
+                        } else {
+                            KittyCompression::None
+                        },
+                        data: cmd.payload.clone(),
+                        transmit_time: std::time::Instant::now(),
+                    };
+                    self.kitty_state.add_image(img);
+
+                    if matches!(
+                        cmd.action,
+                        KittyAction::TransmitPlace | KittyAction::TransmitAndDisplay
+                    ) {
+                        let cursor = &self.screen().cursor.pos;
+                        self.kitty_state.add_placement(KittyPlacement {
+                            image_id,
+                            placement_id: cmd.placement_id,
+                            screen_x: cursor.x + cmd.x_offset,
+                            screen_y: cursor.y + cmd.y_offset,
+                            absolute_line: self.screen().scrollback.len() as i32 + cursor.y,
+                            x_offset: cmd.x_offset,
+                            y_offset: cmd.y_offset,
+                            source_x: cmd.source_x,
+                            source_y: cmd.source_y,
+                            source_width: cmd.source_width,
+                            source_height: cmd.source_height,
+                            columns: cmd.columns,
+                            rows: cmd.rows,
+                            z_index: cmd.z_index,
+                            cursor_move: cmd.cursor_move,
+                            virtual_placement: cmd.virtual_placement,
+                        });
+                    }
+                }
+            }
+            KittyAction::Display => {
+                // Place an already-transmitted image.
+                if cmd.image_id > 0 || cmd.image_number > 0 {
+                    let id = if cmd.image_id > 0 {
+                        cmd.image_id
+                    } else if let Some(img) = self.kitty_state.get_image_by_number(cmd.image_number)
+                    {
+                        img.id
+                    } else {
+                        return;
+                    };
+                    let cursor = &self.screen().cursor.pos;
+                    self.kitty_state.add_placement(KittyPlacement {
+                        image_id: id,
+                        placement_id: cmd.placement_id,
+                        screen_x: cursor.x + cmd.x_offset,
+                        screen_y: cursor.y + cmd.y_offset,
+                        absolute_line: self.screen().scrollback.len() as i32 + cursor.y,
+                        x_offset: cmd.x_offset,
+                        y_offset: cmd.y_offset,
+                        source_x: cmd.source_x,
+                        source_y: cmd.source_y,
+                        source_width: cmd.source_width,
+                        source_height: cmd.source_height,
+                        columns: cmd.columns,
+                        rows: cmd.rows,
+                        z_index: cmd.z_index,
+                        cursor_move: cmd.cursor_move,
+                        virtual_placement: cmd.virtual_placement,
+                    });
+                }
+            }
+            KittyAction::Delete => {
+                // Delete by image, placement, row, column, z-index, or cursor.
+                if cmd.image_id > 0 {
+                    if cmd.placement_id > 0 {
+                        self.kitty_state.delete_placement(cmd.image_id, cmd.placement_id);
+                    } else {
+                        self.kitty_state.delete_image(cmd.image_id);
+                    }
+                } else if cmd.image_number > 0 {
+                    self.kitty_state.delete_image_by_number(cmd.image_number);
+                } else if cmd.delete_all() {
+                    self.kitty_state.clear();
+                } else if cmd.delete_at_cursor() {
+                    let cursor = &self.screen().cursor.pos;
+                    self.kitty_state.delete_placements_at_cursor(cursor.x, cursor.y);
+                } else if cmd.delete_in_column() {
+                    self.kitty_state
+                        .delete_placements_in_column(cmd.column_offset());
+                } else if cmd.delete_in_row() {
+                    self.kitty_state.delete_placements_in_row(cmd.row_offset());
+                } else if cmd.delete_by_z_index() {
+                    self.kitty_state.delete_placements_by_z_index(cmd.z_index);
+                }
+            }
+        }
+    }
+
+    /// Borrow the Kitty graphics state (for the app layer's placement
+    /// queries and passthrough coordination).
+    pub fn kitty_state(&self) -> &crate::vt::kitty_state::KittyState {
+        &self.kitty_state
+    }
+
+    /// Borrow the Sixel graphics state (for the app layer's placement
+    /// queries and passthrough coordination).
+    pub fn sixel_state(&self) -> &crate::vt::sixel_state::SixelState {
+        &self.sixel_state
+    }
+
+    /// Clear all graphics state (called on hard reset / alternate screen
+    /// entry where the host terminal also clears its graphics).
+    pub fn clear_graphics(&mut self) {
+        self.kitty_state.clear();
+        self.sixel_state.clear();
     }
 
     /// The recorded OSC 133 semantic markers.

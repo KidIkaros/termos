@@ -244,6 +244,103 @@ impl AgentClaims {
     }
 }
 
+/// The effective harness id after a report is applied.
+///
+/// Attribution and state answer different questions. The harness id is the one
+/// the foreground-process detector owns: it names the harness when it sees the
+/// binary and clears it when the agent leaves the foreground. A report says
+/// what the agent is doing, and most reporters have no idea what termos calls
+/// the program they run inside. So a report that names no harness is silent
+/// about attribution rather than denying it, and a reporter that does name one
+/// is refining what the detector guessed. The one report that clears it is
+/// `None`, since that is the caller saying the pane is not running an agent.
+pub fn harness_after_report(current_harness: &str, report: &AgentReport) -> String {
+    if !report.harness.is_empty() || report.state == AgentState::None {
+        return report.harness.clone();
+    }
+    current_harness.to_string()
+}
+
+/// The result of applying an agent report.
+#[derive(Debug, Clone)]
+pub struct ApplyResult {
+    /// The effective state after the report was applied (or refused).
+    pub effective_state: AgentState,
+    /// Whether the report was the one that set the state.
+    pub applied: bool,
+    /// The harness id after the report.
+    pub harness: String,
+    /// Whether a blocker override was taken.
+    pub override_taken: bool,
+}
+
+/// Apply an agent report to a window's state, respecting source ranking.
+///
+/// A report from a source ranked below the one that currently owns the window
+/// is refused, and refusing is not an error: a screen rule guessing at a pane
+/// whose harness reports for itself is the ordinary case. The one exception is
+/// `blocker_overrides_claim`.
+///
+/// This is the pure logic extracted from the Go `ApplyAgentReport` method,
+/// operating on a single window's claim and state without the session lock.
+/// The caller is responsible for persisting the result.
+///
+/// `claim` is `None` when no source has claimed the window — in that case any
+/// source is accepted.
+pub fn apply_agent_report(
+    current_state: AgentState,
+    current_harness: &str,
+    claim: Option<&AgentClaim>,
+    report: &AgentReport,
+    now: i64,
+) -> ApplyResult {
+    let r = report.clone();
+
+    // A window nobody has claimed is open to any source, including the weakest.
+    let claim = match claim {
+        Some(c) => c.clone(),
+        None => {
+            let harness = harness_after_report(current_harness, &r);
+            return ApplyResult {
+                effective_state: r.state,
+                applied: true,
+                harness,
+                override_taken: false,
+            };
+        }
+    };
+
+    // Check if the report's source can write over the current claim.
+    if r.source.rank() < claim.source.rank() {
+        // Check the blocker override exception.
+        if !blocker_overrides_claim(current_state, now, &r, now) {
+            return ApplyResult {
+                effective_state: current_state,
+                applied: false,
+                harness: current_harness.to_string(),
+                override_taken: false,
+            };
+        }
+        // Override: take the claim, remembering what was displaced.
+        let harness = harness_after_report(current_harness, &r);
+        return ApplyResult {
+            effective_state: r.state,
+            applied: true,
+            harness,
+            override_taken: true,
+        };
+    }
+
+    // Same-rank or higher: the report wins.
+    let harness = harness_after_report(current_harness, &r);
+    ApplyResult {
+        effective_state: r.state,
+        applied: true,
+        harness,
+        override_taken: false,
+    }
+}
+
 /// Whether a window has been silent since cutoff.
 pub fn stalled_at(state_at: i64, pty_last_output: i64, cutoff: i64) -> bool {
     let effective = state_at.max(pty_last_output);
@@ -530,5 +627,94 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
         holds.prune();
         assert!(!holds.held("w1"));
+    }
+
+    #[test]
+    fn harness_after_report_keeps_existing() {
+        let report = AgentReport {
+            state: AgentState::Working,
+            ..Default::default()
+        };
+        assert_eq!(harness_after_report("claude-code", &report), "claude-code");
+    }
+
+    #[test]
+    fn harness_after_report_uses_report_harness() {
+        let report = AgentReport {
+            state: AgentState::Working,
+            harness: "aider".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(harness_after_report("claude-code", &report), "aider");
+    }
+
+    #[test]
+    fn harness_after_report_clears_on_none() {
+        let report = AgentReport {
+            state: AgentState::None,
+            ..Default::default()
+        };
+        assert_eq!(harness_after_report("claude-code", &report), "");
+    }
+
+    #[test]
+    fn apply_report_unclaimed_accepts_any() {
+        let report = AgentReport {
+            state: AgentState::Working,
+            source: AgentSource::Stall,
+            ..Default::default()
+        };
+        let result = apply_agent_report(AgentState::None, "", None, &report, 0);
+        assert!(result.applied);
+        assert_eq!(result.effective_state, AgentState::Working);
+        assert!(!result.override_taken);
+    }
+
+    #[test]
+    fn apply_report_lower_rank_refused() {
+        let claim = AgentClaim {
+            source: AgentSource::Report,
+            ..Default::default()
+        };
+        let report = AgentReport {
+            state: AgentState::Idle,
+            source: AgentSource::Screen,
+            ..Default::default()
+        };
+        let result = apply_agent_report(AgentState::Working, "", Some(&claim), &report, 0);
+        assert!(!result.applied);
+        assert_eq!(result.effective_state, AgentState::Working);
+    }
+
+    #[test]
+    fn apply_report_same_rank_accepted() {
+        let claim = AgentClaim {
+            source: AgentSource::Report,
+            ..Default::default()
+        };
+        let report = AgentReport {
+            state: AgentState::NeedsInput,
+            source: AgentSource::Report,
+            ..Default::default()
+        };
+        let result = apply_agent_report(AgentState::Working, "", Some(&claim), &report, 0);
+        assert!(result.applied);
+        assert_eq!(result.effective_state, AgentState::NeedsInput);
+    }
+
+    #[test]
+    fn apply_report_higher_rank_accepted() {
+        let claim = AgentClaim {
+            source: AgentSource::Screen,
+            ..Default::default()
+        };
+        let report = AgentReport {
+            state: AgentState::Done,
+            source: AgentSource::Report,
+            ..Default::default()
+        };
+        let result = apply_agent_report(AgentState::Working, "", Some(&claim), &report, 0);
+        assert!(result.applied);
+        assert_eq!(result.effective_state, AgentState::Done);
     }
 }

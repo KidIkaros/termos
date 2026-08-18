@@ -233,6 +233,11 @@ pub fn all_themes() -> Vec<Theme> {
     themes
 }
 
+/// List the names of all available themes (built-in + custom).
+pub fn list_theme_names() -> Vec<String> {
+    all_themes().into_iter().map(|t| t.name).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

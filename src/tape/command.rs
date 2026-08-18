@@ -112,6 +112,81 @@ impl Command {
             other => format!("{other:?} {:?}", self.args),
         }
     }
+
+    /// Build a Command from a name and args (used by `run-command`).
+    /// The name is matched case-insensitively against CommandType variants.
+    pub fn from_name_and_args(name: &str, args: &[String]) -> Self {
+        let type_ = match name.to_lowercase().as_str() {
+            "type" => CommandType::Type,
+            "sleep" => CommandType::Sleep,
+            "enter" => CommandType::Enter,
+            "space" => CommandType::Space,
+            "backspace" => CommandType::Backspace,
+            "delete" => CommandType::Delete,
+            "tab" => CommandType::Tab,
+            "escape" => CommandType::Escape,
+            "up" => CommandType::Up,
+            "down" => CommandType::Down,
+            "left" => CommandType::Left,
+            "right" => CommandType::Right,
+            "home" => CommandType::Home,
+            "end" => CommandType::End,
+            "keycombo" => CommandType::KeyCombo,
+            "terminalmode" => CommandType::TerminalMode,
+            "windowmanagementmode" => CommandType::WindowManagementMode,
+            "newwindow" => CommandType::NewWindow,
+            "closewindow" => CommandType::CloseWindow,
+            "nextwindow" => CommandType::NextWindow,
+            "prevwindow" => CommandType::PrevWindow,
+            "focuswindow" => CommandType::FocusWindow,
+            "renamewindow" => CommandType::RenameWindow,
+            "minimizewindow" => CommandType::MinimizeWindow,
+            "restorewindow" => CommandType::RestoreWindow,
+            "toggletiling" => CommandType::ToggleTiling,
+            "enabletiling" => CommandType::EnableTiling,
+            "disabletiling" => CommandType::DisableTiling,
+            "snapleft" => CommandType::SnapLeft,
+            "snapright" => CommandType::SnapRight,
+            "snapfullscreen" => CommandType::SnapFullscreen,
+            "switchworkspace" => CommandType::SwitchWorkspace,
+            "movetoworkspace" => CommandType::MoveToWorkspace,
+            "moveandfollowworkspace" => CommandType::MoveAndFollowWorkspace,
+            "split" => CommandType::Split,
+            "focus" => CommandType::Focus,
+            "rotatesplit" => CommandType::RotateSplit,
+            "equalizesplits" => CommandType::EqualizeSplits,
+            "preselect" => CommandType::Preselect,
+            "wait" => CommandType::Wait,
+            "waituntilregex" => CommandType::WaitUntilRegex,
+            "set" => CommandType::Set,
+            "output" => CommandType::Output,
+            "source" => CommandType::Source,
+            "enableanimations" => CommandType::EnableAnimations,
+            "disableanimations" => CommandType::DisableAnimations,
+            "toggleanimations" => CommandType::ToggleAnimations,
+            "comment" => CommandType::Comment,
+            "setconfig" => CommandType::SetConfig,
+            "settheme" => CommandType::SetTheme,
+            "setdockbarposition" => CommandType::SetDockbarPosition,
+            "setborderstyle" => CommandType::SetBorderStyle,
+            "shownotification" => CommandType::ShowNotification,
+            "focusdirection" => CommandType::FocusDirection,
+            "togglezoom" => CommandType::ToggleZoom,
+            "smartsplit" => CommandType::SmartSplit,
+            "commandpalette" => CommandType::CommandPalette,
+            "savelayout" => CommandType::SaveLayout,
+            "loadlayout" => CommandType::LoadLayout,
+            _ => CommandType::Comment, // unknown → no-op
+        };
+        Self {
+            type_,
+            args: args.to_vec(),
+            delay: Duration::ZERO,
+            line: 0,
+            column: 0,
+            raw: name.to_string(),
+        }
+    }
 }
 
 /// Parse a Go-style duration string (`500ms`, `1.5s`, `1m30s`, `1h2m3s`).

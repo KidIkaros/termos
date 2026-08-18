@@ -45,6 +45,8 @@ pub fn validate_config(config: &UserConfig) -> ValidationResult {
     validate_daemon(config, &mut result);
     validate_startup(config, &mut result);
     validate_notifications(config, &mut result);
+    validate_tape(config, &mut result);
+    validate_debug(config, &mut result);
 
     result
 }
@@ -84,6 +86,92 @@ fn validate_appearance(config: &UserConfig, result: &mut ValidationResult) {
             severity: Severity::Error,
         });
     }
+
+    // Validate window_title_position.
+    let valid_title_positions = ["top", "bottom", "hidden"];
+    if !valid_title_positions.contains(&config.appearance.window_title_position.as_str()) {
+        result.errors.push(ValidationError {
+            field: "appearance".into(),
+            key: "window_title_position".into(),
+            message: format!(
+                "window_title_position must be one of {:?}, got \"{}\"",
+                valid_title_positions, config.appearance.window_title_position
+            ),
+            severity: Severity::Error,
+        });
+    }
+
+    // Validate which_key_position.
+    let valid_whichkey = [
+        "bottom-right",
+        "bottom-left",
+        "top-right",
+        "top-left",
+        "center",
+    ];
+    if !valid_whichkey.contains(&config.appearance.which_key_position.as_str()) {
+        result.errors.push(ValidationError {
+            field: "appearance".into(),
+            key: "which_key_position".into(),
+            message: format!(
+                "which_key_position must be one of {:?}, got \"{}\"",
+                valid_whichkey, config.appearance.which_key_position
+            ),
+            severity: Severity::Error,
+        });
+    }
+
+    // Validate max_fps.
+    if config.appearance.max_fps <= 0 || config.appearance.max_fps > 240 {
+        result.errors.push(ValidationError {
+            field: "appearance".into(),
+            key: "max_fps".into(),
+            message: "max_fps must be between 1 and 240".into(),
+            severity: Severity::Error,
+        });
+    }
+
+    // Validate scroll_lines.
+    if config.appearance.scroll_lines <= 0 || config.appearance.scroll_lines > 50 {
+        result.errors.push(ValidationError {
+            field: "appearance".into(),
+            key: "scroll_lines".into(),
+            message: "scroll_lines must be between 1 and 50".into(),
+            severity: Severity::Error,
+        });
+    }
+
+    // Validate sidebar position.
+    if !config.appearance.sidebar.position.is_empty() {
+        let valid_sidebar_positions = ["left", "right", "hidden"];
+        if !valid_sidebar_positions.contains(&config.appearance.sidebar.position.as_str()) {
+            result.errors.push(ValidationError {
+                field: "appearance.sidebar".into(),
+                key: "position".into(),
+                message: format!(
+                    "sidebar.position must be one of {:?}, got \"{}\"",
+                    valid_sidebar_positions, config.appearance.sidebar.position
+                ),
+                severity: Severity::Error,
+            });
+        }
+    }
+
+    // Validate scrollbar style.
+    if !config.appearance.scrollbar.style.is_empty() {
+        let valid_scrollbar_styles = ["thin", "thick", "blocks", "track"];
+        if !valid_scrollbar_styles.contains(&config.appearance.scrollbar.style.as_str()) {
+            result.errors.push(ValidationError {
+                field: "appearance.scrollbar".into(),
+                key: "style".into(),
+                message: format!(
+                    "scrollbar.style must be one of {:?}, got \"{}\"",
+                    valid_scrollbar_styles, config.appearance.scrollbar.style
+                ),
+                severity: Severity::Error,
+            });
+        }
+    }
 }
 
 fn validate_daemon(config: &UserConfig, result: &mut ValidationResult) {
@@ -93,6 +181,38 @@ fn validate_daemon(config: &UserConfig, result: &mut ValidationResult) {
             key: "log_level".into(),
             message: "log_level is empty, using default".into(),
             severity: Severity::Warning,
+        });
+    }
+
+    // Validate log_level value.
+    let valid_log_levels = ["off", "debug", "info", "warn", "error"];
+    if !config.daemon.log_level.is_empty()
+        && !valid_log_levels.contains(&config.daemon.log_level.as_str())
+    {
+        result.errors.push(ValidationError {
+            field: "daemon".into(),
+            key: "log_level".into(),
+            message: format!(
+                "log_level must be one of {:?}, got \"{}\"",
+                valid_log_levels, config.daemon.log_level
+            ),
+            severity: Severity::Error,
+        });
+    }
+
+    // Validate default_codec.
+    let valid_codecs = ["json", "gob"];
+    if !config.daemon.default_codec.is_empty()
+        && !valid_codecs.contains(&config.daemon.default_codec.as_str())
+    {
+        result.errors.push(ValidationError {
+            field: "daemon".into(),
+            key: "default_codec".into(),
+            message: format!(
+                "default_codec must be one of {:?}, got \"{}\"",
+                valid_codecs, config.daemon.default_codec
+            ),
+            severity: Severity::Error,
         });
     }
 }
@@ -125,6 +245,30 @@ fn validate_notifications(config: &UserConfig, result: &mut ValidationResult) {
             severity: Severity::Error,
         });
     }
+}
+
+/// Validate the `[tape]` section.
+fn validate_tape(config: &UserConfig, result: &mut ValidationResult) {
+    let valid_autorun = ["off", "ask", "auto"];
+    if !config.tape.autorun.is_empty()
+        && !valid_autorun.contains(&config.tape.autorun.as_str())
+    {
+        result.warnings.push(ValidationError {
+            field: "tape".into(),
+            key: "autorun".into(),
+            message: format!(
+                "'{}' is not a valid value (allowed: {:?}); falling back to default",
+                config.tape.autorun, valid_autorun
+            ),
+            severity: Severity::Warning,
+        });
+    }
+}
+
+/// Validate the `[debug]` section.
+fn validate_debug(_config: &UserConfig, _result: &mut ValidationResult) {
+    // DebugConfig currently has only a single boolean field; no validation
+    // is needed. This function exists for future expansion.
 }
 
 /// Format a validation result as a human-readable report.
@@ -214,5 +358,101 @@ mod tests {
         let out = format_errors(&result);
         assert!(out.contains("errors"));
         assert!(out.contains("bad value"));
+    }
+
+    #[test]
+    fn invalid_window_title_position() {
+        let mut config = UserConfig::default_config();
+        config.appearance.window_title_position = "sideways".into();
+        let result = validate_config(&config);
+        assert!(!result.is_valid());
+        assert!(result.errors.iter().any(|e| e.key == "window_title_position"));
+    }
+
+    #[test]
+    fn invalid_which_key_position() {
+        let mut config = UserConfig::default_config();
+        config.appearance.which_key_position = "middle".into();
+        let result = validate_config(&config);
+        assert!(!result.is_valid());
+        assert!(result.errors.iter().any(|e| e.key == "which_key_position"));
+    }
+
+    #[test]
+    fn invalid_max_fps() {
+        let mut config = UserConfig::default_config();
+        config.appearance.max_fps = 0;
+        let result = validate_config(&config);
+        assert!(!result.is_valid());
+        assert!(result.errors.iter().any(|e| e.key == "max_fps"));
+    }
+
+    #[test]
+    fn invalid_scroll_lines() {
+        let mut config = UserConfig::default_config();
+        config.appearance.scroll_lines = 0;
+        let result = validate_config(&config);
+        assert!(!result.is_valid());
+        assert!(result.errors.iter().any(|e| e.key == "scroll_lines"));
+    }
+
+    #[test]
+    fn invalid_tape_autorun_warns() {
+        let mut config = UserConfig::default_config();
+        config.tape.autorun = "invalid".into();
+        let result = validate_config(&config);
+        assert!(result.is_valid()); // warnings don't make it invalid
+        assert!(result.warnings.iter().any(|w| w.key == "autorun"));
+    }
+
+    #[test]
+    fn valid_tape_autorun() {
+        let mut config = UserConfig::default_config();
+        config.tape.autorun = "auto".into();
+        let result = validate_config(&config);
+        assert!(!result.warnings.iter().any(|w| w.key == "autorun"));
+    }
+
+    #[test]
+    fn invalid_daemon_log_level() {
+        let mut config = UserConfig::default_config();
+        config.daemon.log_level = "verbose".into();
+        let result = validate_config(&config);
+        assert!(!result.is_valid());
+        assert!(result.errors.iter().any(|e| e.key == "log_level"));
+    }
+
+    #[test]
+    fn invalid_daemon_codec() {
+        let mut config = UserConfig::default_config();
+        config.daemon.default_codec = "xml".into();
+        let result = validate_config(&config);
+        assert!(!result.is_valid());
+        assert!(result.errors.iter().any(|e| e.key == "default_codec"));
+    }
+
+    #[test]
+    fn invalid_sidebar_position() {
+        let mut config = UserConfig::default_config();
+        config.appearance.sidebar.position = "up".into();
+        let result = validate_config(&config);
+        assert!(!result.is_valid());
+        assert!(result.errors.iter().any(|e| e.key == "position"));
+    }
+
+    #[test]
+    fn invalid_scrollbar_style() {
+        let mut config = UserConfig::default_config();
+        config.appearance.scrollbar.style = "fancy".into();
+        let result = validate_config(&config);
+        assert!(!result.is_valid());
+        assert!(result.errors.iter().any(|e| e.key == "style"));
+    }
+
+    #[test]
+    fn default_config_validates_with_new_fields() {
+        let config = UserConfig::default_config();
+        let result = validate_config(&config);
+        assert!(result.is_valid(), "errors: {:?}", result.errors);
     }
 }
