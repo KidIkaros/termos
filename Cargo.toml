@@ -61,6 +61,7 @@ rand = { version = "0.8", optional = true }
 # Web server: HTTP + WebSocket.
 axum = { version = "0.7", features = ["ws"], optional = true }
 tokio-tungstenite = { version = "0.24", optional = true }
+futures-util = { version = "0.3", optional = true }
 # TLS for SSH/web.
 rustls = { version = "0.23", optional = true }
 rustls-pemfile = { version = "2", optional = true }
@@ -70,14 +71,13 @@ clap = { version = "4.6.6", features = ["derive"] }
 
 [features]
 default = []
-network = ["dep:tokio", "dep:russh", "dep:russh-keys", "dep:async-trait", "dep:rand", "dep:axum", "dep:tokio-tungstenite"]
+network = ["dep:tokio", "dep:russh", "dep:russh-keys", "dep:async-trait", "dep:rand", "dep:axum", "dep:tokio-tungstenite", "dep:futures-util"]
 tls = ["network", "dep:rustls", "dep:rustls-pemfile"]
 
 [dev-dependencies]
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1"
-futures-util = "0.3"
 
 [[bench]]
 name = "vt_write"
