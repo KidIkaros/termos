@@ -1,0 +1,447 @@
+//! CLI features — ported from Go TUIOS `cmd/tuios/`.
+//!
+//! Provides:
+//! - Diagnostic errors (what/why/fix format)
+//! - Config commands (show, path, validate)
+//! - Keybinds commands (list, describe)
+//! - Remote commands
+//! - Session commands
+//! - Tape commands
+
+use std::fmt;
+
+// ─── Diagnostic Errors ───────────────────────────────────────────────────
+
+/// An error whose message is structured as what/why/fix.
+/// Renders as three lines so a user reading a terminal sees the fix
+/// without parsing prose.
+#[derive(Debug, Clone)]
+pub struct DiagnosticError {
+    /// What failed, in the imperative past.
+    pub what: String,
+    /// Why it most likely happened.
+    pub cause: String,
+    /// The exact command to run, copy-pasteable.
+    pub fix: String,
+    /// Optional detail lines shown between cause and fix.
+    pub extra: Vec<String>,
+    /// Exit status (0 means generic 1).
+    pub status: i32,
+}
+
+impl DiagnosticError {
+    /// Create a new diagnostic error.
+    pub fn new(what: &str, cause: &str, fix: &str) -> Self {
+        Self {
+            what: what.to_string(),
+            cause: cause.to_string(),
+            fix: fix.to_string(),
+            extra: vec![],
+            status: 0,
+        }
+    }
+
+    /// Add an extra detail line.
+    pub fn with_extra(mut self, line: &str) -> Self {
+        self.extra.push(line.to_string());
+        self
+    }
+
+    /// Set the exit status.
+    pub fn with_status(mut self, status: i32) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// Exit status (defaults to 1 when status is 0).
+    pub fn exit_status(&self) -> i32 {
+        if self.status == 0 {
+            1
+        } else {
+            self.status
+        }
+    }
+}
+
+impl fmt::Display for DiagnosticError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.what)?;
+        if !self.cause.is_empty() {
+            write!(f, "\nMost likely cause: {}", self.cause)?;
+        }
+        for line in &self.extra {
+            write!(f, "\n{}", line)?;
+        }
+        if !self.fix.is_empty() {
+            write!(f, "\nFix: {}", self.fix)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for DiagnosticError {}
+
+/// Exit status for "no daemon running".
+pub const NO_DAEMON_STATUS: i32 = 3;
+
+// ─── Config Commands ─────────────────────────────────────────────────────
+
+/// Config command type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigCommand {
+    Show,
+    Path,
+    Validate,
+}
+
+impl ConfigCommand {
+    /// Parse from a string.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "show" => Some(Self::Show),
+            "path" => Some(Self::Path),
+            "validate" => Some(Self::Validate),
+            _ => None,
+        }
+    }
+}
+
+/// Format config for display.
+pub fn format_config_show(config_text: &str) -> String {
+    config_text.to_string()
+}
+
+/// Get the config file path.
+pub fn config_path() -> std::path::PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        std::path::PathBuf::from(xdg)
+            .join("termos")
+            .join("config.toml")
+    } else if let Ok(home) = std::env::var("HOME") {
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("termos")
+            .join("config.toml")
+    } else {
+        std::path::PathBuf::from("config.toml")
+    }
+}
+
+// ─── Keybind Commands ────────────────────────────────────────────────────
+
+/// Keybind command type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeybindCommand {
+    List,
+    Describe,
+}
+
+impl KeybindCommand {
+    /// Parse from a string.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "list" => Some(Self::List),
+            "describe" => Some(Self::Describe),
+            _ => None,
+        }
+    }
+}
+
+/// A keybind entry for display.
+#[derive(Debug, Clone)]
+pub struct KeybindEntry {
+    pub key: String,
+    pub action: String,
+    pub description: String,
+}
+
+/// Format keybinds for listing.
+pub fn format_keybind_list(entries: &[KeybindEntry]) -> String {
+    let mut out = String::new();
+    let max_key = entries.iter().map(|e| e.key.len()).max().unwrap_or(0);
+    let max_action = entries.iter().map(|e| e.action.len()).max().unwrap_or(0);
+
+    for e in entries {
+        out.push_str(&format!(
+            "  {:width_key$}  {:width_action$}  {}\n",
+            e.key,
+            e.action,
+            e.description,
+            width_key = max_key,
+            width_action = max_action,
+        ));
+    }
+    out
+}
+
+/// Format a single keybind description.
+pub fn format_keybind_describe(entry: &KeybindEntry) -> String {
+    format!(
+        "Key: {}\nAction: {}\nDescription: {}\n",
+        entry.key, entry.action, entry.description
+    )
+}
+
+// ─── Remote Commands ─────────────────────────────────────────────────────
+
+/// Remote command type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteCommand {
+    Attach,
+    List,
+    Kill,
+}
+
+impl RemoteCommand {
+    /// Parse from a string.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "attach" => Some(Self::Attach),
+            "list" => Some(Self::List),
+            "kill" => Some(Self::Kill),
+            _ => None,
+        }
+    }
+}
+
+// ─── Session Commands ────────────────────────────────────────────────────
+
+/// Session command type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionCommand {
+    List,
+    New,
+    Kill,
+    Attach,
+    Rename,
+}
+
+impl SessionCommand {
+    /// Parse from a string.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "list" | "ls" => Some(Self::List),
+            "new" => Some(Self::New),
+            "kill" => Some(Self::Kill),
+            "attach" => Some(Self::Attach),
+            "rename" => Some(Self::Rename),
+            _ => None,
+        }
+    }
+}
+
+/// Format session list for display.
+pub fn format_session_list(sessions: &[(String, usize, bool)]) -> String {
+    if sessions.is_empty() {
+        return "No sessions.\n".into();
+    }
+    let mut out = String::from("Sessions:\n");
+    for (name, windows, attached) in sessions {
+        let status = if *attached { " (attached)" } else { "" };
+        out.push_str(&format!("  {} ({} windows){}\n", name, windows, status));
+    }
+    out
+}
+
+// ─── Tape Commands ───────────────────────────────────────────────────────
+
+/// Tape command type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TapeCommand {
+    Play,
+    Validate,
+    List,
+    Record,
+}
+
+impl TapeCommand {
+    /// Parse from a string.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "play" => Some(Self::Play),
+            "validate" | "check" => Some(Self::Validate),
+            "list" | "ls" => Some(Self::List),
+            "record" => Some(Self::Record),
+            _ => None,
+        }
+    }
+}
+
+// ─── Run Command ─────────────────────────────────────────────────────────
+
+/// Options for the `run` command.
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+    pub session: Option<String>,
+    pub workspace: Option<u8>,
+    pub command: Option<String>,
+    pub detach: bool,
+}
+
+/// Parse run command arguments.
+pub fn parse_run_args(args: &[String]) -> RunOptions {
+    let mut opts = RunOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" if i + 1 < args.len() => {
+                opts.session = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "-w" | "--workspace" if i + 1 < args.len() => {
+                opts.workspace = args[i + 1].parse().ok();
+                i += 2;
+            }
+            "-d" | "--detach" => {
+                opts.detach = true;
+                i += 1;
+            }
+            _ => {
+                if opts.command.is_none() {
+                    opts.command = Some(args[i].clone());
+                }
+                i += 1;
+            }
+        }
+    }
+    opts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_error_display() {
+        let e = DiagnosticError::new(
+            "Session 'work' was not found.",
+            "No daemon is running.",
+            "Run: tuios daemon start",
+        );
+        let s = e.to_string();
+        assert!(s.contains("Session 'work' was not found."));
+        assert!(s.contains("Most likely cause: No daemon is running."));
+        assert!(s.contains("Fix: Run: tuios daemon start"));
+    }
+
+    #[test]
+    fn diagnostic_error_with_extra() {
+        let e = DiagnosticError::new("test", "cause", "fix")
+            .with_extra("Available: work, play")
+            .with_status(3);
+        let s = e.to_string();
+        assert!(s.contains("Available: work, play"));
+        assert_eq!(e.exit_status(), 3);
+    }
+
+    #[test]
+    fn diagnostic_error_default_status() {
+        let e = DiagnosticError::new("test", "cause", "fix");
+        assert_eq!(e.exit_status(), 1);
+    }
+
+    #[test]
+    fn config_command_parse() {
+        assert_eq!(ConfigCommand::parse("show"), Some(ConfigCommand::Show));
+        assert_eq!(ConfigCommand::parse("path"), Some(ConfigCommand::Path));
+        assert_eq!(
+            ConfigCommand::parse("validate"),
+            Some(ConfigCommand::Validate)
+        );
+        assert_eq!(ConfigCommand::parse("invalid"), None);
+    }
+
+    #[test]
+    fn keybind_command_parse() {
+        assert_eq!(KeybindCommand::parse("list"), Some(KeybindCommand::List));
+        assert_eq!(
+            KeybindCommand::parse("describe"),
+            Some(KeybindCommand::Describe)
+        );
+        assert_eq!(KeybindCommand::parse("invalid"), None);
+    }
+
+    #[test]
+    fn format_keybind_list_aligned() {
+        let entries = vec![
+            KeybindEntry {
+                key: "ctrl+b".into(),
+                action: "prefix".into(),
+                description: "Leader key".into(),
+            },
+            KeybindEntry {
+                key: "alt+1".into(),
+                action: "workspace_1".into(),
+                description: "Switch to workspace 1".into(),
+            },
+        ];
+        let out = format_keybind_list(&entries);
+        assert!(out.contains("ctrl+b"));
+        assert!(out.contains("Leader key"));
+    }
+
+    #[test]
+    fn remote_command_parse() {
+        assert_eq!(RemoteCommand::parse("attach"), Some(RemoteCommand::Attach));
+        assert_eq!(RemoteCommand::parse("list"), Some(RemoteCommand::List));
+        assert_eq!(RemoteCommand::parse("kill"), Some(RemoteCommand::Kill));
+    }
+
+    #[test]
+    fn session_command_parse() {
+        assert_eq!(SessionCommand::parse("list"), Some(SessionCommand::List));
+        assert_eq!(SessionCommand::parse("ls"), Some(SessionCommand::List));
+        assert_eq!(SessionCommand::parse("new"), Some(SessionCommand::New));
+        assert_eq!(SessionCommand::parse("kill"), Some(SessionCommand::Kill));
+    }
+
+    #[test]
+    fn format_session_list_empty() {
+        assert_eq!(format_session_list(&[]), "No sessions.\n");
+    }
+
+    #[test]
+    fn format_session_list_entries() {
+        let sessions = vec![
+            ("work".to_string(), 3, true),
+            ("play".to_string(), 1, false),
+        ];
+        let out = format_session_list(&sessions);
+        assert!(out.contains("work"));
+        assert!(out.contains("(attached)"));
+        assert!(!out.contains("play (attached)"));
+    }
+
+    #[test]
+    fn tape_command_parse() {
+        assert_eq!(TapeCommand::parse("play"), Some(TapeCommand::Play));
+        assert_eq!(TapeCommand::parse("validate"), Some(TapeCommand::Validate));
+        assert_eq!(TapeCommand::parse("check"), Some(TapeCommand::Validate));
+        assert_eq!(TapeCommand::parse("list"), Some(TapeCommand::List));
+        assert_eq!(TapeCommand::parse("record"), Some(TapeCommand::Record));
+    }
+
+    #[test]
+    fn parse_run_args_basic() {
+        let args = vec![
+            "-s".into(),
+            "work".into(),
+            "-w".into(),
+            "2".into(),
+            "vim".into(),
+        ];
+        let opts = parse_run_args(&args);
+        assert_eq!(opts.session, Some("work".into()));
+        assert_eq!(opts.workspace, Some(2));
+        assert_eq!(opts.command, Some("vim".into()));
+        assert!(!opts.detach);
+    }
+
+    #[test]
+    fn parse_run_args_detach() {
+        let args = vec!["-d".into(), "htop".into()];
+        let opts = parse_run_args(&args);
+        assert!(opts.detach);
+        assert_eq!(opts.command, Some("htop".into()));
+    }
+}

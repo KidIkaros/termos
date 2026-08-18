@@ -18,6 +18,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod app;
+pub mod cli;
 pub mod config;
 pub mod graphics;
 pub mod harness;
@@ -26,6 +27,7 @@ pub mod keys;
 pub mod layout;
 #[cfg(feature = "network")]
 pub mod network;
+pub mod server;
 pub mod session;
 pub mod tape;
 pub mod terminal;
