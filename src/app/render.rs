@@ -58,6 +58,14 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     let mut sorted_ids: Vec<i32> = all_ids.clone();
     sorted_ids.sort_unstable();
 
+    // Content area as a layout::Rect for viewport culling.
+    let content_bounds = Rect {
+        x: content_area.x as i32,
+        y: content_area.y as i32,
+        w: content_area.width as i32,
+        h: content_area.height as i32,
+    };
+
     for &window_id in &all_ids {
         let Some(window) = os.windows.get(window_id as usize) else {
             continue;
@@ -71,6 +79,11 @@ pub fn render(os: &Os, buf: &mut Buffer) {
                 None => continue,
             }
         };
+
+        // Viewport culling: skip panes entirely outside the content area.
+        if !crate::ui::perf::is_visible(rect, &content_bounds) {
+            continue;
+        }
 
         // An active minimize/restore/snap animation overrides the pane rect.
         let animated = os.animation_position(window_id);

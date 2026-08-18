@@ -2,6 +2,7 @@
 
 pub mod animation;
 pub mod overlay;
+pub mod perf;
 pub mod style_cache;
 
 use ratatui::style::{Color as TuiColor, Modifier, Style as TuiStyle};
