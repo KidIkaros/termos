@@ -8,6 +8,7 @@
 
 pub mod agent_alert;
 pub mod input;
+pub mod interaction;
 pub mod render;
 
 use std::collections::HashMap;

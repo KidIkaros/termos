@@ -62,7 +62,6 @@ impl AgentState {
     }
 }
 
-
 /// Where a window's agent state came from. More than one source can want to
 /// set the same pane; precedence is decided by rank.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -117,7 +116,6 @@ impl AgentSource {
         }
     }
 }
-
 
 /// One source's claim on a window's agent state.
 #[derive(Debug, Clone)]
