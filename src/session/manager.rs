@@ -214,4 +214,59 @@ mod tests {
         let names: Vec<String> = m.list().into_iter().map(|s| s.name).collect();
         assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
     }
+
+    #[test]
+    fn new_manager_is_empty() {
+        let m = Manager::new();
+        assert_eq!(m.count(), 0);
+        assert!(m.list().is_empty());
+    }
+
+    #[test]
+    fn get_nonexistent_returns_none() {
+        let m = Manager::new();
+        assert!(m.get("nope").is_none());
+    }
+
+    #[test]
+    fn get_by_id_nonexistent_returns_none() {
+        let m = Manager::new();
+        assert!(m.get_by_id("nonexistent-id").is_none());
+    }
+
+    #[test]
+    fn delete_decreases_count() {
+        let m = Manager::new();
+        m.create("a", &cfg()).unwrap();
+        m.create("b", &cfg()).unwrap();
+        assert_eq!(m.count(), 2);
+        m.delete("a").unwrap();
+        assert_eq!(m.count(), 1);
+    }
+
+    #[test]
+    fn generate_name_empty() {
+        let m = Manager::new();
+        assert_eq!(m.generate_name(), "session-0");
+    }
+
+    #[test]
+    fn generate_name_fills_gap() {
+        let m = Manager::new();
+        m.create("session-0", &cfg()).unwrap();
+        m.create("session-2", &cfg()).unwrap();
+        assert_eq!(m.generate_name(), "session-1");
+    }
+
+    #[test]
+    fn create_multiple_and_lookup() {
+        let m = Manager::new();
+        m.create("alpha", &cfg()).unwrap();
+        m.create("beta", &cfg()).unwrap();
+        m.create("gamma", &cfg()).unwrap();
+        assert_eq!(m.count(), 3);
+        assert!(m.get("alpha").is_some());
+        assert!(m.get("beta").is_some());
+        assert!(m.get("gamma").is_some());
+    }
 }

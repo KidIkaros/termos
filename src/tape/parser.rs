@@ -745,4 +745,288 @@ mod tests {
         let args: Vec<&str> = commands.iter().map(|c| c.args[0].as_str()).collect();
         assert_eq!(args, vec!["5", "3", "10"]);
     }
+
+    #[test]
+    fn focus_command_with_identifier() {
+        let (commands, errors) = parse_file("Focus myterm");
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].type_, CommandType::Focus);
+        assert_eq!(commands[0].args[0], "myterm");
+    }
+
+    #[test]
+    fn focus_command_with_number() {
+        let (commands, errors) = parse_file("Focus 3");
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].args[0], "3");
+    }
+
+    #[test]
+    fn focus_command_missing_target() {
+        let (_, errors) = parse_file("Focus");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn set_command_basic() {
+        let (commands, errors) = parse_file("Set theme dracula");
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].type_, CommandType::Set);
+        assert_eq!(commands[0].args, vec!["theme", "dracula"]);
+    }
+
+    #[test]
+    fn set_command_string_value() {
+        let (commands, errors) = parse_file(r#"Set greeting "hello world""#);
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].args, vec!["greeting", "hello world"]);
+    }
+
+    #[test]
+    fn set_command_duration_value() {
+        let (commands, errors) = parse_file("Set timeout 500ms");
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].args, vec!["timeout", "500ms"]);
+    }
+
+    #[test]
+    fn set_command_missing_key() {
+        let (_, errors) = parse_file("Set");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn set_command_missing_value() {
+        let (_, errors) = parse_file("Set theme");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn wait_without_duration_errors() {
+        let (_, errors) = parse_file("Wait");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn wait_until_regex_missing_pattern() {
+        let (_, errors) = parse_file("WaitUntilRegex");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn wait_until_regex_with_timeout() {
+        let (commands, errors) = parse_file(r#"WaitUntilRegex "done" 5000"#);
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].args, vec!["done", "5000"]);
+    }
+
+    #[test]
+    fn source_command() {
+        let (commands, errors) = parse_file(r#"Source "other.tape""#);
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].type_, CommandType::Source);
+        assert_eq!(commands[0].args[0], "other.tape");
+    }
+
+    #[test]
+    fn source_command_identifier() {
+        let (commands, errors) = parse_file("Source othertape");
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].type_, CommandType::Source);
+        assert_eq!(commands[0].args[0], "othertape");
+    }
+
+    #[test]
+    fn source_command_string_arg() {
+        let (commands, errors) = parse_file(r#"Source "other.tape""#);
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].args[0], "other.tape");
+    }
+
+    #[test]
+    fn source_command_missing_arg() {
+        let (_, errors) = parse_file("Source");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn output_command() {
+        let (commands, errors) = parse_file("Output rec.tape");
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].type_, CommandType::Output);
+    }
+
+    #[test]
+    fn output_command_missing_arg() {
+        let (_, errors) = parse_file("Output");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn rename_window_command() {
+        let (commands, errors) = parse_file("RenameWindow myterm");
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].type_, CommandType::RenameWindow);
+        assert_eq!(commands[0].args[0], "myterm");
+    }
+
+    #[test]
+    fn rename_window_command_string() {
+        let (commands, errors) = parse_file(r#"RenameWindow "my terminal""#);
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].args[0], "my terminal");
+    }
+
+    #[test]
+    fn rename_window_missing_name() {
+        let (_, errors) = parse_file("RenameWindow");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn focus_window_command() {
+        let (commands, errors) = parse_file("FocusWindow w1");
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].type_, CommandType::FocusWindow);
+        assert_eq!(commands[0].args[0], "w1");
+    }
+
+    #[test]
+    fn focus_window_missing_id() {
+        let (_, errors) = parse_file("FocusWindow");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn switch_workspace_missing_number() {
+        let (_, errors) = parse_file("SwitchWorkspace");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn move_to_workspace_missing_number() {
+        let (_, errors) = parse_file("MoveToWorkspace");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn move_and_follow_workspace_missing_number() {
+        let (_, errors) = parse_file("MoveAndFollowWorkspace");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn key_combo_with_ctrl_modifier() {
+        let (commands, _) = parse_file("Ctrl+C");
+        assert_eq!(commands[0].type_, CommandType::KeyCombo);
+        assert_eq!(commands[0].args[0], "Ctrl+C");
+    }
+
+    #[test]
+    fn key_combo_with_shift_modifier() {
+        let (commands, _) = parse_file("Shift+A");
+        assert_eq!(commands[0].args[0], "Shift+A");
+    }
+
+    #[test]
+    fn key_combo_with_ctrl_alt() {
+        let (commands, _) = parse_file("Ctrl+Alt+D");
+        assert_eq!(commands[0].args[0], "Ctrl+Alt+D");
+    }
+
+    #[test]
+    fn key_combo_navigation_key() {
+        let (commands, _) = parse_file("Ctrl+Up");
+        assert_eq!(commands[0].args[0], "Ctrl+Up");
+    }
+
+    #[test]
+    fn all_basic_commands() {
+        let input = "Enter\nSpace\nBackspace\nDelete\nTab\nEscape\nUp\nDown\nLeft\nRight\nHome\nEnd";
+        let (commands, errors) = parse_file(input);
+        assert!(errors.is_empty());
+        assert_eq!(commands.len(), 12);
+        assert_eq!(commands[0].type_, CommandType::Enter);
+        assert_eq!(commands[11].type_, CommandType::End);
+    }
+
+    #[test]
+    fn all_tuios_commands() {
+        let input = "TerminalMode\nWindowManagementMode\nNewWindow\nCloseWindow\nNextWindow\nPrevWindow\nMinimizeWindow\nRestoreWindow\nToggleTiling\nEnableTiling\nDisableTiling\nSnapLeft\nSnapRight\nSnapFullscreen\nSplit\nRotateSplit\nEqualizeSplits\nToggleZoom\nSmartSplit\nCommandPalette\nEnableAnimations\nDisableAnimations\nToggleAnimations";
+        let (commands, errors) = parse_file(input);
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        assert_eq!(commands.len(), 23);
+    }
+
+    #[test]
+    fn sleep_invalid_duration() {
+        let (_, errors) = parse_file("Sleep notaduration");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn type_at_invalid_duration() {
+        let (_, errors) = parse_file("Type@invalid \"hello\"");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn basic_at_invalid_duration() {
+        let (_, errors) = parse_file("Enter@invalid");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn basic_at_without_duration() {
+        let (_, errors) = parse_file("Enter@");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn wait_invalid_duration() {
+        let (_, errors) = parse_file("Wait notaduration");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn type_at_valid_duration() {
+        let (commands, errors) = parse_file(r#"Type@200ms "hi""#);
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].delay, Duration::from_millis(200));
+    }
+
+    #[test]
+    fn basic_at_valid_duration() {
+        let (commands, errors) = parse_file("Enter@500ms");
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].delay, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn save_layout_command() {
+        let (commands, errors) = parse_file("SaveLayout mylayout");
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].type_, CommandType::SaveLayout);
+        assert_eq!(commands[0].args[0], "mylayout");
+    }
+
+    #[test]
+    fn load_layout_command() {
+        let (commands, errors) = parse_file("LoadLayout mylayout");
+        assert!(errors.is_empty());
+        assert_eq!(commands[0].type_, CommandType::LoadLayout);
+        assert_eq!(commands[0].args[0], "mylayout");
+    }
+
+    #[test]
+    fn unexpected_token() {
+        let (_, errors) = parse_file("NOTACOMMAND");
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn errors_collected() {
+        let (_, errors) = parse_file("Type\nSleep\nFocus");
+        assert!(errors.len() >= 2);
+    }
 }

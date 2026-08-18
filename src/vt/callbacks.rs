@@ -263,4 +263,122 @@ mod tests {
         cb.fire_cursor_color(None);
         assert_eq!(*captured.lock().unwrap(), None);
     }
+
+    #[test]
+    fn fire_icon_name() {
+        let captured = Arc::new(Mutex::new(String::new()));
+        let c = captured.clone();
+        let cb = Callbacks::new().with_icon_name(move |n| {
+            *c.lock().unwrap() = n.to_string();
+        });
+        cb.fire_icon_name("test-icon");
+        assert_eq!(&*captured.lock().unwrap(), "test-icon");
+    }
+
+    #[test]
+    fn fire_icon_name_unset() {
+        let cb = Callbacks::new();
+        cb.fire_icon_name("noop");
+    }
+
+    #[test]
+    fn fire_cursor_position() {
+        let captured = Arc::new(Mutex::new(((0, 0), (0, 0))));
+        let c = captured.clone();
+        let cb = Callbacks::new().with_cursor_position(move |old, new| {
+            *c.lock().unwrap() = (old, new);
+        });
+        cb.fire_cursor_position((1, 2), (3, 4));
+        assert_eq!(*captured.lock().unwrap(), ((1, 2), (3, 4)));
+    }
+
+    #[test]
+    fn fire_cursor_position_unset() {
+        let cb = Callbacks::new();
+        cb.fire_cursor_position((0, 0), (1, 1));
+    }
+
+    #[test]
+    fn fire_cursor_visibility() {
+        let captured = Arc::new(AtomicU32::new(0));
+        let c = captured.clone();
+        let cb = Callbacks::new().with_cursor_visibility(move |visible| {
+            c.store(if visible { 1 } else { 0 }, Ordering::Relaxed);
+        });
+        cb.fire_cursor_visibility(true);
+        assert_eq!(captured.load(Ordering::Relaxed), 1);
+        cb.fire_cursor_visibility(false);
+        assert_eq!(captured.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn fire_cursor_visibility_unset() {
+        let cb = Callbacks::new();
+        cb.fire_cursor_visibility(true);
+    }
+
+    #[test]
+    fn fire_cursor_style() {
+        let captured = Arc::new(Mutex::new((CursorStyle::Default, false)));
+        let c = captured.clone();
+        let cb = Callbacks::new().with_cursor_style(move |style, blink| {
+            *c.lock().unwrap() = (style, blink);
+        });
+        cb.fire_cursor_style(CursorStyle::SteadyBar, true);
+        assert_eq!(*captured.lock().unwrap(), (CursorStyle::SteadyBar, true));
+    }
+
+    #[test]
+    fn fire_cursor_style_unset() {
+        let cb = Callbacks::new();
+        cb.fire_cursor_style(CursorStyle::Default, false);
+    }
+
+    #[test]
+    fn fire_mouse_mode_changed() {
+        let count = Arc::new(AtomicU32::new(0));
+        let c = count.clone();
+        let cb = Callbacks::new().with_mouse_mode_changed(move || {
+            c.fetch_add(1, Ordering::Relaxed);
+        });
+        cb.fire_mouse_mode_changed();
+        cb.fire_mouse_mode_changed();
+        assert_eq!(count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn fire_mouse_mode_changed_unset() {
+        let cb = Callbacks::new();
+        cb.fire_mouse_mode_changed();
+    }
+
+    #[test]
+    fn fire_selection() {
+        let captured = Arc::new(Mutex::new(String::new()));
+        let c = captured.clone();
+        let cb = Callbacks::new().with_selection(move |data| {
+            *c.lock().unwrap() = data.to_string();
+        });
+        cb.fire_selection("clipboard-data");
+        assert_eq!(&*captured.lock().unwrap(), "clipboard-data");
+    }
+
+    #[test]
+    fn fire_selection_unset() {
+        let cb = Callbacks::new();
+        cb.fire_selection("noop");
+    }
+
+    #[test]
+    fn fire_title_unset() {
+        let cb = Callbacks::new();
+        cb.fire_title("noop");
+    }
+
+    #[test]
+    fn default_callbacks() {
+        let cb = Callbacks::default();
+        assert!(cb.bell.is_none());
+        assert!(cb.title.is_none());
+    }
 }

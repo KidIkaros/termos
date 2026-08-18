@@ -1031,3 +1031,132 @@ pub fn ensure_daemon_running() -> io::Result<()> {
         "daemon did not start",
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_ring_push_and_cap() {
+        let mut ring = OutputRing::new(20);
+        ring.push(b"hello");
+        assert_eq!(ring.as_lossy(), "hello");
+        ring.push(b" world");
+        assert_eq!(ring.as_lossy(), "hello world");
+        // Exceed cap — oldest bytes are dropped.
+        ring.push(b"!!!");
+        let result = ring.as_lossy();
+        assert!(result.len() <= 23);
+        assert!(result.ends_with("!!!"));
+    }
+
+    #[test]
+    fn output_ring_lossy_utf8() {
+        let mut ring = OutputRing::new(100);
+        ring.push(b"hello \xFF world");
+        assert!(ring.as_lossy().contains("hello"));
+    }
+
+    #[test]
+    fn output_ring_empty() {
+        let ring = OutputRing::new(100);
+        assert_eq!(ring.as_lossy(), "");
+    }
+
+    #[test]
+    fn broadcast_subscribe_unsubscribe() {
+        let b = SessionBroadcast::new();
+        assert!(!b.is_attached());
+        let (id1, _rx1) = b.subscribe();
+        assert!(b.is_attached());
+        let (id2, _rx2) = b.subscribe();
+        assert_ne!(id1, id2);
+        b.unsubscribe(id1);
+        assert!(b.is_attached());
+        b.unsubscribe(id2);
+        assert!(!b.is_attached());
+    }
+
+    #[test]
+    fn broadcast_send_to_all() {
+        let b = SessionBroadcast::new();
+        let (_id1, rx1) = b.subscribe();
+        let (_id2, rx2) = b.subscribe();
+        b.send_to_all(&Message::PtyOutput {
+            window: "w1".into(),
+            data: b"test".to_vec(),
+        });
+        assert!(!rx1.is_empty());
+        assert!(!rx2.is_empty());
+    }
+
+    #[test]
+    fn broadcast_send_to_unsubscribed_does_not_panic() {
+        let b = SessionBroadcast::new();
+        let (id, _rx) = b.subscribe();
+        b.unsubscribe(id);
+        // Should not panic — the send just goes nowhere.
+        b.send_to_all(&Message::PtyOutput {
+            window: "w1".into(),
+            data: b"test".to_vec(),
+        });
+    }
+
+    #[test]
+    fn resolve_session_explicit_name() {
+        let attached = None;
+        let session = Some("my-session".into());
+        assert_eq!(resolve_session(&attached, &session), Some("my-session".into()));
+    }
+
+    #[test]
+    fn resolve_session_from_attached() {
+        let attached = Some(("attached-session".into(), 1, Arc::new(AtomicBool::new(true))));
+        let session = None;
+        assert_eq!(
+            resolve_session(&attached, &session),
+            Some("attached-session".into())
+        );
+    }
+
+    #[test]
+    fn resolve_session_nothing() {
+        let attached = None;
+        let session = None;
+        assert_eq!(resolve_session(&attached, &session), None);
+    }
+
+    #[test]
+    fn resolve_shell_empty_uses_env() {
+        let result = resolve_shell("");
+        // Should fallback to $SHELL or /bin/sh
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn resolve_shell_nonempty_passthrough() {
+        assert_eq!(resolve_shell("/bin/zsh"), "/bin/zsh");
+    }
+
+    #[test]
+    fn default_socket_path_is_set() {
+        let path = default_socket_path();
+        assert!(path.to_string_lossy().contains("termos") || path.to_string_lossy().contains("tuios"));
+    }
+
+    #[test]
+    fn daemon_new_is_empty() {
+        let d = Daemon::new();
+        assert!(d.list_infos().is_empty());
+    }
+
+    #[test]
+    fn daemon_broadcast_for_creates_hub() {
+        let d = Daemon::new();
+        let b1 = d.broadcast_for("s1");
+        let b2 = d.broadcast_for("s1");
+        assert!(Arc::ptr_eq(&b1, &b2));
+        let b3 = d.broadcast_for("s2");
+        assert!(!Arc::ptr_eq(&b1, &b3));
+    }
+}

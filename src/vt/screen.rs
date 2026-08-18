@@ -590,3 +590,268 @@ impl ScreenBuffer {
 
 /// A reference to a screen line shared with the renderer.
 pub type ScreenLine = Arc<Vec<Cell>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vt::cell::Color;
+
+    #[test]
+    fn screen_buffer_new() {
+        let s = ScreenBuffer::new(80, 24);
+        assert_eq!(s.width(), 80);
+        assert_eq!(s.height(), 24);
+    }
+
+    #[test]
+    fn screen_buffer_min_size() {
+        let s = ScreenBuffer::new(0, 0);
+        assert_eq!(s.width(), 1);
+        assert_eq!(s.height(), 1);
+    }
+
+    #[test]
+    fn screen_buffer_cell_access() {
+        let s = ScreenBuffer::new(10, 5);
+        assert!(s.cell(0, 0).is_some());
+        assert!(s.cell(9, 4).is_some());
+        assert!(s.cell(10, 0).is_none());
+        assert!(s.cell(0, 5).is_none());
+        assert!(s.cell(-1, 0).is_none());
+    }
+
+    #[test]
+    fn screen_buffer_cell_mut() {
+        let mut s = ScreenBuffer::new(10, 5);
+        assert!(s.cell_mut(0, 0).is_some());
+        assert!(s.cell_mut(10, 0).is_none());
+    }
+
+    #[test]
+    fn screen_buffer_line() {
+        let s = ScreenBuffer::new(10, 5);
+        assert!(s.line(0).is_some());
+        assert_eq!(s.line(0).unwrap().len(), 10);
+        assert!(s.line(5).is_none());
+        assert!(s.line(-1).is_none());
+    }
+
+    #[test]
+    fn screen_buffer_set_cell() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
+        let cell = s.cell(5, 2).unwrap();
+        assert_eq!(cell.content, "X");
+    }
+
+    #[test]
+    fn screen_buffer_blank_cell() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
+        s.blank_cell(5, 2);
+        assert!(s.cell(5, 2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn screen_buffer_touch() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.touch_line(3);
+        let touched = s.take_touched();
+        assert!(touched.contains(&3));
+        assert!(touched.len() == 1);
+    }
+
+    #[test]
+    fn screen_buffer_touch_all() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.touch_all();
+        let touched = s.take_touched();
+        assert_eq!(touched.len(), 5);
+    }
+
+    #[test]
+    fn screen_buffer_resize() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
+        s.resize(20, 10);
+        assert_eq!(s.width(), 20);
+        assert_eq!(s.height(), 10);
+    }
+
+    #[test]
+    fn screen_buffer_clear() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
+        s.clear();
+        assert!(s.cell(5, 2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn screen_buffer_clear_area() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.set_cell(3, 2, Cell::new("X", 1, Style::new()));
+        s.clear_area(2, 1, 3, 3);
+        assert!(s.cell(3, 2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn screen_buffer_clear_to_end_of_line() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
+        s.set_cell(8, 2, Cell::new("Y", 1, Style::new()));
+        s.cursor.pos = Position { x: 3, y: 2 };
+        s.clear_to_end_of_line();
+        assert!(s.cell(3, 2).unwrap().is_empty());
+        assert!(s.cell(5, 2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn screen_buffer_clear_from_start_of_line() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.set_cell(2, 2, Cell::new("X", 1, Style::new()));
+        s.cursor.pos = Position { x: 5, y: 2 };
+        s.clear_from_start_of_line();
+        assert!(s.cell(2, 2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn screen_buffer_clear_line() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
+        s.cursor.pos = Position { x: 0, y: 2 };
+        s.clear_line();
+        assert!(s.cell(5, 2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn screen_buffer_clear_to_end_of_screen() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.set_cell(5, 3, Cell::new("X", 1, Style::new()));
+        s.cursor.pos = Position { x: 0, y: 2 };
+        s.clear_to_end_of_screen();
+        assert!(s.cell(5, 3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn screen_buffer_clear_from_start_of_screen() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.set_cell(5, 1, Cell::new("X", 1, Style::new()));
+        s.cursor.pos = Position { x: 5, y: 2 };
+        s.clear_from_start_of_screen();
+        assert!(s.cell(5, 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn screen_buffer_set_cursor() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.set_cursor(5, 3, false);
+        assert_eq!(s.cursor.pos, Position { x: 5, y: 3 });
+    }
+
+    #[test]
+    fn screen_buffer_set_cursor_with_margins() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.scroll = ScrollRegion {
+            top: 1,
+            bottom: 4,
+            left: 2,
+            right: 8,
+        };
+        s.set_cursor(1, 1, true);
+        assert!(s.cursor.pos.x >= 2);
+        assert!(s.cursor.pos.y >= 1);
+    }
+
+    #[test]
+    fn screen_buffer_move_cursor() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.cursor.pos = Position { x: 5, y: 2 };
+        s.move_cursor(2, 1);
+        assert_eq!(s.cursor.pos, Position { x: 7, y: 3 });
+    }
+
+    #[test]
+    fn screen_buffer_move_cursor_clamps() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.cursor.pos = Position { x: 5, y: 2 };
+        s.move_cursor(100, 100);
+        assert_eq!(s.cursor.pos, Position { x: 9, y: 4 });
+    }
+
+    #[test]
+    fn screen_buffer_save_restore_cursor() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.cursor.pos = Position { x: 5, y: 2 };
+        s.save_cursor();
+        s.cursor.pos = Position { x: 0, y: 0 };
+        s.restore_cursor();
+        assert_eq!(s.cursor.pos, Position { x: 5, y: 2 });
+    }
+
+    #[test]
+    fn screen_buffer_insert_cell() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
+        s.cursor.pos = Position { x: 1, y: 2 };
+        s.insert_cell(2);
+        // "X" shifts right by 2, from col 5 to col 7.
+        assert_eq!(s.cell(7, 2).unwrap().content, "X");
+    }
+
+    #[test]
+    fn screen_buffer_delete_cell() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
+        s.cursor.pos = Position { x: 3, y: 2 };
+        s.delete_cell(2);
+        assert!(s.cell(5, 2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn screen_buffer_scroll_up() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.set_cell(5, 0, Cell::new("X", 1, Style::new()));
+        s.scroll_up(1);
+        assert!(s.cell(5, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn screen_buffer_scroll_down() {
+        let mut s = ScreenBuffer::new(10, 5);
+        s.set_cell(5, 4, Cell::new("X", 1, Style::new()));
+        s.scroll_down(1);
+        assert!(s.cell(5, 4).unwrap().is_empty());
+    }
+
+    #[test]
+    fn screen_buffer_pen() {
+        let mut s = ScreenBuffer::new(10, 5);
+        let pen = s.pen();
+        assert_eq!(pen, Style::new());
+        let mut style = Style::new();
+        style.fg = Color::indexed(1);
+        s.set_pen(style);
+        assert_eq!(s.pen().fg, Color::indexed(1));
+    }
+
+    #[test]
+    fn screen_buffer_scrollback_enabled() {
+        let s = ScreenBuffer::new(10, 5);
+        assert!(s.scrollback_enabled());
+    }
+
+    #[test]
+    fn screen_buffer_lines() {
+        let s = ScreenBuffer::new(10, 5);
+        assert_eq!(s.lines().len(), 5);
+    }
+
+    #[test]
+    fn scroll_region_full() {
+        let r = ScrollRegion::full(80, 24);
+        assert_eq!(r.top, 0);
+        assert_eq!(r.bottom, 24);
+        assert_eq!(r.left, 0);
+        assert_eq!(r.right, 80);
+    }
+}

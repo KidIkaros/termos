@@ -1249,6 +1249,30 @@ mod tests {
         Os::new(UserConfig::default_config())
     }
 
+    fn os_with_window() -> Os {
+        use crate::terminal::pty::WinSize;
+        use crate::terminal::window::Window;
+        let mut os = test_os();
+        let win = Window::without_pty(
+            "w0".to_string(),
+            "w0".to_string(),
+            WinSize { cols: 20, rows: 4 },
+        );
+        os.windows.push(win);
+        {
+            let w = &os.windows[0];
+            let mut emu = w.emulator.lock().unwrap();
+            emu.write(b"hello world");
+        }
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+        os
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -1363,5 +1387,1117 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         assert!(!handle_mouse(&mut os, &mouse));
+    }
+
+    // ── encode_key tests ──────────────────────────────────────────────
+
+    #[test]
+    fn encode_key_ctrl_a() {
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert_eq!(encode_key(&key), vec![0x01]);
+    }
+
+    #[test]
+    fn encode_key_ctrl_z() {
+        let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(encode_key(&key), vec![0x1a]);
+    }
+
+    #[test]
+    fn encode_key_ctrl_bracket() {
+        let key = KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL);
+        assert_eq!(encode_key(&key), vec![0x1b]);
+    }
+
+    #[test]
+    fn encode_key_ctrl_backslash() {
+        let key = KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL);
+        assert_eq!(encode_key(&key), vec![0x1c]);
+    }
+
+    #[test]
+    fn encode_key_ctrl_bracket_close() {
+        let key = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL);
+        assert_eq!(encode_key(&key), vec![0x1d]);
+    }
+
+    #[test]
+    fn encode_key_ctrl_caret() {
+        let key = KeyEvent::new(KeyCode::Char('^'), KeyModifiers::CONTROL);
+        assert_eq!(encode_key(&key), vec![0x1e]);
+    }
+
+    #[test]
+    fn encode_key_ctrl_underscore() {
+        let key = KeyEvent::new(KeyCode::Char('_'), KeyModifiers::CONTROL);
+        assert_eq!(encode_key(&key), vec![0x1f]);
+    }
+
+    #[test]
+    fn encode_key_ctrl_space() {
+        let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+        assert_eq!(encode_key(&key), vec![0x00]);
+    }
+
+    #[test]
+    fn encode_key_alt_char() {
+        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT);
+        assert_eq!(encode_key(&key), vec![0x1b, b'x']);
+    }
+
+    #[test]
+    fn encode_key_enter() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(encode_key(&key), vec![b'\r']);
+    }
+
+    #[test]
+    fn encode_key_backspace() {
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(encode_key(&key), vec![0x7f]);
+    }
+
+    #[test]
+    fn encode_key_tab() {
+        let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(encode_key(&key), vec![b'\t']);
+    }
+
+    #[test]
+    fn encode_key_esc() {
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(encode_key(&key), vec![0x1b]);
+    }
+
+    #[test]
+    fn encode_key_arrow_left() {
+        let key = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(encode_key(&key), b"\x1b[D".to_vec());
+    }
+
+    #[test]
+    fn encode_key_arrow_right() {
+        let key = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(encode_key(&key), b"\x1b[C".to_vec());
+    }
+
+    #[test]
+    fn encode_key_arrow_up() {
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(encode_key(&key), b"\x1b[A".to_vec());
+    }
+
+    #[test]
+    fn encode_key_arrow_down() {
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(encode_key(&key), b"\x1b[B".to_vec());
+    }
+
+    #[test]
+    fn encode_key_alt_arrow_left() {
+        let key = KeyEvent::new(KeyCode::Left, KeyModifiers::ALT);
+        assert_eq!(encode_key(&key), b"\x1b[1;3D".to_vec());
+    }
+
+    #[test]
+    fn encode_key_home() {
+        let key = KeyEvent::new(KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(encode_key(&key), b"\x1b[H".to_vec());
+    }
+
+    #[test]
+    fn encode_key_end() {
+        let key = KeyEvent::new(KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(encode_key(&key), b"\x1b[F".to_vec());
+    }
+
+    #[test]
+    fn encode_key_page_up() {
+        let key = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
+        assert_eq!(encode_key(&key), b"\x1b[5~".to_vec());
+    }
+
+    #[test]
+    fn encode_key_page_down() {
+        let key = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(encode_key(&key), b"\x1b[6~".to_vec());
+    }
+
+    #[test]
+    fn encode_key_delete() {
+        let key = KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE);
+        assert_eq!(encode_key(&key), b"\x1b[3~".to_vec());
+    }
+
+    #[test]
+    fn encode_key_back_tab() {
+        let key = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(encode_key(&key), b"\x1b[Z".to_vec());
+    }
+
+    #[test]
+    fn encode_key_printable_char() {
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(encode_key(&key), vec![b'a']);
+    }
+
+    #[test]
+    fn encode_key_unrecognized_returns_empty() {
+        let key = KeyEvent::new(KeyCode::CapsLock, KeyModifiers::NONE);
+        assert!(encode_key(&key).is_empty());
+    }
+
+    // ── handle_key state tests ────────────────────────────────────────
+
+    #[test]
+    fn handle_key_quit_confirmation_y_quits() {
+        let mut os = test_os();
+        os.show_quit_confirmation = true;
+        let result = handle_key(&mut os, &key(KeyCode::Char('y')));
+        assert_eq!(result, KeyResult::Quit);
+        assert!(os.quitting);
+    }
+
+    #[test]
+    fn handle_key_quit_confirmation_n_cancels() {
+        let mut os = test_os();
+        os.show_quit_confirmation = true;
+        let result = handle_key(&mut os, &key(KeyCode::Char('n')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(!os.show_quit_confirmation);
+    }
+
+    #[test]
+    fn handle_key_quit_confirmation_esc_cancels() {
+        let mut os = test_os();
+        os.show_quit_confirmation = true;
+        let result = handle_key(&mut os, &key(KeyCode::Esc));
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(!os.show_quit_confirmation);
+    }
+
+    #[test]
+    fn handle_key_leader_key_sets_prefix() {
+        let mut os = test_os();
+        let result = handle_key(&mut os, &leader());
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::Leader);
+    }
+
+    #[test]
+    fn handle_key_window_mode_i_enters_terminal() {
+        let mut os = test_os();
+        let result = handle_key(&mut os, &key(KeyCode::Char('i')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn handle_key_terminal_mode_alt_n_next_window() {
+        let mut os = test_os();
+        os.enter_terminal_mode();
+        let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT);
+        let result = handle_key(&mut os, &key);
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_key_terminal_mode_alt_p_prev_window() {
+        let mut os = test_os();
+        os.enter_terminal_mode();
+        let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT);
+        let result = handle_key(&mut os, &key);
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_key_terminal_mode_passthrough() {
+        let mut os = test_os();
+        os.enter_terminal_mode();
+        let result = handle_key(&mut os, &key(KeyCode::Char('x')));
+        assert_eq!(result, KeyResult::Passthrough);
+    }
+
+    #[test]
+    fn handle_key_window_mode_q_opens_quit() {
+        let mut os = test_os();
+        let result = handle_key(&mut os, &key(KeyCode::Char('q')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(os.show_quit_confirmation);
+    }
+
+    #[test]
+    fn handle_key_last_key_chord_is_recorded() {
+        let mut os = test_os();
+        handle_key(&mut os, &key(KeyCode::Char('x')));
+        assert_eq!(os.last_key_chord, "x");
+    }
+
+    #[test]
+    fn handle_key_ctrl_p_toggles_script_pause() {
+        let mut os = test_os();
+        // Need a script to be active — script_mode + script_player.
+        os.script_mode = true;
+        os.script_player = Some(crate::tape::player::Player::new(vec![]));
+        let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        let result = handle_key(&mut os, &key);
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(os.script_paused);
+    }
+
+    #[test]
+    fn handle_key_window_mode_n_next_window() {
+        let mut os = test_os();
+        let result = handle_key(&mut os, &key(KeyCode::Char('n')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_key_window_mode_p_prev_window() {
+        let mut os = test_os();
+        let result = handle_key(&mut os, &key(KeyCode::Char('p')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_key_window_mode_tab_next_window() {
+        let mut os = test_os();
+        let result = handle_key(&mut os, &key(KeyCode::Tab));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_key_window_mode_backtab_prev_window() {
+        let mut os = test_os();
+        let result = handle_key(&mut os, &key(KeyCode::BackTab));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_key_window_mode_esc_clears_prefix() {
+        let mut os = test_os();
+        os.prefix = Prefix::Leader;
+        let result = handle_key(&mut os, &key(KeyCode::Esc));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_key_window_mode_arrow_up() {
+        let mut os = test_os();
+        let result = handle_key(&mut os, &key(KeyCode::Up));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_key_window_mode_arrow_down() {
+        let mut os = test_os();
+        let result = handle_key(&mut os, &key(KeyCode::Down));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_key_window_mode_digit_1() {
+        let mut os = test_os();
+        let result = handle_key(&mut os, &key(KeyCode::Char('1')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_key_leader_then_w_opens_workspace_switcher() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        assert_eq!(os.prefix, Prefix::Leader);
+        handle_key(&mut os, &key(KeyCode::Char('W')));
+        assert!(os.switcher_open);
+    }
+
+    #[test]
+    fn handle_key_leader_then_c_opens_window_switcher() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        handle_key(&mut os, &key(KeyCode::Char('W')));
+        assert!(os.switcher_open);
+        assert_eq!(os.switcher_kind, SwitcherKind::Workspace);
+    }
+
+    #[test]
+    fn handle_key_leader_then_m_opens_minimize_prefix() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        handle_key(&mut os, &key(KeyCode::Char('m')));
+        assert_eq!(os.prefix, Prefix::Minimize);
+    }
+
+    #[test]
+    fn handle_key_leader_then_t_opens_window_prefix() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        handle_key(&mut os, &key(KeyCode::Char('t')));
+        assert_eq!(os.prefix, Prefix::Window);
+    }
+
+    #[test]
+    fn handle_key_leader_then_t_window_prefix() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        handle_key(&mut os, &key(KeyCode::Char('t')));
+        assert_eq!(os.prefix, Prefix::Window);
+    }
+
+    #[test]
+    fn handle_key_leader_then_open_bracket_scrollback() {
+        let mut os = test_os();
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+
+        handle_key(&mut os, &leader());
+        handle_key(&mut os, &key(KeyCode::Char('[')));
+        assert!(os.scrollback_mode);
+    }
+
+    #[test]
+    fn handle_key_leader_then_p_opens_palette() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        handle_key(&mut os, &key(KeyCode::Char('P')));
+        assert!(os.palette_open);
+    }
+
+    #[test]
+    fn handle_key_leader_then_s_opens_window_switcher() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        handle_key(&mut os, &key(KeyCode::Char('S')));
+        // In local mode, S opens the window switcher (same as W).
+        assert!(os.switcher_open);
+    }
+
+    #[test]
+    fn format_key_chord_ctrl_a() {
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        let chord = format_key_chord(&key);
+        assert_eq!(chord, "Ctrl+a");
+    }
+
+    #[test]
+    fn format_key_chord_alt_esc() {
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::ALT);
+        let chord = format_key_chord(&key);
+        assert_eq!(chord, "Alt+Esc");
+    }
+
+    #[test]
+    fn format_key_chord_shift_enter() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        let chord = format_key_chord(&key);
+        assert_eq!(chord, "Shift+Enter");
+    }
+
+    #[test]
+    fn format_key_chord_function_key() {
+        let key = KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE);
+        let chord = format_key_chord(&key);
+        assert_eq!(chord, "F5");
+    }
+
+    #[test]
+    fn format_key_chord_ctrl_f12() {
+        let key = KeyEvent::new(KeyCode::F(12), KeyModifiers::CONTROL);
+        let chord = format_key_chord(&key);
+        assert_eq!(chord, "Ctrl+F12");
+    }
+
+    #[test]
+    fn format_key_chord_arrows() {
+        let keys = vec![
+            (KeyCode::Up, "Up"),
+            (KeyCode::Down, "Down"),
+            (KeyCode::Left, "Left"),
+            (KeyCode::Right, "Right"),
+        ];
+        for (code, name) in keys {
+            let k = KeyEvent::new(code, KeyModifiers::NONE);
+            assert_eq!(format_key_chord(&k), name);
+        }
+    }
+
+    #[test]
+    fn format_key_chord_special_keys() {
+        let keys = vec![
+            (KeyCode::Home, "Home"),
+            (KeyCode::End, "End"),
+            (KeyCode::PageUp, "PgUp"),
+            (KeyCode::PageDown, "PgDn"),
+            (KeyCode::Backspace, "Bksp"),
+            (KeyCode::Tab, "Tab"),
+        ];
+        for (code, name) in keys {
+            let k = KeyEvent::new(code, KeyModifiers::NONE);
+            assert_eq!(format_key_chord(&k), name);
+        }
+    }
+
+    #[test]
+    fn format_key_chord_empty_for_unknown() {
+        let key = KeyEvent::new(KeyCode::CapsLock, KeyModifiers::NONE);
+        let chord = format_key_chord(&key);
+        assert!(chord.is_empty());
+    }
+
+    #[test]
+    fn handle_leader_key_esc_clears_prefix() {
+        let mut os = test_os();
+        os.prefix = Prefix::Leader;
+        let result = handle_key(&mut os, &key(KeyCode::Esc));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_leader_key_c_creates_window() {
+        let mut os = test_os();
+        let result = handle_key(&mut os, &leader());
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::Leader);
+        let result = handle_key(&mut os, &key(KeyCode::Char('c')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_leader_key_x_closes_window() {
+        let mut os = test_os();
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('x')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_leader_key_n_next_window() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('n')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_leader_key_p_prev_window() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('p')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_leader_key_tab_next_window() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Tab));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_leader_key_backtab_prev_window() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::BackTab));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_leader_key_space_toggle_tiling() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char(' ')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_leader_key_w_workspace_prefix() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('w')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::Workspace);
+    }
+
+    #[test]
+    fn handle_leader_key_t_window_prefix() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('t')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::Window);
+    }
+
+    #[test]
+    fn handle_leader_key_m_minimize_prefix() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('m')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::Minimize);
+    }
+
+    #[test]
+    fn handle_leader_key_tape_prefix() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('T')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::Tape);
+    }
+
+    #[test]
+    fn handle_leader_key_dash_split_horizontal() {
+        let mut os = test_os();
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('-')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_leader_key_pipe_split_vertical() {
+        let mut os = test_os();
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('|')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_leader_key_backslash_split_vertical() {
+        let mut os = test_os();
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('\\')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_leader_key_r_rotate_split() {
+        let mut os = test_os();
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('R')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_leader_key_equal_equalize_ratios() {
+        let mut os = test_os();
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('=')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_leader_key_z_fullscreen() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('z')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_leader_key_p_opens_palette() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('P')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(os.palette_open);
+    }
+
+    #[test]
+    fn handle_leader_key_digit_jumps_to_window() {
+        let mut os = test_os();
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('0')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_leader_key_unrecognized_returns_consumed() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        let result = handle_key(&mut os, &key(KeyCode::Char('z')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_workspace_prefix_esc() {
+        let mut os = test_os();
+        os.prefix = Prefix::Workspace;
+        let result = handle_key(&mut os, &key(KeyCode::Esc));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_workspace_prefix_digit() {
+        let mut os = test_os();
+        os.prefix = Prefix::Workspace;
+        let result = handle_key(&mut os, &key(KeyCode::Char('3')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.current_workspace, 3);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_workspace_prefix_shift_digit_moves_window() {
+        let mut os = test_os();
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+        os.prefix = Prefix::Workspace;
+        let k = KeyEvent::new(KeyCode::Char('2'), KeyModifiers::SHIFT);
+        let result = handle_key(&mut os, &k);
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_workspace_prefix_unrecognized() {
+        let mut os = test_os();
+        os.prefix = Prefix::Workspace;
+        let _result = handle_key(&mut os, &key(KeyCode::Char('a')));
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_window_prefix_esc() {
+        let mut os = test_os();
+        os.prefix = Prefix::Window;
+        let result = handle_key(&mut os, &key(KeyCode::Esc));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_window_prefix_n() {
+        let mut os = test_os();
+        os.prefix = Prefix::Window;
+        let result = handle_key(&mut os, &key(KeyCode::Char('n')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_window_prefix_tab() {
+        let mut os = test_os();
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(1, 0, SplitType::Vertical, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+        os.prefix = Prefix::Window;
+        let result = handle_key(&mut os, &key(KeyCode::Tab));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.focused_window, Some(1));
+    }
+
+    #[test]
+    fn handle_window_prefix_backtab() {
+        let mut os = test_os();
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(1, 0, SplitType::Vertical, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(1);
+        os.focused_window = Some(1);
+        os.prefix = Prefix::Window;
+        let result = handle_key(&mut os, &key(KeyCode::BackTab));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.focused_window, Some(0));
+    }
+
+    #[test]
+    fn handle_window_prefix_unrecognized() {
+        let mut os = test_os();
+        os.prefix = Prefix::Window;
+        let _result = handle_key(&mut os, &key(KeyCode::Char('z')));
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_minimize_prefix_any_key() {
+        let mut os = test_os();
+        os.prefix = Prefix::Minimize;
+        let result = handle_key(&mut os, &key(KeyCode::Char('x')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_tape_prefix_esc() {
+        let mut os = test_os();
+        os.prefix = Prefix::Tape;
+        let result = handle_key(&mut os, &key(KeyCode::Esc));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_tape_prefix_r_starts_recording() {
+        let mut os = os_with_window();
+        os.prefix = Prefix::Tape;
+        let result = handle_key(&mut os, &key(KeyCode::Char('r')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_tape_prefix_s_stops_recording() {
+        let mut os = os_with_window();
+        os.start_recording();
+        os.prefix = Prefix::Tape;
+        let result = handle_key(&mut os, &key(KeyCode::Char('s')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_tape_prefix_m_opens_manager() {
+        let mut os = test_os();
+        os.prefix = Prefix::Tape;
+        let result = handle_key(&mut os, &key(KeyCode::Char('m')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(os.tape_manager_open);
+    }
+
+    #[test]
+    fn handle_tape_prefix_unrecognized() {
+        let mut os = test_os();
+        os.prefix = Prefix::Tape;
+        let _result = handle_key(&mut os, &key(KeyCode::Char('z')));
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn handle_tape_manager_esc() {
+        let mut os = test_os();
+        os.tape_manager_open = true;
+        let result = handle_key(&mut os, &key(KeyCode::Esc));
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(!os.tape_manager_open);
+    }
+
+    #[test]
+    fn handle_tape_manager_j_down() {
+        let mut os = test_os();
+        os.tape_manager_open = true;
+        let result = handle_key(&mut os, &key(KeyCode::Char('j')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_tape_manager_k_up() {
+        let mut os = test_os();
+        os.tape_manager_open = true;
+        let result = handle_key(&mut os, &key(KeyCode::Char('k')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_tape_manager_backspace() {
+        let mut os = test_os();
+        os.tape_manager_open = true;
+        os.tape_manager_query = "abc".into();
+        let result = handle_key(&mut os, &key(KeyCode::Backspace));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.tape_manager_query, "ab");
+    }
+
+    #[test]
+    fn handle_tape_manager_char_filter() {
+        let mut os = test_os();
+        os.tape_manager_open = true;
+        let result = handle_key(&mut os, &key(KeyCode::Char('x')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.tape_manager_query, "x");
+    }
+
+    #[test]
+    fn handle_theme_picker_esc() {
+        let mut os = test_os();
+        os.theme_picker_open = true;
+        let result = handle_key(&mut os, &key(KeyCode::Esc));
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(!os.theme_picker_open);
+    }
+
+    #[test]
+    fn handle_theme_picker_j_down() {
+        let mut os = test_os();
+        os.theme_picker_open = true;
+        os.theme_list = vec!["a".into(), "b".into()];
+        let result = handle_key(&mut os, &key(KeyCode::Char('j')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_theme_picker_k_up() {
+        let mut os = test_os();
+        os.theme_picker_open = true;
+        os.theme_list = vec!["a".into(), "b".into()];
+        let result = handle_key(&mut os, &key(KeyCode::Char('k')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_help_modal_esc() {
+        let mut os = test_os();
+        os.help_open = true;
+        let result = handle_key(&mut os, &key(KeyCode::Esc));
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(!os.help_open);
+    }
+
+    #[test]
+    fn handle_palette_esc() {
+        let mut os = test_os();
+        os.palette_open = true;
+        let result = handle_key(&mut os, &key(KeyCode::Esc));
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(!os.palette_open);
+    }
+
+    #[test]
+    fn handle_palette_j_down() {
+        let mut os = test_os();
+        os.open_palette();
+        let result = handle_key(&mut os, &key(KeyCode::Char('j')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_palette_k_up() {
+        let mut os = test_os();
+        os.open_palette();
+        let result = handle_key(&mut os, &key(KeyCode::Char('k')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_palette_enter() {
+        let mut os = test_os();
+        os.open_palette();
+        os.palette_query = "quit".into();
+        let result = handle_key(&mut os, &key(KeyCode::Enter));
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(!os.palette_open);
+    }
+
+    #[test]
+    fn handle_palette_char_query() {
+        let mut os = test_os();
+        os.open_palette();
+        let result = handle_key(&mut os, &key(KeyCode::Char('q')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.palette_query, "q");
+    }
+
+    #[test]
+    fn handle_switcher_esc() {
+        let mut os = test_os();
+        os.switcher_open = true;
+        let result = handle_key(&mut os, &key(KeyCode::Esc));
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(!os.switcher_open);
+    }
+
+    #[test]
+    fn handle_switcher_j_down() {
+        let mut os = test_os();
+        os.open_switcher(SwitcherKind::Workspace);
+        let result = handle_key(&mut os, &key(KeyCode::Char('j')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_switcher_k_up() {
+        let mut os = test_os();
+        os.open_switcher(SwitcherKind::Workspace);
+        let result = handle_key(&mut os, &key(KeyCode::Char('k')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_switcher_enter() {
+        let mut os = test_os();
+        os.open_switcher(SwitcherKind::Workspace);
+        os.switcher_selected = 2;
+        let result = handle_key(&mut os, &key(KeyCode::Enter));
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(!os.switcher_open);
+    }
+
+    #[test]
+    fn handle_scrollback_q_exits() {
+        let mut os = os_with_window();
+        os.enter_scrollback_mode();
+        let result = handle_key(&mut os, &key(KeyCode::Char('q')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(!os.scrollback_mode);
+    }
+
+    #[test]
+    fn handle_scrollback_v_toggles_visual() {
+        let mut os = os_with_window();
+        os.enter_scrollback_mode();
+        let result = handle_key(&mut os, &key(KeyCode::Char('v')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(os.copy_visual);
+    }
+
+    #[test]
+    fn handle_scrollback_j_moves_down() {
+        let mut os = os_with_window();
+        os.enter_scrollback_mode();
+        let result = handle_key(&mut os, &key(KeyCode::Char('j')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_scrollback_k_moves_up() {
+        let mut os = os_with_window();
+        os.enter_scrollback_mode();
+        let result = handle_key(&mut os, &key(KeyCode::Char('k')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_scrollback_y_yanks() {
+        let mut os = os_with_window();
+        os.enter_scrollback_mode();
+        os.toggle_visual(false);
+        let result = handle_key(&mut os, &key(KeyCode::Char('y')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_mouse_basic() {
+        let mut os = os_with_window();
+        let _handled = handle_mouse(
+            &mut os,
+            &MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 5,
+                row: 5,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        // Just check it doesn't panic.
+    }
+
+    #[test]
+    fn handle_project_tape_review_y() {
+        let mut os = test_os();
+        os.project_tape_pending = Some(crate::app::ProjectTapePending {
+            path: "/tmp/test.tape".into(),
+            hash: "abc123".into(),
+            content: b"content".to_vec(),
+        });
+        let result = handle_key(&mut os, &key(KeyCode::Char('y')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_project_tape_review_n() {
+        let mut os = test_os();
+        os.project_tape_pending = Some(crate::app::ProjectTapePending {
+            path: "/tmp/test.tape".into(),
+            hash: "abc123".into(),
+            content: b"content".to_vec(),
+        });
+        let result = handle_key(&mut os, &key(KeyCode::Char('n')));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn handle_project_tape_review_esc() {
+        let mut os = test_os();
+        os.project_tape_pending = Some(crate::app::ProjectTapePending {
+            path: "/tmp/test.tape".into(),
+            hash: "abc123".into(),
+            content: b"content".to_vec(),
+        });
+        let result = handle_key(&mut os, &key(KeyCode::Esc));
+        assert_eq!(result, KeyResult::Consumed);
     }
 }

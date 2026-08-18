@@ -158,4 +158,92 @@ mod tests {
         sb.reflow(2);
         assert_eq!(sb.len(), 2);
     }
+
+    #[test]
+    fn new_with_zero_uses_default() {
+        let sb = Scrollback::new(0);
+        assert_eq!(sb.len(), 0);
+    }
+
+    #[test]
+    fn line_access() {
+        let mut sb = Scrollback::new(5);
+        sb.push_line(new_line(3));
+        assert!(sb.line(0).is_some());
+        assert!(sb.line(1).is_none());
+    }
+
+    #[test]
+    fn set_max_lines_trims() {
+        let mut sb = Scrollback::new(10);
+        sb.push_line(new_line(1));
+        sb.push_line(new_line(1));
+        sb.push_line(new_line(1));
+        sb.set_max_lines(2);
+        assert_eq!(sb.len(), 2);
+    }
+
+    #[test]
+    fn set_max_lines_zero_uses_default() {
+        let mut sb = Scrollback::new(5);
+        sb.push_line(new_line(1));
+        sb.set_max_lines(0);
+        assert_eq!(sb.len(), 1);
+    }
+
+    #[test]
+    fn push_line_recycle_no_trim() {
+        let mut sb = Scrollback::new(10);
+        let recycled = sb.push_line_recycle(new_line(5));
+        assert!(recycled.is_none());
+    }
+
+    #[test]
+    fn push_line_recycle_with_trim() {
+        let mut sb = Scrollback::new(2);
+        sb.push_line(new_line(1));
+        sb.push_line(new_line(1));
+        let recycled = sb.push_line_recycle(new_line(3));
+        assert!(recycled.is_some());
+        assert_eq!(recycled.unwrap().len(), 3);
+    }
+
+    #[test]
+    fn clear() {
+        let mut sb = Scrollback::new(5);
+        sb.push_line(new_line(1));
+        sb.push_line(new_line(1));
+        sb.clear();
+        assert!(sb.is_empty());
+    }
+
+    #[test]
+    fn reflow_widens_lines() {
+        let mut sb = Scrollback::new(10);
+        let mut line = new_line(2);
+        line[0].content = "a".into();
+        line[0].width = 1;
+        line[1].content = "b".into();
+        line[1].width = 1;
+        sb.push_line(line);
+        sb.reflow(4);
+        assert_eq!(sb.len(), 1);
+        assert_eq!(sb.line(0).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn reflow_zero_width_noop() {
+        let mut sb = Scrollback::new(10);
+        sb.push_line(new_line(5));
+        sb.reflow(0);
+        assert_eq!(sb.len(), 1);
+    }
+
+    #[test]
+    fn is_empty_after_push() {
+        let mut sb = Scrollback::new(5);
+        assert!(sb.is_empty());
+        sb.push_line(new_line(1));
+        assert!(!sb.is_empty());
+    }
 }

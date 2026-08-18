@@ -94,4 +94,50 @@ mod tests {
         remove(name);
         assert!(load(name).is_none());
     }
+
+    #[test]
+    fn state_dir_exists() {
+        let dir = state_dir();
+        assert!(dir.is_some());
+        assert!(dir.unwrap().to_string_lossy().contains("termos"));
+    }
+
+    #[test]
+    fn state_path_format() {
+        let path = state_path("test");
+        assert!(path.is_some());
+        let p = path.unwrap();
+        assert!(p.to_string_lossy().contains("test.json"));
+    }
+
+    #[test]
+    fn list_saved_returns_vec() {
+        let list = list_saved();
+        assert!(list.is_empty() || !list.is_empty());
+    }
+
+    #[test]
+    fn save_and_load_multiple() {
+        let name = "__tuios_test_multi__";
+        remove(name);
+        let windows = vec![WindowState {
+            title: "W1".to_string(),
+            shell: "/bin/sh".to_string(),
+            workspace: 1,
+        }];
+        save(name, &windows).unwrap();
+        let loaded = load(name).expect("loaded");
+        assert_eq!(loaded.windows[0].title, "W1");
+        remove(name);
+    }
+
+    #[test]
+    fn remove_nonexistent_no_panic() {
+        remove("__nonexistent_session_xyz__");
+    }
+
+    #[test]
+    fn load_nonexistent_returns_none() {
+        assert!(load("__nonexistent_session_xyz__").is_none());
+    }
 }

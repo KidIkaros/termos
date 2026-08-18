@@ -720,4 +720,246 @@ mod tests {
         }
         assert!(sends.borrow().is_empty(), "Alt+N must switch, not type");
     }
+
+    #[test]
+    fn opt_plus_digit_switches_workspace() {
+        let (mut rec, sends) = Recording::new();
+        {
+            let mut ce = CommandExecutor::new(&mut rec);
+            ce.execute(&cmd(CommandType::KeyCombo, &["Opt+5"])).unwrap();
+        }
+        assert!(sends.borrow().is_empty(), "Opt+N must switch, not type");
+    }
+
+    #[test]
+    fn new_window_empty_string_uses_plain() {
+        let (mut rec, _) = Recording::new();
+        let mut ce = CommandExecutor::new(&mut rec);
+        assert!(ce.execute(&cmd(CommandType::NewWindow, &[""])).is_ok());
+        assert!(ce.execute(&cmd(CommandType::NewWindow, &[])).is_ok());
+    }
+
+    #[test]
+    fn close_window_empty_string_uses_focused() {
+        let (mut rec, _) = Recording::new();
+        let mut ce = CommandExecutor::new(&mut rec);
+        assert!(ce.execute(&cmd(CommandType::CloseWindow, &[""])).is_ok());
+        assert!(ce.execute(&cmd(CommandType::CloseWindow, &[])).is_ok());
+    }
+
+    #[test]
+    fn minimize_restore_empty_string_uses_focused() {
+        let (mut rec, _) = Recording::new();
+        let mut ce = CommandExecutor::new(&mut rec);
+        assert!(ce.execute(&cmd(CommandType::MinimizeWindow, &[""])).is_ok());
+        assert!(ce.execute(&cmd(CommandType::MinimizeWindow, &[])).is_ok());
+        assert!(ce.execute(&cmd(CommandType::RestoreWindow, &[""])).is_ok());
+        assert!(ce.execute(&cmd(CommandType::RestoreWindow, &[])).is_ok());
+    }
+
+    #[test]
+    fn focus_window_falls_back_to_id() {
+        let (mut rec, _) = Recording::new();
+        let mut ce = CommandExecutor::new(&mut rec);
+        assert!(ce.execute(&cmd(CommandType::FocusWindow, &["w1"])).is_ok());
+        assert!(ce.execute(&cmd(CommandType::FocusWindow, &[])).is_err());
+    }
+
+    #[test]
+    fn rename_window_two_args() {
+        let (mut rec, _) = Recording::new();
+        let mut ce = CommandExecutor::new(&mut rec);
+        assert!(ce
+            .execute(&cmd(CommandType::RenameWindow, &["old", "new"]))
+            .is_ok());
+    }
+
+    #[test]
+    fn set_config_requires_two_args() {
+        let (mut rec, _) = Recording::new();
+        let mut ce = CommandExecutor::new(&mut rec);
+        assert!(ce.execute(&cmd(CommandType::SetConfig, &["a.b"])).is_err());
+        assert!(ce
+            .execute(&cmd(CommandType::SetConfig, &["a.b", "true"]))
+            .is_ok());
+    }
+
+    #[test]
+    fn notify_requires_message() {
+        let (mut rec, _) = Recording::new();
+        let mut ce = CommandExecutor::new(&mut rec);
+        assert!(ce
+            .execute(&cmd(CommandType::ShowNotification, &[]))
+            .is_err());
+        assert!(ce
+            .execute(&cmd(CommandType::ShowNotification, &["hi"]))
+            .is_ok());
+        assert!(ce
+            .execute(&cmd(CommandType::ShowNotification, &["hi", "warn"]))
+            .is_ok());
+    }
+
+    #[test]
+    fn key_combo_single_char_no_mod() {
+        let (mut rec, sends) = Recording::new();
+        {
+            let mut ce = CommandExecutor::new(&mut rec);
+            ce.execute(&cmd(CommandType::KeyCombo, &["x"])).unwrap();
+        }
+        assert_eq!(sends.borrow()[0].1, b"x");
+    }
+
+    #[test]
+    fn key_combo_ctrl_digit() {
+        let (mut rec, sends) = Recording::new();
+        {
+            let mut ce = CommandExecutor::new(&mut rec);
+            ce.execute(&cmd(CommandType::KeyCombo, &["Ctrl+6"])).unwrap();
+        }
+        assert_eq!(sends.borrow()[0].1, vec![0x16]);
+    }
+
+    #[test]
+    fn key_combo_ctrl_special_char() {
+        let (mut rec, sends) = Recording::new();
+        {
+            let mut ce = CommandExecutor::new(&mut rec);
+            ce.execute(&cmd(CommandType::KeyCombo, &["Ctrl+]"])).unwrap();
+        }
+        // ] is not a letter/digit, so it's sent as-is
+        assert_eq!(sends.borrow()[0].1, vec![b']']);
+    }
+
+    #[test]
+    fn key_combo_alt_special_keys() {
+        let cases = [
+            ("Alt+Space", vec![0x1b, b' ']),
+            ("Alt+Enter", vec![0x1b, b'\n']),
+            ("Alt+Tab", vec![0x1b, b'\t']),
+            ("Alt+Backspace", vec![0x1b, 0x08]),
+        ];
+        for (combo, expected) in cases {
+            let (mut rec, sends) = Recording::new();
+            {
+                let mut ce = CommandExecutor::new(&mut rec);
+                ce.execute(&cmd(CommandType::KeyCombo, &[combo]))
+                    .unwrap();
+            }
+            assert_eq!(sends.borrow()[0].1, expected, "combo {combo}");
+        }
+    }
+
+    #[test]
+    fn key_combo_unknown_key_sends_literal() {
+        let (mut rec, sends) = Recording::new();
+        {
+            let mut ce = CommandExecutor::new(&mut rec);
+            ce.execute(&cmd(CommandType::KeyCombo, &["F13"])).unwrap();
+        }
+        assert_eq!(sends.borrow()[0].1, b"F13");
+    }
+
+    #[test]
+    fn split_direction_variants() {
+        let (mut rec, _) = Recording::new();
+        let mut ce = CommandExecutor::new(&mut rec);
+        assert!(ce.execute(&cmd(CommandType::Split, &["horizontal"])).is_ok());
+        assert!(ce.execute(&cmd(CommandType::Split, &["h"])).is_ok());
+        assert!(ce.execute(&cmd(CommandType::Split, &["vertical"])).is_ok());
+        assert!(ce.execute(&cmd(CommandType::Split, &["v"])).is_ok());
+    }
+
+    #[test]
+    fn focus_direction_requires_arg() {
+        let (mut rec, _) = Recording::new();
+        let mut ce = CommandExecutor::new(&mut rec);
+        assert!(ce.execute(&cmd(CommandType::FocusDirection, &[])).is_err());
+        assert!(ce
+            .execute(&cmd(CommandType::FocusDirection, &["left"]))
+            .is_ok());
+    }
+
+    #[test]
+    fn save_load_layout_require_arg() {
+        let (mut rec, _) = Recording::new();
+        let mut ce = CommandExecutor::new(&mut rec);
+        assert!(ce.execute(&cmd(CommandType::SaveLayout, &[])).is_err());
+        assert!(ce
+            .execute(&cmd(CommandType::SaveLayout, &["main"]))
+            .is_ok());
+        assert!(ce.execute(&cmd(CommandType::LoadLayout, &[])).is_err());
+        assert!(ce
+            .execute(&cmd(CommandType::LoadLayout, &["main"]))
+            .is_ok());
+    }
+
+    #[test]
+    fn set_theme_requires_arg() {
+        let (mut rec, _) = Recording::new();
+        let mut ce = CommandExecutor::new(&mut rec);
+        assert!(ce.execute(&cmd(CommandType::SetTheme, &[])).is_err());
+        assert!(ce
+            .execute(&cmd(CommandType::SetTheme, &["dracula"]))
+            .is_ok());
+    }
+
+    #[test]
+    fn set_dockbar_position_requires_arg() {
+        let (mut rec, _) = Recording::new();
+        let mut ce = CommandExecutor::new(&mut rec);
+        assert!(ce
+            .execute(&cmd(CommandType::SetDockbarPosition, &[]))
+            .is_err());
+        assert!(ce
+            .execute(&cmd(CommandType::SetDockbarPosition, &["top"]))
+            .is_ok());
+    }
+
+    #[test]
+    fn set_border_style_requires_arg() {
+        let (mut rec, _) = Recording::new();
+        let mut ce = CommandExecutor::new(&mut rec);
+        assert!(ce
+            .execute(&cmd(CommandType::SetBorderStyle, &[]))
+            .is_err());
+        assert!(ce
+            .execute(&cmd(CommandType::SetBorderStyle, &["rounded"]))
+            .is_ok());
+    }
+
+    #[test]
+    fn workspace_arg_non_numeric_errors() {
+        let (mut rec, _) = Recording::new();
+        let mut ce = CommandExecutor::new(&mut rec);
+        assert!(ce
+            .execute(&cmd(CommandType::SwitchWorkspace, &["abc"]))
+            .is_err());
+        assert!(ce
+            .execute(&cmd(CommandType::MoveToWorkspace, &["abc"]))
+            .is_err());
+        assert!(ce
+            .execute(&cmd(CommandType::MoveAndFollowWorkspace, &["abc"]))
+            .is_err());
+    }
+
+    #[test]
+    fn key_combo_out_of_range_digit() {
+        let (mut rec, sends) = Recording::new();
+        {
+            let mut ce = CommandExecutor::new(&mut rec);
+            ce.execute(&cmd(CommandType::KeyCombo, &["Alt+0"])).unwrap();
+        }
+        // Alt+0 is out of 1..9 range, falls through to send bytes
+        assert!(!sends.borrow().is_empty());
+    }
+
+    #[test]
+    fn preselect_requires_arg() {
+        let (mut rec, _) = Recording::new();
+        let mut ce = CommandExecutor::new(&mut rec);
+        assert!(ce.execute(&cmd(CommandType::Preselect, &[])).is_err());
+        assert!(ce
+            .execute(&cmd(CommandType::Preselect, &["left"]))
+            .is_ok());
+    }
 }

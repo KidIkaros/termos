@@ -123,3 +123,131 @@ pub type Line = Arc<Vec<Cell>>;
 pub fn new_line(width: usize) -> Vec<Cell> {
     vec![Cell::default(); width]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_default() {
+        assert_eq!(Color::default(), Color::Default);
+    }
+
+    #[test]
+    fn color_indexed() {
+        let c = Color::indexed(5);
+        assert_eq!(c, Color::Indexed(5));
+    }
+
+    #[test]
+    fn color_rgb() {
+        let c = Color::rgb(10, 20, 30);
+        assert_eq!(c, Color::Rgb(10, 20, 30));
+    }
+
+    #[test]
+    fn decoration_default() {
+        let d = Decoration::default();
+        assert!(!d.bold);
+        assert!(!d.dim);
+        assert!(!d.italic);
+        assert!(!d.underline);
+        assert!(!d.reverse);
+        assert!(!d.hidden);
+        assert!(!d.strikethrough);
+        assert!(!d.overline);
+    }
+
+    #[test]
+    fn style_new() {
+        let s = Style::new();
+        assert_eq!(s.fg, Color::Default);
+        assert_eq!(s.bg, Color::Default);
+        assert!(s.underline_color.is_none());
+    }
+
+    #[test]
+    fn style_eq_visual_same() {
+        let s1 = Style::new();
+        let s2 = Style::new();
+        assert!(s1.eq_visual(&s2));
+    }
+
+    #[test]
+    fn style_eq_visual_different_fg() {
+        let mut s1 = Style::new();
+        s1.fg = Color::indexed(1);
+        let s2 = Style::new();
+        assert!(!s1.eq_visual(&s2));
+    }
+
+    #[test]
+    fn style_eq_visual_different_bg() {
+        let mut s1 = Style::new();
+        s1.bg = Color::indexed(2);
+        let s2 = Style::new();
+        assert!(!s1.eq_visual(&s2));
+    }
+
+    #[test]
+    fn style_eq_visual_different_underline_color() {
+        let mut s1 = Style::new();
+        s1.underline_color = Some(Color::indexed(3));
+        let s2 = Style::new();
+        assert!(!s1.eq_visual(&s2));
+    }
+
+    #[test]
+    fn cell_new() {
+        let c = Cell::new("A", 1, Style::new());
+        assert_eq!(c.content, "A");
+        assert_eq!(c.width, 1);
+        assert!(c.dirty);
+    }
+
+    #[test]
+    fn cell_blank() {
+        let c = Cell::blank();
+        assert!(c.content.is_empty());
+        assert_eq!(c.width, 0);
+    }
+
+    #[test]
+    fn cell_is_empty() {
+        let c = Cell::default();
+        assert!(c.is_empty());
+        let c2 = Cell::new("x", 1, Style::new());
+        assert!(!c2.is_empty());
+    }
+
+    #[test]
+    fn cell_clear() {
+        let mut c = Cell::new("A", 1, Style::new());
+        c.clear();
+        assert!(c.is_empty());
+        assert!(c.dirty);
+    }
+
+    #[test]
+    fn new_line_creates_correct_width() {
+        let line = new_line(10);
+        assert_eq!(line.len(), 10);
+        for cell in &line {
+            assert!(cell.is_empty());
+        }
+    }
+
+    #[test]
+    fn link_default() {
+        let link = Link::default();
+        assert!(link.url.is_none());
+    }
+
+    #[test]
+    fn link_with_url() {
+        let link = Link {
+            url: Some("https://example.com".into()),
+        };
+        assert_eq!(link.url.as_deref(), Some("https://example.com"));
+    }
+}

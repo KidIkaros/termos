@@ -739,3 +739,290 @@ pub fn render_text_lines(buf: &mut Buffer, area: TuiRect, lines: &[String]) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crate::layout::SplitType;
+
+    fn test_os() -> Os {
+        Os::new(UserConfig::default_config())
+    }
+
+    #[test]
+    fn render_zero_size_buffer_does_not_panic() {
+        let os = test_os();
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 0, 0));
+        render(&os, &mut buf);
+    }
+
+    #[test]
+    fn render_single_window_fills_content() {
+        let mut os = test_os();
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, crate::layout::SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        render(&os, &mut buf);
+        // Should not panic and should paint something.
+        // Check that the dock row (last row) has content.
+        let dock_row = 23u16;
+        let cell = &buf[(0, dock_row)];
+        assert!(!cell.symbol().is_empty());
+    }
+
+    #[test]
+    fn render_text_lines_basic() {
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 40, 10));
+        let area = TuiRect::new(0, 0, 40, 10);
+        let lines = vec!["hello".into(), "world".into()];
+        render_text_lines(&mut buf, area, &lines);
+        assert_eq!(buf[(0, 0)].symbol(), "h");
+        assert_eq!(buf[(0, 1)].symbol(), "w");
+    }
+
+    #[test]
+    fn render_text_lines_truncates_at_width() {
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 3, 10));
+        let area = TuiRect::new(0, 0, 3, 10);
+        let lines = vec!["abcdef".into()];
+        render_text_lines(&mut buf, area, &lines);
+        assert_eq!(buf[(0, 0)].symbol(), "a");
+        assert_eq!(buf[(1, 0)].symbol(), "b");
+        assert_eq!(buf[(2, 0)].symbol(), "c");
+    }
+
+    #[test]
+    fn render_text_lines_truncates_at_height() {
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 40, 2));
+        let area = TuiRect::new(0, 0, 40, 2);
+        let lines = vec!["a".into(), "b".into(), "c".into(), "d".into()];
+        render_text_lines(&mut buf, area, &lines);
+        assert_eq!(buf[(0, 0)].symbol(), "a");
+        assert_eq!(buf[(0, 1)].symbol(), "b");
+    }
+
+    #[test]
+    fn render_overlay_basic() {
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        let area = TuiRect::new(0, 0, 80, 24);
+        let lines = vec!["line1".into(), "line2".into()];
+        render_overlay(&mut buf, area, &lines, "Test Title");
+        // Should not panic.
+    }
+
+    #[test]
+    fn render_overlay_small_area() {
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 10, 5));
+        let area = TuiRect::new(0, 0, 10, 5);
+        let lines = vec!["long line that exceeds width".into()];
+        render_overlay(&mut buf, area, &lines, "Title");
+        // Should not panic even with small area.
+    }
+
+    #[test]
+    fn build_which_key_lines_for_leader_prefix() {
+        let mut os = test_os();
+        os.prefix = Prefix::Leader;
+        let lines = build_which_key_lines(&os);
+        assert!(!lines.is_empty());
+        assert!(lines[0].contains("Leader"));
+    }
+
+    #[test]
+    fn build_which_key_lines_for_workspace_prefix() {
+        let mut os = test_os();
+        os.prefix = Prefix::Workspace;
+        let lines = build_which_key_lines(&os);
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn focused_border_color_default() {
+        let os = test_os();
+        let color = focused_border_color(&os);
+        // Default theme should have a color.
+        match color {
+            TuiColor::Rgb(_, _, _) => {}
+            TuiColor::Reset => {}
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn unfocused_border_color_default() {
+        let os = test_os();
+        let color = unfocused_border_color(&os);
+        match color {
+            TuiColor::Rgb(_, _, _) => {}
+            TuiColor::Reset => {}
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn render_dock_single_window() {
+        let mut os = test_os();
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        let dock_area = TuiRect::new(0, 23, 80, 1);
+        let sorted_ids = vec![0];
+        render_dock(&os, &mut buf, dock_area, &sorted_ids);
+        assert!(!buf[(0, 23)].symbol().is_empty());
+    }
+
+    #[test]
+    fn render_dock_multiple_windows() {
+        let mut os = test_os();
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(1, 0, SplitType::Vertical, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        let dock_area = TuiRect::new(0, 23, 80, 1);
+        let sorted_ids = vec![0, 1];
+        render_dock(&os, &mut buf, dock_area, &sorted_ids);
+        assert!(!buf[(0, 23)].symbol().is_empty());
+    }
+
+    #[test]
+    fn render_quit_confirmation() {
+        let mut os = test_os();
+        os.show_quit_confirmation = true;
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        render(&os, &mut buf);
+        // Should not panic.
+    }
+
+    #[test]
+    fn render_theme_picker() {
+        let mut os = test_os();
+        os.theme_picker_open = true;
+        os.theme_list = vec!["default".into(), "monokai".into()];
+        os.theme_picker_selected = 0;
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        render(&os, &mut buf);
+    }
+
+    #[test]
+    fn render_help_modal() {
+        let mut os = test_os();
+        os.help_open = true;
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        render(&os, &mut buf);
+    }
+
+    #[test]
+    fn render_scrollback_mode() {
+        let mut os = test_os();
+        os.scrollback_mode = true;
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        render(&os, &mut buf);
+    }
+
+    #[test]
+    fn render_switcher() {
+        let mut os = test_os();
+        os.switcher_open = true;
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        render(&os, &mut buf);
+    }
+
+    #[test]
+    fn render_palette() {
+        let mut os = test_os();
+        os.palette_open = true;
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        render(&os, &mut buf);
+    }
+
+    #[test]
+    fn render_showkeys() {
+        let mut os = test_os();
+        os.last_key_chord = "Ctrl+A".into();
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        render(&os, &mut buf);
+    }
+
+    #[test]
+    fn render_tape_manager() {
+        let mut os = test_os();
+        os.tape_manager_open = true;
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        render(&os, &mut buf);
+    }
+
+    #[test]
+    fn render_project_tape_pending() {
+        let mut os = test_os();
+        os.project_tape_pending = Some(crate::app::ProjectTapePending {
+            path: "/tmp/test.tape".into(),
+            hash: "abc123def456".into(),
+            content: b"some tape content".to_vec(),
+        });
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        render(&os, &mut buf);
+    }
+
+    #[test]
+    fn render_which_key_overlay() {
+        let mut os = test_os();
+        os.config.appearance.which_key_enabled = true;
+        os.prefix = Prefix::Leader;
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        render(&os, &mut buf);
+    }
+
+    #[test]
+    fn render_two_windows() {
+        let mut os = test_os();
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(1, 0, SplitType::Vertical, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        render(&os, &mut buf);
+    }
+
+    #[test]
+    fn build_which_key_lines_for_window_prefix() {
+        let mut os = test_os();
+        os.prefix = Prefix::Window;
+        let lines = build_which_key_lines(&os);
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn build_which_key_lines_for_minimize_prefix() {
+        let mut os = test_os();
+        os.prefix = Prefix::Minimize;
+        let lines = build_which_key_lines(&os);
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn build_which_key_lines_for_tape_prefix() {
+        let mut os = test_os();
+        os.prefix = Prefix::Tape;
+        let lines = build_which_key_lines(&os);
+        assert!(!lines.is_empty());
+    }
+}

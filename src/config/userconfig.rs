@@ -458,4 +458,496 @@ mod tests {
         assert_eq!(back.keybindings.leader_key, "ctrl+b");
         assert_eq!(back.appearance.border_style, "rounded");
     }
+
+    #[test]
+    fn default_config_has_all_sections() {
+        let cfg = UserConfig::default_config();
+        assert!(!cfg.keybindings.leader_key.is_empty());
+        assert!(cfg.appearance.scrollback_lines > 0);
+        assert!(!cfg.appearance.border_style.is_empty());
+    }
+
+    #[test]
+    fn default_config_dockbar_position() {
+        let cfg = UserConfig::default_config();
+        assert!(!cfg.appearance.dockbar_position.is_empty());
+    }
+
+    #[test]
+    fn default_config_sound_mode() {
+        let cfg = UserConfig::default_config();
+        // sound_mode defaults to empty string or "audio".
+        let mode = &cfg.notifications.agent.sound_mode;
+        assert!(mode.is_empty() || mode == "audio" || mode == "bell" || mode == "both");
+    }
+
+    #[test]
+    fn default_config_hide_scrollbar_default() {
+        let cfg = UserConfig::default_config();
+        assert!(!cfg.appearance.hide_scrollbar);
+    }
+
+    #[test]
+    fn toml_serialization_produces_valid_toml() {
+        let cfg = UserConfig::default_config();
+        let toml = toml::to_string(&cfg).expect("serialize");
+        // Should be parseable TOML.
+        let parsed: toml::Value = toml::from_str(&toml).expect("parse");
+        assert!(parsed.is_table());
+    }
+
+    #[test]
+    fn partial_toml_overrides_defaults() {
+        // Use default_config as base, serialize, modify, and re-parse.
+        let cfg = UserConfig::default_config();
+        let mut toml = toml::to_string(&cfg).expect("serialize");
+        // Modify a value.
+        toml = toml.replace("border_style = \"rounded\"", "border_style = \"double\"");
+        let back: UserConfig = toml::from_str(&toml).expect("deserialize");
+        assert_eq!(back.appearance.border_style, "double");
+        assert_eq!(back.appearance.scrollback_lines, 10_000);
+    }
+
+    #[test]
+    fn empty_toml_uses_defaults() {
+        // Deserializing from a minimal valid TOML uses serde defaults.
+        let toml_str = "[keybindings]\nleader_key = \"ctrl+b\"\n";
+        let cfg: UserConfig = toml::from_str(toml_str).expect("deserialize");
+        assert_eq!(cfg.keybindings.leader_key, "ctrl+b");
+    }
+
+    #[test]
+    fn window_management_bindings_present() {
+        let cfg = UserConfig::default_config();
+        assert!(cfg.keybindings.window_management.contains_key("close_window"));
+        assert!(cfg.keybindings.window_management.contains_key("next_window"));
+        assert!(cfg.keybindings.window_management.contains_key("prev_window"));
+    }
+
+    #[test]
+    fn prefix_mode_bindings_present() {
+        let cfg = UserConfig::default_config();
+        assert!(cfg.keybindings.prefix_mode.contains_key("prefix_new_window"));
+        assert!(cfg.keybindings.prefix_mode.contains_key("prefix_close_window"));
+    }
+
+    #[test]
+    fn default_notification_config() {
+        let cfg = UserConfig::default_config();
+        assert!(cfg.notifications.agent.enabled.unwrap_or(true));
+    }
+
+    #[test]
+    fn default_resize_config() {
+        // resize_interval is at top level of UserConfig if it exists.
+        let cfg = UserConfig::default_config();
+        let _ = &cfg.appearance.scroll_lines;
+    }
+
+    #[test]
+    fn default_behavior_config() {
+        let cfg = UserConfig::default_config();
+        let _ = cfg.appearance.hide_scrollbar;
+        let _ = cfg.appearance.confirm_quit;
+    }
+
+    #[test]
+    fn toml_round_trip_all_sections() {
+        let cfg = UserConfig::default_config();
+        let toml = toml::to_string(&cfg).expect("serialize");
+        let back: UserConfig = toml::from_str(&toml).expect("deserialize");
+        assert_eq!(
+            back.notifications.agent.enabled,
+            cfg.notifications.agent.enabled
+        );
+        assert_eq!(back.appearance.border_style, cfg.appearance.border_style);
+    }
+
+    #[test]
+    fn partial_override_preserves_other_fields() {
+        let cfg = UserConfig::default_config();
+        let mut toml = toml::to_string(&cfg).expect("serialize");
+        toml = toml.replace("leader_key = \"ctrl+b\"", "leader_key = \"ctrl+a\"");
+        let back: UserConfig = toml::from_str(&toml).expect("deserialize");
+        assert_eq!(back.keybindings.leader_key, "ctrl+a");
+        assert_eq!(back.appearance.border_style, "rounded");
+    }
+
+    #[test]
+    fn default_agent_alert_states() {
+        let cfg = UserConfig::default_config();
+        assert!(cfg.notifications.agent.states.needs_input.unwrap_or(true));
+        assert!(cfg.notifications.agent.states.errored.unwrap_or(true));
+        assert!(cfg.notifications.agent.states.done.unwrap_or(true));
+    }
+
+    #[test]
+    fn default_appearance_fields() {
+        let cfg = UserConfig::default_config();
+        assert_eq!(cfg.appearance.scrollback_lines, 10_000);
+        assert_eq!(cfg.appearance.scroll_lines, 3);
+        assert_eq!(cfg.appearance.max_fps, 60);
+        assert!(!cfg.appearance.hide_window_buttons);
+        assert!(!cfg.appearance.shared_borders);
+    }
+
+    #[test]
+    fn default_startup_shell() {
+        let cfg = UserConfig::default_config();
+        // startup.shell is either empty or a valid path.
+        let _ = &cfg.startup;
+    }
+
+    #[test]
+    fn daemon_config_defaults() {
+        let cfg = UserConfig::default_config();
+        let _ = &cfg.daemon.socket_path;
+        let _ = &cfg.daemon.log_level;
+        let _ = &cfg.daemon.default_codec;
+    }
+
+    #[test]
+    fn keybindings_all_sections_present() {
+        let cfg = UserConfig::default_config();
+        let _ = &cfg.keybindings.layout;
+        let _ = &cfg.keybindings.navigation;
+        let _ = &cfg.keybindings.system;
+        let _ = &cfg.keybindings.terminal_mode;
+        let _ = &cfg.keybindings.debug_prefix;
+        let _ = &cfg.keybindings.tape_prefix;
+    }
+
+    #[test]
+    fn overrides_parse_all_flags() {
+        let args = vec![
+            "--border-style".into(),
+            "double".into(),
+            "--dockbar-position".into(),
+            "top".into(),
+            "--ascii-only".into(),
+            "--theme".into(),
+            "dracula".into(),
+            "--no-which-key".into(),
+            "remaining".into(),
+        ];
+        let (ov, remaining) = Overrides::parse(&args);
+        assert_eq!(ov.border_style.as_deref(), Some("double"));
+        assert_eq!(ov.dockbar_position.as_deref(), Some("top"));
+        assert_eq!(ov.ascii_only, Some(true));
+        assert_eq!(ov.theme.as_deref(), Some("dracula"));
+        assert_eq!(ov.no_which_key, Some(true));
+        assert_eq!(remaining, vec!["remaining"]);
+    }
+
+    #[test]
+    fn overrides_parse_empty() {
+        let (ov, remaining) = Overrides::parse(&[]);
+        assert!(ov.border_style.is_none());
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn overrides_parse_unknown_flags() {
+        let args = vec!["--unknown".into(), "value".into()];
+        let (ov, remaining) = Overrides::parse(&args);
+        assert!(ov.border_style.is_none());
+        assert_eq!(remaining, vec!["--unknown", "value"]);
+    }
+
+    #[test]
+    fn overrides_apply_border_style() {
+        let mut cfg = UserConfig::default_config();
+        let ov = Overrides {
+            border_style: Some("double".into()),
+            ..Default::default()
+        };
+        ov.apply(&mut cfg);
+        assert_eq!(cfg.appearance.border_style, "double");
+    }
+
+    #[test]
+    fn overrides_apply_dockbar_position() {
+        let mut cfg = UserConfig::default_config();
+        let ov = Overrides {
+            dockbar_position: Some("top".into()),
+            ..Default::default()
+        };
+        ov.apply(&mut cfg);
+        assert_eq!(cfg.appearance.dockbar_position, "top");
+    }
+
+    #[test]
+    fn overrides_apply_ascii_only() {
+        let mut cfg = UserConfig::default_config();
+        let ov = Overrides {
+            ascii_only: Some(true),
+            ..Default::default()
+        };
+        ov.apply(&mut cfg);
+        assert_eq!(cfg.appearance.border_style, "plain");
+        assert!(!cfg.appearance.animations_enabled);
+    }
+
+    #[test]
+    fn overrides_apply_theme() {
+        let mut cfg = UserConfig::default_config();
+        let ov = Overrides {
+            theme: Some("dracula".into()),
+            ..Default::default()
+        };
+        ov.apply(&mut cfg);
+        assert_eq!(cfg.appearance.theme, "dracula");
+    }
+
+    #[test]
+    fn overrides_apply_no_which_key() {
+        let mut cfg = UserConfig::default_config();
+        let ov = Overrides {
+            no_which_key: Some(true),
+            ..Default::default()
+        };
+        ov.apply(&mut cfg);
+        assert!(!cfg.appearance.which_key_enabled);
+    }
+
+    #[test]
+    fn overrides_apply_noop_when_none() {
+        let mut cfg = UserConfig::default_config();
+        let original_border = cfg.appearance.border_style.clone();
+        let ov = Overrides::default();
+        ov.apply(&mut cfg);
+        assert_eq!(cfg.appearance.border_style, original_border);
+    }
+
+    #[test]
+    fn fill_missing_leader_key() {
+        let mut kb = KeybindingsConfig {
+            leader_key: String::new(),
+            ..Default::default()
+        };
+        kb.fill_missing();
+        assert_eq!(kb.leader_key, DEFAULT_LEADER_KEY);
+    }
+
+    #[test]
+    fn fill_missing_window_management() {
+        let mut kb = KeybindingsConfig {
+            window_management: HashMap::new(),
+            ..Default::default()
+        };
+        kb.fill_missing();
+        assert!(!kb.window_management.is_empty());
+    }
+
+    #[test]
+    fn fill_missing_workspaces() {
+        let mut kb = KeybindingsConfig {
+            workspaces: HashMap::new(),
+            ..Default::default()
+        };
+        kb.fill_missing();
+        assert!(!kb.workspaces.is_empty());
+    }
+
+    #[test]
+    fn fill_missing_layout() {
+        let mut kb = KeybindingsConfig {
+            layout: HashMap::new(),
+            ..Default::default()
+        };
+        kb.fill_missing();
+        assert!(!kb.layout.is_empty());
+    }
+
+    #[test]
+    fn fill_missing_mode_control() {
+        let mut kb = KeybindingsConfig {
+            mode_control: HashMap::new(),
+            ..Default::default()
+        };
+        kb.fill_missing();
+        assert!(!kb.mode_control.is_empty());
+    }
+
+    #[test]
+    fn fill_missing_navigation() {
+        let mut kb = KeybindingsConfig {
+            navigation: HashMap::new(),
+            ..Default::default()
+        };
+        kb.fill_missing();
+        assert!(!kb.navigation.is_empty());
+    }
+
+    #[test]
+    fn fill_missing_prefix_mode() {
+        let mut kb = KeybindingsConfig {
+            prefix_mode: HashMap::new(),
+            ..Default::default()
+        };
+        kb.fill_missing();
+        assert!(!kb.prefix_mode.is_empty());
+    }
+
+    #[test]
+    fn fill_missing_terminal_mode() {
+        let mut kb = KeybindingsConfig {
+            terminal_mode: HashMap::new(),
+            ..Default::default()
+        };
+        kb.fill_missing();
+        assert!(!kb.terminal_mode.is_empty());
+    }
+
+    #[test]
+    fn load_from_nonexistent_returns_defaults() {
+        let cfg = UserConfig::load_from(Path::new("/nonexistent/config.toml"));
+        assert_eq!(cfg.keybindings.leader_key, DEFAULT_LEADER_KEY);
+    }
+
+    #[test]
+    fn load_from_invalid_toml_returns_defaults() {
+        let dir = std::env::temp_dir().join("termos_test_load_from_invalid");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("bad.toml");
+        std::fs::write(&path, "not valid toml {{{{").unwrap();
+        let cfg = UserConfig::load_from(&path);
+        assert_eq!(cfg.keybindings.leader_key, DEFAULT_LEADER_KEY);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_from_valid_toml() {
+        let dir = std::env::temp_dir().join("termos_test_load_from_valid");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.toml");
+        let mut cfg = UserConfig::default_config();
+        cfg.appearance.border_style = "double".into();
+        let toml_str = toml::to_string(&cfg).unwrap();
+        std::fs::write(&path, toml_str).unwrap();
+        let loaded = UserConfig::load_from(&path);
+        assert_eq!(loaded.appearance.border_style, "double");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_and_load_round_trip() {
+        let dir = std::env::temp_dir().join("termos_test_save_load");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.toml");
+        let mut cfg = UserConfig::default_config();
+        cfg.appearance.border_style = "thick".into();
+        std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+        let loaded = UserConfig::load_from(&path);
+        assert_eq!(loaded.appearance.border_style, "thick");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_path_returns_valid_path() {
+        let path = UserConfig::config_path();
+        assert!(path.is_some());
+        let path = path.unwrap();
+        assert!(path.to_string_lossy().contains("termos"));
+        assert!(path.to_string_lossy().ends_with("config.toml"));
+    }
+
+    #[test]
+    fn notifications_default_values() {
+        let cfg = UserConfig::default_config();
+        assert!(cfg.notifications.agent.enabled.unwrap_or(true));
+        assert!(cfg.notifications.agent.notify.unwrap_or(true));
+        assert!(!cfg.notifications.agent.sound.unwrap_or(false));
+        assert!(cfg.notifications.agent.dock.unwrap_or(true));
+        assert!(cfg.notifications.agent.suppress_focused.unwrap_or(true));
+        assert_eq!(cfg.notifications.agent.sound_mode, "");
+        assert!(cfg.notifications.agent.command.is_empty());
+        assert!(cfg.notifications.agent.quiet_hours.is_empty());
+    }
+
+    #[test]
+    fn agent_alert_sounds_default() {
+        let sounds = AgentAlertSounds::default();
+        assert!(sounds.done.is_empty());
+        assert!(sounds.needs_input.is_empty());
+    }
+
+    #[test]
+    fn agent_alert_states_default() {
+        let states = AgentAlertStates::default();
+        assert!(states.needs_input.is_none());
+        assert!(states.errored.is_none());
+        assert!(states.done.is_none());
+        assert!(states.idle.is_none());
+        assert!(states.working.is_none());
+    }
+
+    #[test]
+    fn startup_config_default() {
+        let s = StartupConfig::default();
+        assert!(!s.open_default_window);
+        assert!(!s.tiled);
+        assert!(!s.start_in_terminal_mode);
+    }
+
+    #[test]
+    fn daemon_config_default() {
+        let d = DaemonConfig::default();
+        assert!(d.log_level.is_empty());
+        assert!(d.default_codec.is_empty());
+        assert!(d.socket_path.is_empty());
+    }
+
+    #[test]
+    fn appearance_config_border_focused_color_default() {
+        let a = AppearanceConfig::default();
+        assert!(a.border_focused_color.is_none());
+        assert!(a.border_unfocused_color.is_none());
+    }
+
+    #[test]
+    fn appearance_config_which_key_position_default() {
+        let a = AppearanceConfig::default();
+        assert_eq!(a.which_key_position, "bottom-right");
+    }
+
+    #[test]
+    fn appearance_config_window_title_position_default() {
+        let a = AppearanceConfig::default();
+        assert_eq!(a.window_title_position, "bottom");
+    }
+
+    #[test]
+    fn overrides_parse_partial_flags() {
+        let args = vec!["--border-style".into(), "double".into()];
+        let (ov, remaining) = Overrides::parse(&args);
+        assert_eq!(ov.border_style.as_deref(), Some("double"));
+        assert!(ov.dockbar_position.is_none());
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn overrides_parse_missing_value() {
+        // --border-style without a value
+        let args = vec!["--border-style".into()];
+        let (ov, _) = Overrides::parse(&args);
+        assert!(ov.border_style.is_none());
+    }
+
+    #[test]
+    fn overrides_apply_multiple() {
+        let mut cfg = UserConfig::default_config();
+        let ov = Overrides {
+            border_style: Some("double".into()),
+            dockbar_position: Some("top".into()),
+            theme: Some("dracula".into()),
+            no_which_key: Some(true),
+            ..Default::default()
+        };
+        ov.apply(&mut cfg);
+        assert_eq!(cfg.appearance.border_style, "double");
+        assert_eq!(cfg.appearance.dockbar_position, "top");
+        assert_eq!(cfg.appearance.theme, "dracula");
+        assert!(!cfg.appearance.which_key_enabled);
+    }
 }

@@ -125,3 +125,208 @@ impl DockState {
 pub fn rgb_tui(rgb: Rgb) -> TuiColor {
     TuiColor::Rgb(rgb.0, rgb.1, rgb.2)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vt::cell::{Color, Style};
+    use crate::config::theme::{Theme, Rgb};
+    use ratatui::style::Modifier;
+
+    fn test_theme() -> Theme {
+        Theme {
+            name: "test".to_string(),
+            foreground: Rgb::new(200, 200, 200),
+            background: Rgb::new(30, 30, 30),
+            cursor: Rgb::new(200, 200, 200),
+            ansi: Theme::default_ansi(),
+        }
+    }
+
+    #[test]
+    fn to_tui_color_default_no_theme() {
+        let c = to_tui_color(Color::Default, None);
+        assert_eq!(c, TuiColor::Reset);
+    }
+
+    #[test]
+    fn to_tui_color_default_with_theme() {
+        let theme = test_theme();
+        let c = to_tui_color(Color::Default, Some(&theme));
+        match c {
+            TuiColor::Rgb(_, _, _) => {}
+            _ => panic!("expected Rgb"),
+        }
+    }
+
+    #[test]
+    fn to_tui_color_indexed_no_theme() {
+        let c = to_tui_color(Color::Indexed(0), None);
+        match c {
+            TuiColor::Rgb(r, g, b) => assert_eq!((r, g, b), (0, 0, 0)),
+            _ => panic!("expected Rgb"),
+        }
+    }
+
+    #[test]
+    fn to_tui_color_indexed_with_theme() {
+        let theme = test_theme();
+        let c = to_tui_color(Color::Indexed(1), Some(&theme));
+        match c {
+            TuiColor::Rgb(_, _, _) => {}
+            _ => panic!("expected Rgb"),
+        }
+    }
+
+    #[test]
+    fn to_tui_color_rgb() {
+        let c = to_tui_color(Color::Rgb(100, 200, 50), None);
+        assert_eq!(c, TuiColor::Rgb(100, 200, 50));
+    }
+
+    #[test]
+    fn to_tui_style_default() {
+        let style = Style::new();
+        let s = to_tui_style(style, None);
+        assert_eq!(s.fg, Some(TuiColor::Reset));
+    }
+
+    #[test]
+    fn to_tui_style_bold() {
+        let mut style = Style::new();
+        style.decoration.bold = true;
+        let s = to_tui_style(style, None);
+        assert!(s.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn to_tui_style_dim() {
+        let mut style = Style::new();
+        style.decoration.dim = true;
+        let s = to_tui_style(style, None);
+        assert!(s.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn to_tui_style_italic() {
+        let mut style = Style::new();
+        style.decoration.italic = true;
+        let s = to_tui_style(style, None);
+        assert!(s.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn to_tui_style_underline() {
+        let mut style = Style::new();
+        style.decoration.underline = true;
+        let s = to_tui_style(style, None);
+        assert!(s.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn to_tui_style_double_underline() {
+        let mut style = Style::new();
+        style.decoration.double_underline = true;
+        let s = to_tui_style(style, None);
+        assert!(s.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn to_tui_style_reverse() {
+        let mut style = Style::new();
+        style.decoration.reverse = true;
+        let s = to_tui_style(style, None);
+        assert!(s.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn to_tui_style_hidden() {
+        let mut style = Style::new();
+        style.decoration.hidden = true;
+        let s = to_tui_style(style, None);
+        assert!(s.add_modifier.contains(Modifier::HIDDEN));
+    }
+
+    #[test]
+    fn to_tui_style_strikethrough() {
+        let mut style = Style::new();
+        style.decoration.strikethrough = true;
+        let s = to_tui_style(style, None);
+        assert!(s.add_modifier.contains(Modifier::CROSSED_OUT));
+    }
+
+    #[test]
+    fn to_tui_style_with_bg() {
+        let mut style = Style::new();
+        style.bg = Color::Rgb(10, 20, 30);
+        let s = to_tui_style(style, None);
+        assert!(s.bg.is_some());
+    }
+
+    #[test]
+    fn to_tui_style_default_bg_omitted() {
+        let style = Style::new();
+        let s = to_tui_style(style, None);
+        assert!(s.bg.is_none());
+    }
+
+    #[test]
+    fn border_type_rounded() {
+        assert_eq!(
+            border_type("rounded"),
+            ratatui::widgets::BorderType::Rounded
+        );
+    }
+
+    #[test]
+    fn border_type_thick() {
+        assert_eq!(
+            border_type("thick"),
+            ratatui::widgets::BorderType::Thick
+        );
+    }
+
+    #[test]
+    fn border_type_double() {
+        assert_eq!(
+            border_type("double"),
+            ratatui::widgets::BorderType::Double
+        );
+    }
+
+    #[test]
+    fn border_type_plain() {
+        assert_eq!(
+            border_type("plain"),
+            ratatui::widgets::BorderType::Plain
+        );
+    }
+
+    #[test]
+    fn border_type_normal() {
+        assert_eq!(
+            border_type("normal"),
+            ratatui::widgets::BorderType::Plain
+        );
+    }
+
+    #[test]
+    fn border_type_unknown_falls_back_to_rounded() {
+        assert_eq!(
+            border_type("unknown"),
+            ratatui::widgets::BorderType::Rounded
+        );
+    }
+
+    #[test]
+    fn dock_state_new() {
+        let ds = DockState::new();
+        assert!(ds.message.is_none());
+    }
+
+    #[test]
+    fn rgb_tui_converts() {
+        let c = rgb_tui(Rgb::new(100, 200, 50));
+        assert_eq!(c, TuiColor::Rgb(100, 200, 50));
+    }
+}

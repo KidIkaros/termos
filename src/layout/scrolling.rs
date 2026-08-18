@@ -394,4 +394,383 @@ mod tests {
         s.clamp_viewport(120);
         assert!(s.viewport_x <= (s.total_strip_width(120) - 120).max(0));
     }
+
+    #[test]
+    fn viewport_clamps_negative() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.viewport_x = -100;
+        s.clamp_viewport(120);
+        assert_eq!(s.viewport_x, 0);
+    }
+
+    #[test]
+    fn focus_left_right() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.add_column(2);
+        s.add_column(3);
+        s.focused_col = 1;
+        s.focus_left();
+        assert_eq!(s.focused_col, 0);
+        s.focus_left();
+        assert_eq!(s.focused_col, 0);
+        s.focus_right();
+        assert_eq!(s.focused_col, 1);
+        s.focus_right();
+        assert_eq!(s.focused_col, 2);
+        s.focus_right();
+        assert_eq!(s.focused_col, 2);
+    }
+
+    #[test]
+    fn move_column_left_right() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.add_column(2);
+        s.add_column(3);
+        s.focused_col = 1;
+        s.move_column_left();
+        assert_eq!(s.focused_col, 0);
+        s.move_column_left();
+        assert_eq!(s.focused_col, 0);
+        s.move_column_right();
+        assert_eq!(s.focused_col, 1);
+        s.move_column_right();
+        assert_eq!(s.focused_col, 2);
+        s.move_column_right();
+        assert_eq!(s.focused_col, 2);
+    }
+
+    #[test]
+    fn cycle_width_wraps() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.focused_col = 0;
+        s.columns[0].proportion = 0.9;
+        s.cycle_width();
+        assert!((s.columns[0].proportion - 0.333).abs() < 0.01);
+    }
+
+    #[test]
+    fn cycle_width_zero_uses_default() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.focused_col = 0;
+        s.columns[0].proportion = 0.0;
+        s.cycle_width();
+        assert!(s.columns[0].proportion > 0.0);
+    }
+
+    #[test]
+    fn cycle_width_out_of_bounds_no_panic() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.focused_col = 5;
+        s.cycle_width();
+    }
+
+    #[test]
+    fn cycle_width_empty_presets() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.preset_widths.clear();
+        s.cycle_width();
+    }
+
+    #[test]
+    fn consume_window_takes_from_next() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.add_column(2);
+        s.focused_col = 0;
+        s.consume_window();
+        assert_eq!(s.columns[0].window_ids, vec![1, 2]);
+        assert_eq!(s.columns.len(), 1);
+    }
+
+    #[test]
+    fn consume_window_no_next_column() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.consume_window();
+        assert_eq!(s.columns[0].window_ids, vec![1]);
+    }
+
+    #[test]
+    fn consume_window_next_empty() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.add_column(20);
+        s.columns[1].window_ids.clear();
+        s.focused_col = 0;
+        s.consume_window();
+        assert_eq!(s.columns.len(), 2);
+    }
+
+    #[test]
+    fn expel_window_creates_new_column() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.columns[0].window_ids.push(2);
+        s.focused_col = 0;
+        s.expel_window();
+        assert_eq!(s.columns.len(), 2);
+        assert_eq!(s.columns[0].window_ids, vec![1]);
+        assert_eq!(s.columns[1].window_ids, vec![2]);
+    }
+
+    #[test]
+    fn expel_window_single_window_noop() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.expel_window();
+        assert_eq!(s.columns.len(), 1);
+    }
+
+    #[test]
+    fn expel_window_out_of_bounds() {
+        let mut s = ScrollingLayout::new();
+        s.focused_col = 5;
+        s.expel_window();
+    }
+
+    #[test]
+    fn resolve_column_width_fixed() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.columns[0].fixed_width = 40;
+        assert_eq!(s.resolve_column_width(0, 120), 40);
+    }
+
+    #[test]
+    fn resolve_column_width_fixed_exceeds_max() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.columns[0].fixed_width = 200;
+        assert_eq!(s.resolve_column_width(0, 120), 108); // 90% of 120
+    }
+
+    #[test]
+    fn resolve_column_width_out_of_bounds() {
+        let s = ScrollingLayout::new();
+        assert_eq!(s.resolve_column_width(0, 120), 0);
+        assert_eq!(s.resolve_column_width(-1, 120), 0);
+    }
+
+    #[test]
+    fn resolve_column_width_default_proportion() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.columns[0].proportion = 0.0;
+        let w = s.resolve_column_width(0, 120);
+        assert!(w > 0);
+    }
+
+    #[test]
+    fn total_strip_width_with_gap() {
+        let mut s = ScrollingLayout::new();
+        s.gap = 2;
+        s.add_column(1);
+        s.add_column(2);
+        let total = s.total_strip_width(120);
+        assert!(total > 120);
+    }
+
+    #[test]
+    fn ensure_focused_visible_when_offscreen_right() {
+        let mut s = ScrollingLayout::new();
+        for i in 1..=5 {
+            s.add_column(i);
+        }
+        s.focused_col = 4;
+        s.viewport_x = 0;
+        s.ensure_focused_visible(120);
+        let col_x = s.column_x(4, 120);
+        assert!(s.viewport_x <= col_x);
+    }
+
+    #[test]
+    fn ensure_focused_visible_when_offscreen_left() {
+        let mut s = ScrollingLayout::new();
+        for i in 1..=5 {
+            s.add_column(i);
+        }
+        s.focused_col = 0;
+        s.viewport_x = 1000;
+        s.ensure_focused_visible(120);
+        assert!(s.viewport_x < 1000);
+    }
+
+    #[test]
+    fn ensure_focused_visible_no_columns() {
+        let mut s = ScrollingLayout::new();
+        s.focused_col = 0;
+        s.ensure_focused_visible(120);
+    }
+
+    #[test]
+    fn scroll_to_focused_column_centers() {
+        let mut s = ScrollingLayout::new();
+        for i in 1..=5 {
+            s.add_column(i);
+        }
+        s.focused_col = 2;
+        s.scroll_to_focused_column(120);
+        let col_x = s.column_x(2, 120);
+        assert!(s.viewport_x <= col_x);
+    }
+
+    #[test]
+    fn scroll_to_focused_no_columns() {
+        let mut s = ScrollingLayout::new();
+        s.focused_col = 0;
+        s.scroll_to_focused_column(120);
+    }
+
+    #[test]
+    fn focus_column_containing() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.add_column(2);
+        assert!(s.focus_column_containing(2));
+        assert_eq!(s.focused_col, 1);
+        assert!(!s.focus_column_containing(99));
+    }
+
+    #[test]
+    fn window_count() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.columns[0].window_ids.push(2);
+        s.add_column(3);
+        assert_eq!(s.window_count(), 3);
+    }
+
+    #[test]
+    fn get_focused_window_id() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(42);
+        assert_eq!(s.get_focused_window_id(), 42);
+    }
+
+    #[test]
+    fn get_focused_window_id_no_columns() {
+        let s = ScrollingLayout::new();
+        assert_eq!(s.get_focused_window_id(), -1);
+    }
+
+    #[test]
+    fn get_focused_window_id_empty_column() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.columns[0].window_ids.clear();
+        assert_eq!(s.get_focused_window_id(), -1);
+    }
+
+    #[test]
+    fn has_window() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        assert!(s.has_window(1));
+        assert!(!s.has_window(2));
+    }
+
+    #[test]
+    fn remove_window_nonexistent() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.remove_window(99);
+        assert_eq!(s.columns.len(), 1);
+    }
+
+    #[test]
+    fn remove_window_shifts_focus_left() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.add_column(2);
+        s.add_column(3);
+        s.focused_col = 2;
+        s.remove_window(3);
+        assert_eq!(s.focused_col, 1);
+    }
+
+    #[test]
+    fn remove_last_column_resets_focus() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.add_column(2);
+        s.focused_col = 1;
+        s.remove_window(2);
+        assert_eq!(s.focused_col, 0);
+    }
+
+    #[test]
+    fn remove_first_column_focus_stays() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.add_column(2);
+        s.focused_col = 1;
+        s.remove_window(1);
+        assert_eq!(s.focused_col, 0);
+        assert_eq!(s.columns.len(), 1);
+    }
+
+    #[test]
+    fn add_column_inserts_after_focused() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.add_column(2);
+        s.focused_col = 0;
+        s.add_column(3);
+        assert_eq!(s.focused_col, 1);
+        assert_eq!(s.columns[1].window_ids, vec![3]);
+    }
+
+    #[test]
+    fn compute_positions_stacked_windows() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.columns[0].window_ids.push(2);
+        let positions = s.compute_positions(120, 24, 0);
+        assert_eq!(positions.len(), 2);
+        assert_eq!(positions[&1].h, 12);
+        assert_eq!(positions[&2].h, 12);
+        assert_eq!(positions[&1].y, 0);
+        assert_eq!(positions[&2].y, 12);
+    }
+
+    #[test]
+    fn compute_positions_with_top_margin() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        let positions = s.compute_positions(120, 20, 4);
+        assert_eq!(positions[&1].y, 4);
+    }
+
+    #[test]
+    fn compute_positions_empty_column_skipped() {
+        let mut s = ScrollingLayout::new();
+        s.add_column(1);
+        s.columns[0].window_ids.clear();
+        s.add_column(2);
+        let positions = s.compute_positions(120, 24, 0);
+        assert_eq!(positions.len(), 1);
+    }
+
+    #[test]
+    fn compute_positions_empty() {
+        let s = ScrollingLayout::new();
+        assert!(s.compute_positions(120, 24, 0).is_empty());
+    }
+
+    #[test]
+    fn default_values() {
+        let s = ScrollingLayout::new();
+        assert_eq!(s.focused_col, 0);
+        assert_eq!(s.viewport_x, 0);
+        assert!((s.default_width - 0.55).abs() < 0.01);
+        assert_eq!(s.preset_widths.len(), 5);
+        assert_eq!(s.gap, 0);
+    }
 }

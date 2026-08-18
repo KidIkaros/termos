@@ -140,3 +140,21 @@ impl DaemonClient {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_client_connect_to_nonexistent_fails() {
+        let result = DaemonClient::connect_to(Path::new("/tmp/nonexistent-termos-test.sock"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn default_socket_path_contains_termos() {
+        let path = default_socket_path();
+        let s = path.to_string_lossy();
+        assert!(s.contains("termos") || s.contains("tuios"));
+    }
+}

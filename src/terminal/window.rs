@@ -21,6 +21,13 @@ pub struct Window {
     pub exited: bool,
     /// The last size applied, so a same-size resize is a no-op.
     last_size: Option<WinSize>,
+    /// Whether the window is zoomed.
+    pub zoomed: bool,
+    /// Pre-zoom position and size, saved when zooming in.
+    pub pre_zoom_x: i32,
+    pub pre_zoom_y: i32,
+    pub pre_zoom_width: i32,
+    pub pre_zoom_height: i32,
     /// The window's agent state, wire spelling (`none` when not reporting).
     pub agent_state: String,
     /// The free-text note the last agent report carried.
@@ -65,6 +72,11 @@ impl Window {
             agent_message: String::new(),
             agent_harness: String::new(),
             last_size: None,
+            zoomed: false,
+            pre_zoom_x: 0,
+            pre_zoom_y: 0,
+            pre_zoom_width: 0,
+            pre_zoom_height: 0,
         })
     }
 
@@ -96,6 +108,11 @@ impl Window {
             agent_message: String::new(),
             agent_harness: String::new(),
             last_size: None,
+            zoomed: false,
+            pre_zoom_x: 0,
+            pre_zoom_y: 0,
+            pre_zoom_width: 0,
+            pre_zoom_height: 0,
         }
     }
 
@@ -116,6 +133,11 @@ impl Window {
             agent_message: String::new(),
             agent_harness: String::new(),
             last_size: None,
+            zoomed: false,
+            pre_zoom_x: 0,
+            pre_zoom_y: 0,
+            pre_zoom_width: 0,
+            pre_zoom_height: 0,
         }
     }
 
