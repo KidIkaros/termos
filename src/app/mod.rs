@@ -308,6 +308,8 @@ pub struct Os {
     pub mouse_selecting: bool,
     /// The open right-click context menu, if any.
     pub context_menu: Option<ContextMenu>,
+    /// The open rename dialog: (window index, current text).
+    pub rename_dialog: Option<(usize, String)>,
     /// The last yanked text (internal clipboard).
     pub clipboard: String,
     /// Mouse border-drag resize state: (window_id, edge, start_pos).
@@ -428,6 +430,7 @@ pub enum ContextAction {
     SplitHorizontal,
     SplitVertical,
     CloseWindow,
+    Rename,
     Zoom,
     Copy,
     Paste,
@@ -442,6 +445,7 @@ impl ContextAction {
             Self::SplitHorizontal => "Split horizontal",
             Self::SplitVertical => "Split vertical",
             Self::CloseWindow => "Close window",
+            Self::Rename => "Rename window",
             Self::Zoom => "Toggle zoom",
             Self::Copy => "Copy selection",
             Self::Paste => "Paste clipboard",
@@ -467,6 +471,7 @@ impl ContextMenu {
             ContextAction::SplitHorizontal,
             ContextAction::SplitVertical,
             ContextAction::CloseWindow,
+            ContextAction::Rename,
             ContextAction::Zoom,
             ContextAction::Copy,
             ContextAction::Paste,
@@ -540,6 +545,7 @@ impl Os {
             selection: None,
             mouse_selecting: false,
             context_menu: None,
+            rename_dialog: None,
             clipboard: String::new(),
             drag_resize: None,
             last_click: None,
@@ -2674,6 +2680,35 @@ impl Os {
         });
     }
 
+    /// Open the rename dialog for the focused window.
+    pub fn open_rename_dialog(&mut self) {
+        let Some(index) = self.focused_window else {
+            return;
+        };
+        let title = self
+            .windows
+            .get(index)
+            .map(|w| w.title.clone())
+            .unwrap_or_default();
+        self.rename_dialog = Some((index, title));
+    }
+
+    /// Commit the rename dialog text to the window title.
+    pub fn commit_rename_dialog(&mut self) {
+        if let Some((index, text)) = self.rename_dialog.take() {
+            let text = text.trim().to_string();
+            if !text.is_empty() {
+                self.rename_window(index, &text);
+                self.log_action(&format!("rename_window {text}"));
+            }
+        }
+    }
+
+    /// Cancel the rename dialog without applying.
+    pub fn cancel_rename_dialog(&mut self) {
+        self.rename_dialog = None;
+    }
+
     /// Dismiss the context menu (also called by the next click anywhere).
     pub fn dismiss_context_menu(&mut self) {
         self.context_menu = None;
@@ -2696,6 +2731,7 @@ impl Os {
                 let _ = self.split(crate::layout::SplitType::Vertical, &shell, wake);
             }
             ContextAction::CloseWindow => self.close_focused_window(),
+            ContextAction::Rename => self.open_rename_dialog(),
             ContextAction::Zoom => {
                 let _ = self.toggle_zoom_internal();
             }
@@ -4603,5 +4639,97 @@ mod context_menu_tests {
         crate::app::input::handle_key(&mut os, &enter);
         assert!(os.context_menu.is_none());
         assert!(os.windows[0].zoomed);
+    }
+}
+
+#[cfg(test)]
+mod rename_dialog_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crate::terminal::pty::WinSize;
+    use crate::terminal::window::Window;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn os_with_window() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        let win = Window::without_pty(
+            "w0".to_string(),
+            "w0".to_string(),
+            WinSize { cols: 20, rows: 4 },
+        );
+        os.windows.push(win);
+        os.focused_window = Some(0);
+        os
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn open_dialog_prefills_title() {
+        let mut os = os_with_window();
+        os.rename_window(0, "Old");
+        os.open_rename_dialog();
+        let (idx, text) = os.rename_dialog.as_ref().unwrap();
+        assert_eq!(*idx, 0);
+        assert_eq!(text, "Old");
+    }
+
+    #[test]
+    fn typing_and_commit_renames() {
+        let mut os = os_with_window();
+        os.open_rename_dialog();
+        // The dialog prefills the current title; clear it before typing.
+        for _ in 0..os.rename_dialog.as_ref().unwrap().1.len() {
+            crate::app::input::handle_key(&mut os, &key(KeyCode::Backspace));
+        }
+        for c in "NewName".chars() {
+            crate::app::input::handle_key(&mut os, &key(KeyCode::Char(c)));
+        }
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Enter));
+        assert!(os.rename_dialog.is_none());
+        assert_eq!(os.windows[0].title, "NewName");
+    }
+
+    #[test]
+    fn backspace_edits_text() {
+        let mut os = os_with_window();
+        os.open_rename_dialog();
+        // Prefill is "w0"; clear it, type "abc", then backspace once.
+        for _ in 0..os.rename_dialog.as_ref().unwrap().1.len() {
+            crate::app::input::handle_key(&mut os, &key(KeyCode::Backspace));
+        }
+        for c in "abc".chars() {
+            crate::app::input::handle_key(&mut os, &key(KeyCode::Char(c)));
+        }
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Backspace));
+        let (_, text) = os.rename_dialog.as_ref().unwrap();
+        assert_eq!(text, "ab");
+    }
+
+    #[test]
+    fn esc_cancels_without_change() {
+        let mut os = os_with_window();
+        os.open_rename_dialog();
+        for c in "xyz".chars() {
+            crate::app::input::handle_key(&mut os, &key(KeyCode::Char(c)));
+        }
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Esc));
+        assert!(os.rename_dialog.is_none());
+        assert_ne!(os.windows[0].title, "xyz");
+    }
+
+    #[test]
+    fn context_menu_rename_opens_dialog() {
+        let mut os = os_with_window();
+        os.open_context_menu_at(2, 2);
+        // Navigate to Rename (index 4).
+        for _ in 0..4 {
+            crate::app::input::handle_key(&mut os, &key(KeyCode::Char('j')));
+        }
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Enter));
+        assert!(os.rename_dialog.is_some());
+        assert!(os.context_menu.is_none());
     }
 }

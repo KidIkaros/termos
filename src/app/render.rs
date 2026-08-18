@@ -112,7 +112,15 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     render_dock(os, buf, dock_area, &sorted_ids);
 
     // Modal overlays, topmost, in priority order.
-    if let Some(menu) = &os.context_menu {
+    if let Some((_, text)) = &os.rename_dialog {
+        let lines = vec![
+            "Enter a new window title:".to_string(),
+            format!("  {text}_"),
+            String::new(),
+            "Enter apply · Esc cancel".to_string(),
+        ];
+        render_overlay(buf, content_area, &lines, "Rename window");
+    } else if let Some(menu) = &os.context_menu {
         render_context_menu(buf, content_area, menu);
     } else if let Some(pending) = &os.project_tape_pending {
         let mut lines = Vec::new();

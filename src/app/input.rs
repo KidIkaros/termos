@@ -205,6 +205,11 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         return handle_tape_manager(os, key);
     }
 
+    // The rename dialog consumes text input.
+    if os.rename_dialog.is_some() {
+        return handle_rename_dialog_key(os, key);
+    }
+
     // The open context menu consumes navigation/selection keys.
     if os.context_menu.is_some() {
         return handle_context_menu_key(os, key);
@@ -255,6 +260,29 @@ fn handle_context_menu_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         }
         KeyCode::Esc | KeyCode::Char('q') => {
             os.dismiss_context_menu();
+        }
+        _ => {}
+    }
+    KeyResult::Consumed
+}
+
+fn handle_rename_dialog_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Esc => {
+            os.cancel_rename_dialog();
+        }
+        KeyCode::Enter => {
+            os.commit_rename_dialog();
+        }
+        KeyCode::Backspace => {
+            if let Some((_, text)) = os.rename_dialog.as_mut() {
+                text.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some((_, text)) = os.rename_dialog.as_mut() {
+                text.push(c);
+            }
         }
         _ => {}
     }
