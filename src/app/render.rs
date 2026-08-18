@@ -216,6 +216,11 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         render_overlay(buf, content_area, &lines, "which-key");
     }
 
+    // Tooltip (hovered pane title bar) above everything.
+    if let Some((text, x, y)) = &os.tooltip {
+        render_tooltip(buf, content_area, text, *x, *y);
+    }
+
     // Showkeys: always show the last pressed chord at the bottom.
     if !os.last_key_chord.is_empty()
         && !os.help_open
@@ -833,6 +838,26 @@ fn render_context_menu(buf: &mut Buffer, area: TuiRect, menu: &ContextMenu) {
             // A marker at the left edge.
             buf[(x + 1, row_y)].set_char('›');
         }
+    }
+}
+
+/// Render a small tooltip box at a position, clamped to the screen.
+fn render_tooltip(buf: &mut Buffer, area: TuiRect, text: &str, x: i32, y: i32) {
+    let width = (text.chars().count() as u16 + 4).min(area.width.saturating_sub(2));
+    let x = (x as u16).clamp(0, area.width.saturating_sub(width + 2));
+    let y = (y as u16).min(area.height.saturating_sub(3));
+    for cy in y..y + 3 {
+        for cx in x..x + width + 2 {
+            let cell = &mut buf[(cx, cy)];
+            cell.set_bg(TuiColor::DarkGray);
+            cell.set_fg(TuiColor::White);
+        }
+    }
+    let mut chars = text.chars();
+    for j in 0..width {
+        let ch = chars.next().unwrap_or(' ');
+        let cell = &mut buf[(x + 1 + j, y + 1)];
+        cell.set_char(ch);
     }
 }
 

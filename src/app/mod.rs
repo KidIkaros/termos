@@ -285,6 +285,10 @@ pub struct Os {
     /// The open session-close confirmation: (session name, selected row).
     /// Cancel (0) is the default; Close (1) is the destructive row.
     pub session_close: Option<(String, usize)>,
+    /// The visible tooltip: (text, x, y).
+    pub tooltip: Option<(String, i32, i32)>,
+    /// A hover awaiting the delay window: (text, position, since).
+    pub tooltip_pending: Option<(String, (i32, i32), std::time::Instant)>,
     /// Command palette state.
     pub palette_open: bool,
     pub palette_query: String,
@@ -576,6 +580,8 @@ impl Os {
             quit_menu: None,
             quit_after_kill: false,
             session_close: None,
+            tooltip: None,
+            tooltip_pending: None,
             palette_open: false,
             palette_query: String::new(),
             palette_selected: 0,
@@ -1064,6 +1070,62 @@ impl Os {
         ) {
             self.animations.insert(window_id, anim);
         }
+    }
+
+    /// Resolve the hover target for a mouse position: the title bar of the
+    /// window under the cursor (title + agent state), else None.
+    pub fn hover_target_at(&self, x: i32, y: i32) -> Option<String> {
+        let idx = self.window_at(x, y)?;
+        let layout = self.current_layout();
+        let rect = layout.get(&(idx as i32))?;
+        if y != rect.y || x >= rect.x + rect.w {
+            return None;
+        }
+        let window = self.windows.get(idx)?;
+        let mut text = window.title.clone();
+        if !window.agent_state.is_empty() && window.agent_state != "none" {
+            text.push_str(&format!(" — {}", window.agent_state));
+            if !window.agent_message.is_empty() {
+                text.push_str(&format!(": {}", window.agent_message));
+            }
+        }
+        Some(text)
+    }
+
+    /// Record a hover for the tooltip delay window. Called from mouse motion.
+    pub fn arm_tooltip(&mut self, x: i32, y: i32) {
+        if let Some(text) = self.hover_target_at(x, y) {
+            let changed = self
+                .tooltip_pending
+                .as_ref()
+                .map(|(t, pos, _)| *t != text || *pos != (x, y))
+                .unwrap_or(true);
+            if changed {
+                self.tooltip_pending = Some((text, (x, y), std::time::Instant::now()));
+            }
+        } else {
+            self.tooltip_pending = None;
+            self.tooltip = None;
+        }
+    }
+
+    /// Promote an armed hover to a visible tooltip once the delay elapses.
+    /// Called from the maintenance tick.
+    pub fn tick_tooltip(&mut self) {
+        const DELAY: std::time::Duration = std::time::Duration::from_millis(350);
+        if let Some((text, pos, since)) = self.tooltip_pending.take() {
+            if since.elapsed() >= DELAY {
+                self.tooltip = Some((text, pos.0 + 1, pos.1 + 1));
+            } else {
+                self.tooltip_pending = Some((text, pos, since));
+            }
+        }
+    }
+
+    /// Clear any tooltip state (mouse left the surface).
+    pub fn clear_tooltip(&mut self) {
+        self.tooltip = None;
+        self.tooltip_pending = None;
     }
 
     /// Advance every active animation; finished ones are removed. Called from
@@ -5414,5 +5476,81 @@ mod settings_tests {
         }
         crate::app::input::handle_key(&mut os, &key(KeyCode::Enter));
         assert!(os.settings_open);
+    }
+}
+
+#[cfg(test)]
+mod tooltip_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crate::terminal::pty::WinSize;
+    use crate::terminal::window::Window;
+
+    fn os_with_window() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.width = 80;
+        os.height = 25;
+        let mut win = Window::without_pty(
+            "w0".to_string(),
+            "Long title".to_string(),
+            WinSize { cols: 40, rows: 12 },
+        );
+        win.agent_state = "working".to_string();
+        win.agent_message = "building".to_string();
+        os.windows.push(win);
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os
+    }
+
+    #[test]
+    fn title_bar_hover_target_includes_agent() {
+        let os = os_with_window();
+        // The window's rect: title bar is the top row.
+        let target = os.hover_target_at(10, 0).unwrap();
+        assert!(target.contains("Long title"));
+        assert!(target.contains("working"));
+        assert!(target.contains("building"));
+    }
+
+    #[test]
+    fn inside_pane_is_not_a_hover_target() {
+        let os = os_with_window();
+        assert!(os.hover_target_at(10, 5).is_none());
+    }
+
+    #[test]
+    fn arm_tooltip_then_tick_shows_after_delay() {
+        let mut os = os_with_window();
+        os.arm_tooltip(10, 0);
+        assert!(os.tooltip_pending.is_some());
+        assert!(os.tooltip.is_none());
+        // Force the delay to have elapsed.
+        if let Some((_, _, since)) = os.tooltip_pending.as_mut() {
+            *since = std::time::Instant::now() - std::time::Duration::from_millis(500);
+        }
+        os.tick_tooltip();
+        assert!(os.tooltip.is_some());
+        assert!(os.tooltip_pending.is_none());
+    }
+
+    #[test]
+    fn arm_tooltip_before_delay_stays_pending() {
+        let mut os = os_with_window();
+        os.arm_tooltip(10, 0);
+        os.tick_tooltip();
+        assert!(os.tooltip.is_none());
+        assert!(os.tooltip_pending.is_some());
+    }
+
+    #[test]
+    fn leaving_surface_clears() {
+        let mut os = os_with_window();
+        os.arm_tooltip(10, 0);
+        os.clear_tooltip();
+        assert!(os.tooltip.is_none());
+        assert!(os.tooltip_pending.is_none());
     }
 }

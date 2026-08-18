@@ -1383,6 +1383,12 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             }
             true
         }
+        MouseEventKind::Moved => {
+            // Hovering a pane title bar arms the tooltip delay.
+            os.arm_tooltip(column, row);
+            os.update_pointer_shape(column, row);
+            true
+        }
         MouseEventKind::Drag(MouseButton::Left) => {
             // Handle border-drag resize.
             if os.drag_resize.is_some() {
