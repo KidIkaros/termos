@@ -12,6 +12,7 @@
 
 pub mod capability;
 pub mod kitty;
+pub mod kitty_parser;
 pub mod placement;
 pub mod sixel;
 

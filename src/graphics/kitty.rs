@@ -106,23 +106,16 @@ impl KittyPassthrough {
     }
 
     /// Record a placement in the store if the APC carries `i=` and is a
-    /// transmit/place action (`a=T`, `a=t`, `a=p`, `a=u`).
+    /// transmit/place action. Uses the typed kitty command parser.
     fn record_placement_if_any(&self, window_id: u32, pane_x: u32, pane_y: u32, apc: &str) {
-        let (params, _) = match apc.find(';') {
-            Some(idx) => (&apc[..idx], &apc[idx + 1..]),
-            None => (apc, ""),
-        };
-        let mut guest_id = None;
-        let mut is_place = false;
-        for p in params.split(',') {
-            if let Some(rest) = p.strip_prefix("i=") {
-                guest_id = rest.parse::<u32>().ok();
-            }
-            if let Some(rest) = p.strip_prefix("a=") {
-                is_place = matches!(rest, "T" | "t" | "p" | "u");
-            }
-        }
-        if let Some(gid) = guest_id {
+        let cmd = super::kitty_parser::KittyCommand::parse(apc);
+        let gid = cmd.image_id;
+        let is_place = matches!(
+            cmd.action,
+            super::kitty_parser::KittyAction::TransmitPlace
+                | super::kitty_parser::KittyAction::TransmitAndDisplay
+        );
+        if gid != 0 {
             let mut store = self.placements.lock().unwrap();
             let host_id = store.map_id(window_id, gid);
             if is_place {
