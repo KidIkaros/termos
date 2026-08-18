@@ -870,7 +870,14 @@ impl Handler for Emulator {
 
         // Private (DEC) sequences.
         if seq.private {
-            self.private_csi(final_byte, seq.private_marker, &params, p, p_or1);
+            self.private_csi(
+                final_byte,
+                seq.private_marker,
+                &seq.intermediates,
+                &params,
+                p,
+                p_or1,
+            );
             return;
         }
 
@@ -878,12 +885,18 @@ impl Handler for Emulator {
         if let Some(&inter) = seq.intermediates.first() {
             if inter == b' ' && final_byte == b'q' {
                 // DECSCUSR — set cursor style.
-                // 0=default, 1=blinking block, 2=steady block,
-                // 3=blinking underline, 4=steady underline,
-                // 5=blinking bar, 6=steady bar.
                 let _n = p(0, 1);
-                // Cursor style is rendered by the app layer; we accept
-                // the sequence without error.
+                return;
+            }
+            if inter == b'$' && final_byte == b'p' {
+                // DECRQM — Request Mode (ANSI).
+                // Response: CSI n ; s $ y  where s is 1=set, 2=reset.
+                let mode = p(0, 0);
+                if mode != 0 {
+                    let setting = if self.is_mode_set(mode as i64) { 1 } else { 2 };
+                    let seq = format!("\x1b[{mode};{setting}$y");
+                    self.queue_response(seq.as_bytes());
+                }
                 return;
             }
             // Other intermediate sequences are not handled.
@@ -969,6 +982,18 @@ impl Handler for Emulator {
             b'T' => self.screen_mut().scroll_down(p_or1(0)),
             // SGR.
             b'm' => self.apply_sgr(&params),
+            // ANSI mode set.
+            b'h' => {
+                for &mode in &params {
+                    self.set_mode(mode, true);
+                }
+            }
+            // ANSI mode reset.
+            b'l' => {
+                for &mode in &params {
+                    self.set_mode(mode, false);
+                }
+            }
             // Cursor save.
             b's' => self.screen_mut().save_cursor(),
             // Cursor restore.
@@ -1283,6 +1308,7 @@ impl Emulator {
         &mut self,
         final_byte: u8,
         private_marker: u8,
+        intermediates: &[u8],
         params: &[i64],
         p: F1,
         _p_or1: F2,
@@ -1290,6 +1316,16 @@ impl Emulator {
         F1: Fn(usize, i32) -> i32,
         F2: Fn(usize) -> i32,
     {
+        // DECRQM with `$` intermediate (CSI ? n $ p).
+        if intermediates.contains(&b'$') && final_byte == b'p' && private_marker == b'?' {
+            let mode = p(0, 0);
+            if mode != 0 {
+                let setting = if self.is_mode_set(mode as i64) { 1 } else { 2 };
+                let seq = format!("\x1b[?{mode};{setting}$y");
+                self.queue_response(seq.as_bytes());
+            }
+            return;
+        }
         match (private_marker, final_byte) {
             // DA2 — Secondary Device Attributes (CSI > c).
             (b'>', b'c') => {
@@ -1308,8 +1344,6 @@ impl Emulator {
                     self.set_mode(mode, false);
                 }
             }
-            // DEC private mode query.
-            (b'?', b'$') | (b'?', b'p') => {}
             // DECXCPR — extended cursor position report (CSI ? 6 n).
             (b'?', b'n') => {
                 if p(0, 0) == 6 {
@@ -1737,5 +1771,151 @@ mod esc_osc_completion_tests {
         e.write(b"\x1b[1;3H");
         e.write(b"\x1b[5Z");
         assert_eq!(e.cursor_position().x, 0);
+    }
+
+    #[test]
+    fn decrqm_ansi_reports_mode() {
+        let mut e = Emulator::new(80, 24);
+        // Auto-wrap (mode 7) is set by default.
+        e.write(b"\x1b[7$p");
+        let resp = e.take_response();
+        let s = String::from_utf8_lossy(&resp);
+        assert!(s.contains("\x1b[7;1$y"), "DECRQM ANSI got: {s}");
+    }
+
+    #[test]
+    fn decrqm_ansi_reports_reset() {
+        let mut e = Emulator::new(80, 24);
+        // Turn off auto-wrap, then query.
+        e.write(b"\x1b[7l");
+        e.write(b"\x1b[7$p");
+        let resp = e.take_response();
+        let s = String::from_utf8_lossy(&resp);
+        assert!(s.contains("\x1b[7;2$y"), "DECRQM ANSI reset got: {s}");
+    }
+
+    #[test]
+    fn decrqm_dec_reports_mode() {
+        let mut e = Emulator::new(80, 24);
+        // Enable cursor visibility (mode ?25), then query.
+        e.write(b"\x1b[?25h");
+        e.write(b"\x1b[?25$p");
+        let resp = e.take_response();
+        let s = String::from_utf8_lossy(&resp);
+        assert!(s.contains("\x1b[?25;1$y"), "DECRQM DEC got: {s}");
+    }
+
+    #[test]
+    fn ansi_mode_set_reset() {
+        let mut e = Emulator::new(80, 24);
+        assert!(e.is_mode_set(MODE_AUTO_WRAP));
+        e.write(b"\x1b[7l");
+        assert!(!e.is_mode_set(MODE_AUTO_WRAP));
+        e.write(b"\x1b[7h");
+        assert!(e.is_mode_set(MODE_AUTO_WRAP));
+    }
+}
+
+#[cfg(test)]
+mod malformed_sequence_tests {
+    use super::*;
+
+    #[test]
+    fn bare_esc_does_not_crash() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b");
+        e.write(b"abc");
+        let line = e.screen().line_text(0);
+        // ESC followed by 'a' is not a valid ESC sequence; 'a' is consumed
+        // as the final byte (no-op). Then "bc" prints.
+        assert!(line.contains("bc"), "line: {line}");
+    }
+
+    #[test]
+    fn incomplete_csi_does_not_crash() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[");
+        e.write(b"abc");
+        let line = e.screen().line_text(0);
+        // CSI followed by 'a' (0x61) is a final byte (HPR); params empty.
+        // Then "bc" prints.
+        assert!(line.contains("bc"), "line: {line}");
+    }
+
+    #[test]
+    fn incomplete_csi_with_params_does_not_crash() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[5;");
+        e.write(b"abc");
+        let line = e.screen().line_text(0);
+        // CSI 5 ; a — 'a' is final (HPR with param 5, then param empty).
+        // Then "bc" prints.
+        assert!(line.contains("bc"), "line: {line}");
+    }
+
+    #[test]
+    fn incomplete_osc_does_not_crash() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b]9;Hello");
+        e.write(b" world\x07");
+        let (_title, body) = e.take_pending_notification().unwrap();
+        assert_eq!(body, "Hello world");
+    }
+
+    #[test]
+    fn esc_cancel_cancels_csi() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[5;10");
+        // ESC cancels the pending CSI.
+        e.write(b"\x1b[1;1H");
+        assert_eq!(e.cursor_position().x, 0);
+        assert_eq!(e.cursor_position().y, 0);
+    }
+
+    #[test]
+    fn csi_with_garbage_params_ignored() {
+        let mut e = Emulator::new(80, 24);
+        // Non-numeric param bytes should not crash.
+        e.write(b"\x1b[:::H");
+        // Cursor should be at home (1;1 default).
+        assert_eq!(e.cursor_position().x, 0);
+        assert_eq!(e.cursor_position().y, 0);
+    }
+
+    #[test]
+    fn partial_utf8_does_not_crash() {
+        let mut e = Emulator::new(80, 24);
+        // First byte of a 3-byte UTF-8 sequence.
+        e.write(b"\xe4\xb8");
+        e.write(b"\x96");
+        let line = e.screen().line_text(0);
+        assert!(line.contains("世"), "line: {line}");
+    }
+
+    #[test]
+    fn csi_split_across_writes() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[5");
+        e.write(b";10H");
+        assert_eq!(e.cursor_position().x, 9);
+        assert_eq!(e.cursor_position().y, 4);
+    }
+
+    #[test]
+    fn empty_csi_params_use_defaults() {
+        let mut e = Emulator::new(80, 24);
+        // CSI H with no params should go to 1;1.
+        e.write(b"\x1b[5;10H");
+        e.write(b"\x1b[H");
+        assert_eq!(e.cursor_position().x, 0);
+        assert_eq!(e.cursor_position().y, 0);
+    }
+
+    #[test]
+    fn csi_semicolon_only_uses_defaults() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[;H");
+        assert_eq!(e.cursor_position().x, 0);
+        assert_eq!(e.cursor_position().y, 0);
     }
 }

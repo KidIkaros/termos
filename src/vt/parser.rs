@@ -432,6 +432,13 @@ impl Parser {
                 State::CsiParam
             }
             0x40..=0x7e => {
+                // Push the last accumulated param before dispatching.
+                if self.param_has_value || self.current_param != 0 {
+                    self.params.push(Param {
+                        value: self.current_param,
+                        has_value: self.param_has_value,
+                    });
+                }
                 handler.csi(&CsiSequence {
                     params: self.params.clone(),
                     intermediates: self.intermediates.clone(),
