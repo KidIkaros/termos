@@ -212,6 +212,7 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         Prefix::Window => return handle_window_prefix(os, key),
         Prefix::Minimize => return handle_minimize_prefix(os, key),
         Prefix::Tape => return handle_tape_prefix(os, key),
+        Prefix::Debug => return handle_debug_prefix(os, key),
         Prefix::None => {}
     }
 
@@ -411,6 +412,11 @@ fn handle_leader_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         }
         KeyCode::Char('T') => {
             os.prefix = Prefix::Tape;
+            KeyResult::Consumed
+        }
+        // Debug prefix.
+        KeyCode::Char('D') => {
+            os.prefix = Prefix::Debug;
             KeyResult::Consumed
         }
         // Split horizontal / vertical.
@@ -620,6 +626,48 @@ fn handle_tape_prefix(os: &mut Os, key: &KeyEvent) -> KeyResult {
         _ => {
             os.prefix = Prefix::None;
             KeyResult::Ignored
+        }
+    }
+}
+
+fn handle_debug_prefix(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        // `l` — toggle the log viewer.
+        KeyCode::Char('l') => {
+            os.log_viewer_open = !os.log_viewer_open;
+            os.debug_overlay_open = false;
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // `c` — toggle the stats overlay.
+        KeyCode::Char('c') => {
+            os.debug_overlay_open = !os.debug_overlay_open;
+            os.log_viewer_open = false;
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // `a` — toggle animations.
+        KeyCode::Char('a') => {
+            os.config.appearance.animations_enabled = !os.config.appearance.animations_enabled;
+            os.notify(
+                if os.config.appearance.animations_enabled {
+                    "animations enabled"
+                } else {
+                    "animations disabled"
+                },
+                "info",
+            );
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // `q` / Esc — cancel.
+        KeyCode::Char('q') | KeyCode::Esc => {
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        _ => {
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
         }
     }
 }
@@ -2507,5 +2555,85 @@ mod tests {
         });
         let result = handle_key(&mut os, &key(KeyCode::Esc));
         assert_eq!(result, KeyResult::Consumed);
+    }
+}
+
+#[cfg(test)]
+mod debug_prefix_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+
+    fn test_os() -> Os {
+        Os::new(UserConfig::default_config())
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn leader_d_enters_debug_prefix() {
+        let mut os = test_os();
+        // Leader, then D.
+        os.prefix = Prefix::Leader;
+        let r = handle_key(&mut os, &key(KeyCode::Char('D')));
+        assert_eq!(r, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::Debug);
+    }
+
+    #[test]
+    fn debug_c_toggles_stats_overlay() {
+        let mut os = test_os();
+        os.prefix = Prefix::Debug;
+        handle_key(&mut os, &key(KeyCode::Char('c')));
+        assert!(os.debug_overlay_open);
+        assert_eq!(os.prefix, Prefix::None);
+        // Toggle off again via the prefix.
+        os.prefix = Prefix::Debug;
+        handle_key(&mut os, &key(KeyCode::Char('c')));
+        assert!(!os.debug_overlay_open);
+    }
+
+    #[test]
+    fn debug_l_toggles_log_viewer() {
+        let mut os = test_os();
+        os.notify("hello", "info");
+        os.prefix = Prefix::Debug;
+        handle_key(&mut os, &key(KeyCode::Char('l')));
+        assert!(os.log_viewer_open);
+        assert!(!os.debug_overlay_open);
+        // The event log ring captured the notification.
+        assert!(os.event_log.iter().any(|e| e.contains("hello")));
+    }
+
+    #[test]
+    fn debug_a_toggles_animations() {
+        let mut os = test_os();
+        os.config.appearance.animations_enabled = false;
+        os.prefix = Prefix::Debug;
+        handle_key(&mut os, &key(KeyCode::Char('a')));
+        assert!(os.config.appearance.animations_enabled);
+        os.prefix = Prefix::Debug;
+        handle_key(&mut os, &key(KeyCode::Char('a')));
+        assert!(!os.config.appearance.animations_enabled);
+    }
+
+    #[test]
+    fn debug_q_cancels() {
+        let mut os = test_os();
+        os.prefix = Prefix::Debug;
+        handle_key(&mut os, &key(KeyCode::Char('q')));
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn event_log_is_bounded() {
+        let mut os = test_os();
+        for i in 0..250 {
+            os.notify(format!("msg {i}"), "info");
+        }
+        assert!(os.event_log.len() <= 200);
+        // The oldest entry was dropped.
+        assert!(!os.event_log.iter().any(|e| e.contains("msg 0")));
     }
 }

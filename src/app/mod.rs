@@ -52,6 +52,8 @@ pub enum Prefix {
     Minimize,
     /// Leader, then `T` — tape prefix (record/manager).
     Tape,
+    /// Leader, then `D` — debug prefix (logs, stats, animations, showkeys).
+    Debug,
 }
 
 /// A command the command palette can run. Ported from the TUIOS command list,
@@ -312,6 +314,13 @@ pub struct Os {
     pub last_click: Option<(std::time::Instant, (u16, u16), u8)>,
     /// Whether the help modal overlay is open.
     pub help_open: bool,
+    /// Whether the debug stats overlay is open (leader D, then `c`).
+    pub debug_overlay_open: bool,
+    /// Whether the debug log viewer is open (leader D, then `l`).
+    pub log_viewer_open: bool,
+    /// A ring of recent app events (actions + notifications) for the log
+    /// viewer.
+    pub event_log: Vec<String>,
     /// The last key chord pressed, for the showkeys overlay.
     pub last_key_chord: String,
     /// Whether the theme picker overlay is open.
@@ -479,6 +488,9 @@ impl Os {
             last_click: None,
             help_open: false,
             last_key_chord: String::new(),
+            debug_overlay_open: false,
+            log_viewer_open: false,
+            event_log: Vec::new(),
             theme_picker_open: false,
             theme_picker_selected: 0,
             theme_list: Vec::new(),
@@ -2095,12 +2107,27 @@ impl Os {
     }
 
     pub fn notify(&mut self, message: impl Into<String>, kind: impl Into<String>) {
-        self.notifications.push(Notification {
-            message: message.into(),
-            kind: kind.into(),
-        });
+        let message = message.into();
+        let kind = kind.into();
+        // Every notification also lands in the debug log viewer's ring.
+        self.event_log.push(format!("[{kind}] {message}"));
+        if self.event_log.len() > 200 {
+            let overflow = self.event_log.len() - 200;
+            self.event_log.drain(..overflow);
+        }
+        self.notifications.push(Notification { message, kind });
         if self.notifications.len() > 5 {
             self.notifications.remove(0);
+        }
+    }
+
+    /// Append an action to the debug log viewer's ring (actions already
+    /// recorded for tape are logged here too).
+    pub fn log_action(&mut self, action: &str) {
+        self.event_log.push(format!("[action] {action}"));
+        if self.event_log.len() > 200 {
+            let overflow = self.event_log.len() - 200;
+            self.event_log.drain(..overflow);
         }
     }
 

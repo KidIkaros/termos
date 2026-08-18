@@ -132,6 +132,12 @@ pub fn render(os: &Os, buf: &mut Buffer) {
             &["Quit TermOS?  (y/n)".to_string()],
             "Quit",
         );
+    } else if os.debug_overlay_open {
+        let lines = debug_stats_lines(os);
+        render_overlay(buf, content_area, &lines, "Debug stats");
+    } else if os.log_viewer_open {
+        let lines: Vec<String> = os.event_log.iter().rev().take(20).cloned().collect();
+        render_overlay(buf, content_area, &lines, "Event log");
     } else if os.theme_picker_open {
         let lines: Vec<String> = os
             .theme_list
@@ -705,6 +711,40 @@ pub fn build_which_key_lines(os: &Os) -> Vec<String> {
 /// Render a centered overlay (quit confirmation, help) over the content.
 /// The rect is clamped to the area so a long help list cannot overflow the
 /// screen (and indexing beyond the buffer panics).
+/// Build the debug-stats overlay lines (leader D, then `c`).
+fn debug_stats_lines(os: &Os) -> Vec<String> {
+    let frames = os.tick_stats.frame_count();
+    let avg = os.tick_stats.avg_render_time();
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "frames rendered: {frames}   avg render: {:.2}ms",
+        avg.as_secs_f64() * 1000.0
+    ));
+    lines.push(format!(
+        "windows: {}   focused: {}   workspace: {}",
+        os.windows.len(),
+        os.focused_window
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "-".into()),
+        os.current_workspace,
+    ));
+    lines.push(format!("mode: {:?}   prefix: {:?}", os.mode, os.prefix));
+    lines.push(format!(
+        "scrollback: {}   copy-mode: {}",
+        if os.scrollback_mode { "active" } else { "off" },
+        if os.copy_visual { "visual" } else { "-" },
+    ));
+    if let Some(seq) = os.tick_stats.since_last_frame() {
+        lines.push(format!(
+            "since last frame: {:.1}ms",
+            seq.as_secs_f64() * 1000.0
+        ));
+    }
+    lines.push(String::new());
+    lines.push("l log viewer · c stats · a animations · q close".into());
+    lines
+}
+
 pub fn render_overlay(buf: &mut Buffer, area: TuiRect, lines: &[String], title: &str) {
     let width =
         (lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4).min(area.width);
