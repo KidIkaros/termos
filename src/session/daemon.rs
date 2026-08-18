@@ -857,6 +857,49 @@ impl Daemon {
     }
 
     /// Restore all saved sessions at startup (called by the CLI before run).
+    /// Restore a single saved session by name (`Resurrect` message).
+    pub fn restore_saved_named(&self, name: &str) -> Result<(), String> {
+        let states = persistence::list_saved();
+        let state = states
+            .iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| format!("no saved state for session '{name}'"))?;
+        self.restore_session(&state.name, state)
+    }
+
+    /// The canonical [`SessionState`](crate::session::state_merge::SessionState)
+    /// for a session: its windows with daemon-owned agent state, built from
+    /// the live registry.
+    pub fn state_for_session(&self, name: &str) -> crate::session::state_merge::SessionState {
+        use crate::session::state_merge::WindowState as MergeWindow;
+        let windows = self.windows.lock().unwrap();
+        let wins: Vec<WindowInfo> = windows
+            .get(name)
+            .map(|wins| wins.iter().map(|w| w.info.clone()).collect())
+            .unwrap_or_default();
+        crate::session::state_merge::SessionState {
+            name: name.to_string(),
+            display_name: String::new(),
+            accent: String::new(),
+            restored: false,
+            resurrection_version: 0,
+            windows: wins
+                .iter()
+                .map(|w| MergeWindow {
+                    id: w.id.clone(),
+                    title: w.title.clone(),
+                    workspace: w.workspace,
+                    agent_state: w.agent_state.clone(),
+                    agent_message: w.agent_message.clone(),
+                    agent_harness: w.agent_harness.clone(),
+                    minimized: false,
+                    cwd: String::new(),
+                    foreground: String::new(),
+                })
+                .collect(),
+        }
+    }
+
     pub fn restore_saved(&self) {
         for state in persistence::list_saved() {
             if let Err(e) = self.restore_session(&state.name, &state) {
@@ -873,6 +916,11 @@ impl Daemon {
     /// Run the daemon forever on a given socket path: bind the socket and
     /// accept clients. Returns only on a bind failure.
     pub fn run(self: Arc<Self>, path: &std::path::Path) -> io::Result<()> {
+        // The start lock makes the stale-socket recovery below safe: holding
+        // it proves no other daemon is mid-bind, so unlinking the socket
+        // cannot cut a live daemon's inode out from under it.
+        let _lock = super::startlock::StartLock::acquire(path)
+            .map_err(|e| io::Error::new(io::ErrorKind::AlreadyExists, e.to_string()))?;
         if path.exists() {
             let _ = std::fs::remove_file(path);
         }
@@ -1341,6 +1389,29 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                     }
                 }
             }
+            Message::Ping => {
+                let _ = send(&writer, &Message::Pong);
+            }
+            Message::Pong => {}
+            Message::Resurrect { name } => match daemon.restore_saved_named(&name) {
+                Ok(()) => {
+                    let _ = send(
+                        &writer,
+                        &Message::ListResult {
+                            sessions: daemon.list_infos(),
+                        },
+                    );
+                }
+                Err(e) => {
+                    let _ = send(&writer, &Message::Error { message: e });
+                }
+            },
+            Message::ClientJoined { .. } | Message::ClientLeft { .. } => {}
+            Message::GetState { session } => {
+                let state = daemon.state_for_session(&session);
+                let _ = send(&writer, &Message::StateResult { state });
+            }
+            Message::StateResult { .. } => {}
             _ => {}
         }
     }
@@ -1810,5 +1881,83 @@ mod verb_tests {
         assert!(line.ends_with('\n'));
         let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(parsed["result"]["protocol"], "verb");
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn state_for_unknown_session_is_empty() {
+        let d = Daemon::new();
+        let state = d.state_for_session("nope");
+        assert_eq!(state.name, "nope");
+        assert!(state.windows.is_empty());
+    }
+
+    #[test]
+    fn restore_saved_named_missing_is_error() {
+        let d = Daemon::new();
+        assert!(d.restore_saved_named("does-not-exist").is_err());
+    }
+
+    #[test]
+    fn ping_pong_round_trip_serializes() {
+        // The protocol messages round-trip through the JSON frame codec.
+        let msg = Message::Ping;
+        let mut buf = Vec::new();
+        protocol::write_message(&mut buf, &msg).unwrap();
+        let mut cursor = std::io::Cursor::new(buf);
+        let back = protocol::read_message(&mut cursor).unwrap();
+        assert!(matches!(back, Message::Ping));
+
+        let msg = Message::ClientJoined {
+            session: "s1".into(),
+            name: "cli".into(),
+        };
+        let mut buf = Vec::new();
+        protocol::write_message(&mut buf, &msg).unwrap();
+        let mut cursor = std::io::Cursor::new(buf);
+        let back = protocol::read_message(&mut cursor).unwrap();
+        match back {
+            Message::ClientJoined { session, name } => {
+                assert_eq!(session, "s1");
+                assert_eq!(name, "cli");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn state_result_round_trips_with_agent_state() {
+        use crate::session::state_merge::{SessionState, WindowState};
+        let state = SessionState {
+            name: "work".into(),
+            windows: vec![WindowState {
+                id: "w1".into(),
+                title: "t".into(),
+                workspace: 1,
+                agent_state: "working".into(),
+                agent_message: "m".into(),
+                agent_harness: "h".into(),
+                minimized: false,
+                cwd: "/tmp".into(),
+                foreground: "claude".into(),
+            }],
+            ..Default::default()
+        };
+        let msg = Message::StateResult { state };
+        let mut buf = Vec::new();
+        protocol::write_message(&mut buf, &msg).unwrap();
+        let mut cursor = std::io::Cursor::new(buf);
+        let back = protocol::read_message(&mut cursor).unwrap();
+        match back {
+            Message::StateResult { state } => {
+                assert_eq!(state.windows[0].agent_state, "working");
+                assert_eq!(state.windows[0].cwd, "/tmp");
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }

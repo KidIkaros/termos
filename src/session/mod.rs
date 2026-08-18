@@ -5,6 +5,7 @@
 pub mod agent_state;
 pub mod client;
 pub mod daemon;
+pub mod eventhub;
 pub mod events;
 pub mod manager;
 pub mod model;
@@ -13,6 +14,8 @@ pub mod persistence;
 pub mod protocol;
 pub mod remote;
 pub mod resurrection;
+pub mod startlock;
+pub mod state_merge;
 pub mod tree;
 pub mod verb;
 

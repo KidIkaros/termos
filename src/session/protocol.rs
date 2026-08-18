@@ -125,6 +125,22 @@ pub enum Message {
     TapeFinished { total: usize },
     /// Daemon → client: an error reply.
     Error { message: String },
+    /// Client → daemon / daemon → client: keep-alive probe.
+    Ping,
+    /// Daemon → client: keep-alive reply.
+    Pong,
+    /// Client → daemon: resurrect a saved session by name.
+    Resurrect { name: String },
+    /// Daemon → client: a client attached to a session (broadcast).
+    ClientJoined { session: String, name: String },
+    /// Daemon → client: a client detached from a session (broadcast).
+    ClientLeft { session: String, name: String },
+    /// Client → daemon: request the canonical session state.
+    GetState { session: String },
+    /// Daemon → client: the canonical session state (windows + agent state).
+    StateResult {
+        state: crate::session::state_merge::SessionState,
+    },
 }
 
 /// Write a length-prefixed (u32 BE) JSON frame.
