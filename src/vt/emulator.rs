@@ -43,6 +43,8 @@ pub struct Emulator {
     charsets: [CharSet; 4],
     gl: usize,
     gr: usize,
+    /// Single-shift select: 0 = none, 2 = SS2, 3 = SS3.
+    gsingle: u8,
     /// Whether a pending wrap is armed (the cursor sits past the last column).
     at_phantom: bool,
     /// The title reported via OSC 0/2.
@@ -95,6 +97,7 @@ impl Emulator {
             charsets: [CharSet::Ascii; 4],
             gl: 0,
             gr: 1,
+            gsingle: 0,
             at_phantom: false,
             title: String::new(),
             cwd: String::new(),
@@ -736,6 +739,30 @@ impl Handler for Emulator {
                 // SI — shift in to G0.
                 self.gl = 0;
             }
+            // C1 controls (0x80–0x9F).
+            0x84 => {
+                // IND — index (line feed).
+                self.screen_mut().line_feed();
+            }
+            0x88 => {
+                // HTS — horizontal tab set (no-op with fixed 8-column tabs).
+            }
+            0x8d => {
+                // RI — reverse index.
+                if self.screen().cursor.pos.y == self.screen().scroll.top {
+                    self.screen_mut().scroll_down(1);
+                } else {
+                    self.screen_mut().cursor.pos.y -= 1;
+                }
+            }
+            0x8e => {
+                // SS2 — single shift 2.
+                self.gsingle = 2;
+            }
+            0x8f => {
+                // SS3 — single shift 3.
+                self.gsingle = 3;
+            }
             _ => {}
         }
     }
@@ -778,6 +805,7 @@ impl Handler for Emulator {
                 self.charsets = [CharSet::Ascii; 4];
                 self.gl = 0;
                 self.gr = 1;
+                self.gsingle = 0;
                 self.screen_mut().clear();
                 self.screen_mut().set_cursor(0, 0, false);
                 self.screen_mut().scroll = ScrollRegion::full(self.width(), self.height());
@@ -1481,5 +1509,50 @@ mod esc_osc_completion_tests {
         e.write(b"\x1b]9;4;1;50\x07");
         assert!(e.take_pending_progress().is_some());
         assert!(e.take_pending_notification().is_none());
+    }
+
+    #[test]
+    fn c1_ind_line_feed() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[5;10H");
+        e.write(b"\x84");
+        assert_eq!(e.cursor_position().y, 5);
+    }
+
+    #[test]
+    fn c1_ri_reverse_index() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[5;10H");
+        e.write(b"\x8d");
+        assert_eq!(e.cursor_position().y, 3);
+    }
+
+    #[test]
+    fn c1_ri_at_top_scrolls() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x1b[1;10H");
+        e.write(b"X");
+        e.write(b"\x1b[1;1H");
+        e.write(b"\x8d");
+        // Cursor stays at top; content scrolls down.
+        assert_eq!(e.cursor_position().y, 0);
+    }
+
+    #[test]
+    fn c1_ss2_ss3() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x8e");
+        assert_eq!(e.gsingle, 2);
+        e.write(b"\x8f");
+        assert_eq!(e.gsingle, 3);
+    }
+
+    #[test]
+    fn ris_resets_gsingle() {
+        let mut e = Emulator::new(80, 24);
+        e.write(b"\x8e");
+        assert_eq!(e.gsingle, 2);
+        e.write(b"\x1bc");
+        assert_eq!(e.gsingle, 0);
     }
 }
