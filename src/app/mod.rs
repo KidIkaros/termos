@@ -4584,7 +4584,7 @@ mod context_menu_tests {
         let menu = os.context_menu.as_ref().unwrap();
         assert_eq!((menu.x, menu.y), (10, 10));
         assert_eq!(menu.selected, 0);
-        assert_eq!(menu.items.len(), 8);
+        assert_eq!(menu.items.len(), 9);
         assert_eq!(os.focused_window, Some(0));
     }
 
@@ -4629,12 +4629,12 @@ mod context_menu_tests {
         let mut os = os_with_window();
         os.config.appearance.animations_enabled = false;
         os.open_context_menu_at(5, 5);
-        // Navigate to the Zoom row (index 4).
-        for _ in 0..4 {
+        // Navigate to the Zoom row (index 5).
+        for _ in 0..5 {
             let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
             crate::app::input::handle_key(&mut os, &down);
         }
-        assert_eq!(os.context_menu.as_ref().unwrap().selected, 4);
+        assert_eq!(os.context_menu.as_ref().unwrap().selected, 5);
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         crate::app::input::handle_key(&mut os, &enter);
         assert!(os.context_menu.is_none());
