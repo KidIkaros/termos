@@ -6,6 +6,7 @@
 //! render state, mirroring the Model-View-Update pattern the Go code gets from
 //! Bubble Tea.
 
+pub mod actions;
 pub mod agent_alert;
 pub mod copymode_ext;
 pub mod effect;
@@ -536,6 +537,16 @@ pub struct QuitMenuItem {
 pub struct QuitMenu {
     pub selected: usize,
     pub items: Vec<QuitMenuItem>,
+}
+
+/// Whether two x-ranges overlap.
+fn cols_overlap(x1: i32, w1: i32, x2: i32, w2: i32) -> bool {
+    x1 < x2 + w2 && x2 < x1 + w1
+}
+
+/// Whether two y-ranges overlap.
+fn rows_overlap(y1: i32, h1: i32, y2: i32, h2: i32) -> bool {
+    y1 < y2 + h2 && y2 < y1 + h1
 }
 
 /// A dock notification.
@@ -1856,6 +1867,84 @@ impl Os {
         let ctx = self.window_hook_ctx(index);
         self.fire_hook(hooks::Event::AfterNewWindow, ctx);
         Ok(index)
+    }
+
+    /// Swap the focused window with its neighbor in `dir` (left/right/up/
+    /// down), computed from the current layout geometry. No-op when there is
+    /// no neighbor in that direction.
+    pub fn swap_focused_with(&mut self, dir: crate::layout::PreselectionDir) {
+        let Some(focused) = self.focused_window else {
+            return;
+        };
+        let layout = self.current_layout();
+        let Some(rect) = layout.get(&(focused as i32)).copied() else {
+            return;
+        };
+        // Find the neighbor: the window adjacent across the rect's edge.
+        let neighbor = layout.iter().find(|(id, r)| {
+            **id != focused as i32 && {
+                match dir {
+                    crate::layout::PreselectionDir::Left => {
+                        r.x + r.w == rect.x && rows_overlap(r.y, r.h, rect.y, rect.h)
+                    }
+                    crate::layout::PreselectionDir::Right => {
+                        rect.x + rect.w == r.x && rows_overlap(r.y, r.h, rect.y, rect.h)
+                    }
+                    crate::layout::PreselectionDir::Up => {
+                        r.y + r.h == rect.y && cols_overlap(r.x, r.w, rect.x, rect.w)
+                    }
+                    crate::layout::PreselectionDir::Down => {
+                        rect.y + rect.h == r.y && cols_overlap(r.x, r.w, rect.x, rect.w)
+                    }
+                    crate::layout::PreselectionDir::None => false,
+                }
+            }
+        });
+        if let Some((other, _)) = neighbor {
+            let ws = self.current_workspace;
+            self.workspace_mut(ws)
+                .tree
+                .swap_windows(focused as i32, *other);
+            self.sync_window_sizes();
+            let dir_name = match dir {
+                crate::layout::PreselectionDir::Left => "left",
+                crate::layout::PreselectionDir::Right => "right",
+                crate::layout::PreselectionDir::Up => "up",
+                crate::layout::PreselectionDir::Down => "down",
+                crate::layout::PreselectionDir::None => "none",
+            };
+            self.log_action(&format!("swap_window_{dir_name}"));
+        }
+    }
+
+    /// Snap the focused window to the left or right half of the workspace.
+    pub fn snap_half(&mut self, left: bool) {
+        let Some(focused) = self.focused_window else {
+            return;
+        };
+        let bounds = self.workspace_bounds(self.current_workspace);
+        let gap = self.gap;
+        let ws = self.current_workspace;
+        let tree = &mut self.workspace_mut(ws).tree;
+        // Re-parent the focused window into a fresh split at 50%: remove it,
+        // then insert it against the first remaining window.
+        tree.remove_window(focused as i32);
+        let ids = tree.get_all_window_ids();
+        let anchor = ids.first().copied().unwrap_or(-1);
+        let dir = crate::layout::SplitType::Vertical;
+        tree.insert_window(focused as i32, anchor, dir, 0.5, bounds, gap);
+        drop(tree);
+        self.sync_window_sizes();
+        self.log_action(if left { "snap_left" } else { "snap_right" });
+    }
+
+    /// Move the focused window to `workspace` and switch to it (move-and-follow).
+    pub fn move_window_and_follow(&mut self, workspace: i32) {
+        if let Some(focused) = self.focused_window {
+            self.move_window_to_workspace(focused, workspace);
+        }
+        self.switch_workspace(workspace);
+        self.log_action(&format!("move_and_follow_{workspace}"));
     }
 
     /// The usable bounds of a workspace, minus the dock bar.

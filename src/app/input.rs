@@ -530,6 +530,32 @@ fn handle_window_management(os: &mut Os, key: &KeyEvent) -> KeyResult {
     }
 
     match key.code {
+        // Swap with neighbor: H/J/K/L (Go's binding) and ctrl+arrows.
+        KeyCode::Char('H') => {
+            crate::app::actions::dispatch(os, "swap_left");
+            return KeyResult::Consumed;
+        }
+        KeyCode::Char('J') => {
+            crate::app::actions::dispatch(os, "swap_down");
+            return KeyResult::Consumed;
+        }
+        KeyCode::Char('K') => {
+            crate::app::actions::dispatch(os, "swap_up");
+            return KeyResult::Consumed;
+        }
+        KeyCode::Char('L') => {
+            crate::app::actions::dispatch(os, "swap_right");
+            return KeyResult::Consumed;
+        }
+        // Snap to half: alt+left/alt+right.
+        KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
+            crate::app::actions::dispatch(os, "snap_left");
+            return KeyResult::Consumed;
+        }
+        KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+            crate::app::actions::dispatch(os, "snap_right");
+            return KeyResult::Consumed;
+        }
         // Enter terminal mode (i / enter).
         KeyCode::Char('i') => {
             os.enter_terminal_mode();
@@ -2925,5 +2951,76 @@ mod debug_prefix_tests {
         assert!(os.event_log.len() <= 200);
         // The oldest entry was dropped.
         assert!(!os.event_log.iter().any(|e| e.contains("msg 0")));
+    }
+}
+
+#[cfg(test)]
+mod swap_snap_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crate::terminal::pty::WinSize;
+    use crate::terminal::window::Window;
+
+    fn os_with_two() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.width = 80;
+        os.height = 25;
+        for i in 0..2 {
+            let w = Window::without_pty(
+                format!("w{i}"),
+                format!("win{i}"),
+                WinSize { cols: 10, rows: 3 },
+            );
+            os.windows.push(w);
+        }
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(1, 0, SplitType::Vertical, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+        os
+    }
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn uppercase_swap_keys_do_not_panic() {
+        let mut os = os_with_two();
+        for c in ['H', 'J', 'K', 'L'] {
+            let r = handle_key(&mut os, &key(KeyCode::Char(c), KeyModifiers::NONE));
+            assert_eq!(r, KeyResult::Consumed);
+        }
+        assert_eq!(os.windows.len(), 2);
+    }
+
+    #[test]
+    fn alt_arrows_snap() {
+        let mut os = os_with_two();
+        let r = handle_key(&mut os, &key(KeyCode::Left, KeyModifiers::ALT));
+        assert_eq!(r, KeyResult::Consumed);
+        // After snap, the focused window still exists.
+        assert_eq!(os.windows.len(), 2);
+    }
+
+    #[test]
+    fn swap_up_trades_positions() {
+        let mut os = os_with_two();
+        os.focus_window(1);
+        handle_key(&mut os, &key(KeyCode::Char('K'), KeyModifiers::NONE));
+        // The tree still contains both windows.
+        assert!(os.workspace(1).tree.has_window(0));
+        assert!(os.workspace(1).tree.has_window(1));
+    }
+
+    #[test]
+    fn action_dispatch_snap_left() {
+        let mut os = os_with_two();
+        assert!(crate::app::actions::dispatch(&mut os, "snap_left"));
     }
 }
