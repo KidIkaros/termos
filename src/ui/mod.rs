@@ -1,5 +1,6 @@
 //! Shared rendering helpers — borders, the dock bar, and style conversion.
 
+pub mod animation;
 pub mod overlay;
 pub mod style_cache;
 

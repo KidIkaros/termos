@@ -15,6 +15,7 @@
 //! - [`util`] — buffer pools and shared utilities
 
 #![deny(clippy::all)]
+#![allow(clippy::result_large_err)]
 
 pub mod app;
 pub mod config;

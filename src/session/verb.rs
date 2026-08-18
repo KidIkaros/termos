@@ -20,6 +20,8 @@
 //! {"id": 1, "error": {"code": "session_not_found", "message": "..."}}
 //! ```
 
+#![allow(clippy::result_large_err)]
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -280,7 +282,7 @@ pub struct VerbEntry {
 
 /// A verb handler executes one verb. `params` carries the raw JSON of the
 /// request's params object (may be null). It returns a result value to
-/// serialize, or a `VerbError` describing why it failed.
+/// serialize, or a boxed `VerbError` describing why it failed.
 pub type VerbHandler = Arc<dyn Fn(&Value) -> Result<Value, VerbError> + Send + Sync>;
 
 use std::sync::Arc;
@@ -292,6 +294,7 @@ pub struct VerbRegistry {
 
 impl VerbRegistry {
     /// Build the registry with all standard verbs registered.
+    #[allow(clippy::result_large_err)]
     pub fn new() -> Self {
         let mut entries = BTreeMap::new();
 
@@ -552,7 +555,7 @@ impl VerbRegistry {
                 ],
                 examples: vec![r#"{"id":1,"verb":"get-option","params":{"session":"work","key":"appearance.dockbar_position"}}"#.into()],
                 handler: Arc::new(|_params| {
-                    Err(VerbError::new(ERR_OPTION_NOT_FOUND, "option not_found"))
+                    Err(VerbError::new(ERR_OPTION_NOT_FOUND, "option not found"))
                 }),
             },
         );
