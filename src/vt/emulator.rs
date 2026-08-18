@@ -63,6 +63,9 @@ pub struct Emulator {
     /// The most recent OSC 9;4 progress report (state, percent), drained by
     /// the app's agent-state tick.
     pending_progress: Option<(crate::vt::progress::ProgressState, Option<u8>)>,
+    /// OSC 133 semantic markers (prompt/command boundaries), recorded as the
+    /// stream is parsed. Used by the structured scrollback browser.
+    semantic_markers: crate::vt::semantic_markers::SemanticMarkerList,
     /// How many scrollback lines are currently shown above the live screen.
     /// 0 means the live screen is shown; a positive value means the view is
     /// scrolled back that many lines (copy mode).
@@ -96,6 +99,7 @@ impl Emulator {
             pending_apc: Vec::new(),
             pending_sixel: Vec::new(),
             pending_progress: None,
+            semantic_markers: crate::vt::semantic_markers::SemanticMarkerList::new(10_000),
             viewport: 0,
         };
         // Alt screen keeps no scrollback.
@@ -948,6 +952,42 @@ impl Handler for Emulator {
         };
 
         match num {
+            // OSC 133 — semantic prompt markers (A/B/C/D).
+            133 => {
+                let text = String::from_utf8_lossy(payload);
+                let mut parts = text.split(';');
+                let code = parts.next().unwrap_or("").trim();
+                if let Some(marker_type) = crate::vt::semantic_markers::parse_marker_type(
+                    code.chars().next().unwrap_or(' '),
+                ) {
+                    let (cx, cy) = {
+                        let pos = self.cursor_position();
+                        (pos.x, pos.y)
+                    };
+                    let abs_line = self.scrollback_len() as i32 + cy;
+                    let exit = parts
+                        .next()
+                        .and_then(|p| p.trim().parse::<i32>().ok())
+                        .unwrap_or(-1);
+                    let mut marker =
+                        crate::vt::semantic_markers::SemanticMarker::new(marker_type, abs_line, cx);
+                    if marker_type
+                        == crate::vt::semantic_markers::SemanticMarkerType::CommandExecuted
+                    {
+                        // The C marker usually fires after the prompt line was
+                        // committed, with the cursor at the start of the output;
+                        // fall back to the previous line for the command text.
+                        let mut cmd = self.screen().line_text(cy).trim().to_string();
+                        if cmd.is_empty() && cy > 0 {
+                            cmd = self.screen().line_text(cy - 1).trim().to_string();
+                        }
+                        marker = marker.with_exit_code(exit).with_captured_text(&cmd);
+                    } else {
+                        marker = marker.with_exit_code(exit);
+                    }
+                    self.semantic_markers.push(marker);
+                }
+            }
             // OSC 9 — progress report (9;4;...) or desktop notification body.
             9 => {
                 let payload = String::from_utf8_lossy(payload);
@@ -1036,6 +1076,11 @@ impl Emulator {
         std::mem::take(&mut self.pending_sixel)
     }
 
+    /// The recorded OSC 133 semantic markers.
+    pub fn semantic_markers(&self) -> &crate::vt::semantic_markers::SemanticMarkerList {
+        &self.semantic_markers
+    }
+
     /// Drain the most recent OSC 9;4 progress report, if any.
     pub fn take_pending_progress(
         &mut self,
@@ -1082,5 +1127,68 @@ impl Emulator {
             b't' => {}
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod osc133_tests {
+    use super::*;
+
+    fn emu() -> Emulator {
+        Emulator::new(80, 24)
+    }
+
+    #[test]
+    fn records_prompt_and_command_markers() {
+        let mut e = emu();
+        e.write(b"$ ls\r\n");
+        e.write(b"\x1b]133;A\x07");
+        e.write(b"\x1b]133;B\x07");
+        e.write(b"\x1b]133;C\x07");
+        e.write(b"file1\r\nfile2\r\n");
+        e.write(b"\x1b]133;D;0\x07");
+        let markers = e.semantic_markers().markers();
+        // A, B, C, D recorded.
+        assert!(markers.len() >= 4);
+        let c = markers
+            .iter()
+            .find(|m| {
+                m.marker_type == crate::vt::semantic_markers::SemanticMarkerType::CommandExecuted
+            })
+            .unwrap();
+        assert!(
+            c.captured_text.contains("ls"),
+            "captured: {}",
+            c.captured_text
+        );
+        let d = markers
+            .iter()
+            .find(|m| {
+                m.marker_type == crate::vt::semantic_markers::SemanticMarkerType::CommandFinished
+            })
+            .unwrap();
+        assert_eq!(d.exit_code, 0);
+    }
+
+    #[test]
+    fn non_133_osc_ignored() {
+        let mut e = emu();
+        e.write(b"\x1b]0;title\x07");
+        assert!(e.semantic_markers().is_empty());
+    }
+
+    #[test]
+    fn scrollback_blocks_from_markers() {
+        let mut e = emu();
+        e.write(b"$ ls\r\n");
+        e.write(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07");
+        e.write(b"file1\r\nfile2\r\n");
+        e.write(b"\x1b]133;D;0\x07");
+        let markers = e.semantic_markers().markers();
+        let text = |i: usize| e.content_line_text(i);
+        let count = e.content_line_count();
+        let blocks = crate::scrollback::parse_blocks(&markers, count, text);
+        assert!(!blocks.is_empty());
+        assert_eq!(blocks[0].method, "osc133");
     }
 }

@@ -80,6 +80,7 @@ impl SemanticMarker {
 }
 
 /// A thread-safe bounded list of semantic markers.
+#[derive(Debug)]
 pub struct SemanticMarkerList {
     markers: Mutex<Vec<SemanticMarker>>,
     max_items: usize,

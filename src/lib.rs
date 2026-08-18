@@ -27,6 +27,7 @@ pub mod keys;
 pub mod layout;
 #[cfg(feature = "network")]
 pub mod network;
+pub mod scrollback;
 pub mod server;
 pub mod session;
 pub mod tape;
