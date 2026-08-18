@@ -2428,65 +2428,27 @@ impl Os {
         if !self.config.notifications.agent.sound.unwrap_or(false) {
             return;
         }
-        // Cooldown check.
-        let now = std::time::Instant::now();
-        if let Some(last) = self.last_sound_played {
-            let cooldown = std::time::Duration::from_secs(
-                self.config
-                    .notifications
-                    .agent
-                    .sound_cooldown_seconds
-                    .unwrap_or(5) as u64,
-            );
-            if now.duration_since(last) < cooldown {
-                return;
-            }
-        }
-        self.last_sound_played = Some(now);
-
-        // Detect available player (cached after first probe).
-        let player = self.sound_player.unwrap_or_else(|| {
-            let p = ["paplay", "pw-play", "aplay", "afplay"]
-                .iter()
-                .find(|cmd| {
-                    std::process::Command::new(cmd)
-                        .arg("--help")
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status()
-                        .is_ok()
-                })
-                .copied();
-            self.sound_player = Some(p);
-            p
-        });
-
-        let Some(player) = player else {
-            return;
-        };
-
-        // Build the WAV data for the cue.
-        let wav: &[u8] = match cue {
-            "done" => include_bytes!("../../assets/done.wav"),
-            "needs-input" => include_bytes!("../../assets/needs-input.wav"),
+        // Delegate to the sound subsystem: atomic cooldown, single worker,
+        // one cue at a time, permanent silence after repeated failures.
+        let cooldown = std::time::Duration::from_secs(
+            self.config
+                .notifications
+                .agent
+                .sound_cooldown_seconds
+                .unwrap_or(5) as u64,
+        );
+        let req = match cue {
+            "done" => crate::sound::Request {
+                cue: crate::sound::Cue::Done,
+                cooldown,
+            },
+            "needs-input" => crate::sound::Request {
+                cue: crate::sound::Cue::Attention,
+                cooldown,
+            },
             _ => return,
         };
-
-        // Write WAV to a temp file and spawn the player.
-        let Ok(temp_dir) = std::env::temp_dir().canonicalize() else {
-            return;
-        };
-        let wav_path = temp_dir.join(format!("termos-alert-{cue}.wav"));
-        if std::fs::write(&wav_path, wav).is_err() {
-            return;
-        }
-
-        std::process::Command::new(player)
-            .arg(&wav_path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok();
+        crate::sound::play(req);
     }
 
     /// The leader key from config.

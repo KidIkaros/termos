@@ -30,6 +30,7 @@ pub mod network;
 pub mod scrollback;
 pub mod server;
 pub mod session;
+pub mod sound;
 pub mod tape;
 pub mod terminal;
 pub mod testutil;
