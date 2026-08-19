@@ -1095,7 +1095,6 @@ fn handle_tape_manager_confirm_delete(os: &mut Os, key: &KeyEvent) -> KeyResult 
     match key.code {
         KeyCode::Char('y') | KeyCode::Enter => {
             os.tape_manager_confirm_delete();
-            os.refresh_tape_manager_cache();
             KeyResult::Consumed
         }
         KeyCode::Char('n') | KeyCode::Esc => {

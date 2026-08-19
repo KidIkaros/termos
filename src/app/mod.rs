@@ -1694,7 +1694,7 @@ impl Os {
         let mut apc_jobs: Vec<(u32, u32, u32, Vec<u8>)> = Vec::new();
         let mut sixel_jobs: Vec<(u32, u32, Vec<u8>)> = Vec::new();
         for (i, w) in self.windows.iter_mut().enumerate() {
-            let mut emu = crate::util::lock(&w.emulator);
+            let mut emu = w.emulator.lock().unwrap_or_else(|e| e.into_inner());
             let apcs = emu.drain_pending_apc();
             if !apcs.is_empty() {
                 let (px, py) = origins.get(i).copied().unwrap_or((0, 0));
@@ -2001,6 +2001,8 @@ impl Os {
             }
         }
         self.tape_manager_mode = TapeManagerMode::List;
+        // Repopulate the cache so the list reflects the deletion.
+        self.update_tape_manager_cache();
         let items_len = self.tape_manager_items().len();
         if self.tape_manager_selected >= items_len && items_len > 0 {
             self.tape_manager_selected = items_len - 1;
@@ -2057,19 +2059,7 @@ impl Os {
                 return cached_items.clone();
             }
         }
-        let Ok(files) = crate::tape::tapes::list_tapes() else {
-            return Vec::new();
-        };
-        let filtered: Vec<std::path::PathBuf> = files
-            .into_iter()
-            .filter(|p| {
-                query.is_empty()
-                    || p.file_name()
-                        .map(|n| n.to_string_lossy().to_lowercase().contains(&query))
-                        .unwrap_or(false)
-            })
-            .collect();
-        filtered
+        self.scan_tape_files(&query)
     }
 
     /// Invalidate the tape manager cache so the next `tape_manager_items`
@@ -2081,20 +2071,25 @@ impl Os {
     /// Update the tape manager cache after a query or file change.
     pub fn update_tape_manager_cache(&mut self) {
         let query = self.tape_manager_query.to_lowercase();
+        let filtered = self.scan_tape_files(&query);
+        self.tape_manager_cache = Some((query, filtered));
+    }
+
+    /// Scan the tape directory and filter by query. Shared by
+    /// `tape_manager_items` (cache miss) and `update_tape_manager_cache`.
+    fn scan_tape_files(&self, query: &str) -> Vec<std::path::PathBuf> {
         let Ok(files) = crate::tape::tapes::list_tapes() else {
-            self.tape_manager_cache = Some((query, Vec::new()));
-            return;
+            return Vec::new();
         };
-        let filtered: Vec<std::path::PathBuf> = files
+        files
             .into_iter()
             .filter(|p| {
                 query.is_empty()
                     || p.file_name()
-                        .map(|n| n.to_string_lossy().to_lowercase().contains(&query))
+                        .map(|n| n.to_string_lossy().to_lowercase().contains(query))
                         .unwrap_or(false)
             })
-            .collect();
-        self.tape_manager_cache = Some((query, filtered));
+            .collect()
     }
 
     /// Play the selected tape from the manager (loads it as the script).
@@ -6866,5 +6861,67 @@ mod browser_tests {
         os.enter_scrollback_mode();
         crate::app::input::handle_key(&mut os, &key(KeyCode::Char('[')));
         assert!(os.browser_open);
+    }
+
+    // --- Tape manager cache tests ---
+
+    fn cache_test_os() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.width = 80;
+        os.height = 25;
+        os
+    }
+
+    #[test]
+    fn open_tape_manager_populates_cache() {
+        let mut os = cache_test_os();
+        os.open_tape_manager();
+        assert!(os.tape_manager_cache.is_some());
+    }
+
+    #[test]
+    fn cache_returns_same_result_as_fresh_scan() {
+        let mut os = cache_test_os();
+        os.open_tape_manager();
+        let cached = os.tape_manager_items();
+        os.refresh_tape_manager_cache();
+        let fresh = os.scan_tape_files(&os.tape_manager_query.to_lowercase());
+        assert_eq!(cached.len(), fresh.len());
+    }
+
+    #[test]
+    fn update_cache_after_query_change_repopulates() {
+        let mut os = cache_test_os();
+        os.open_tape_manager();
+        os.tape_manager_query.push('x');
+        os.update_tape_manager_cache();
+        let updated = os.tape_manager_items();
+        // Cache should be populated with the new query.
+        assert!(os.tape_manager_cache.is_some());
+        let (_, cached_items) = os.tape_manager_cache.as_ref().unwrap();
+        assert_eq!(updated.len(), cached_items.len());
+    }
+
+    #[test]
+    fn refresh_cache_sets_none() {
+        let mut os = cache_test_os();
+        os.open_tape_manager();
+        assert!(os.tape_manager_cache.is_some());
+        os.refresh_tape_manager_cache();
+        assert!(os.tape_manager_cache.is_none());
+    }
+
+    #[test]
+    fn confirm_delete_repopulates_cache() {
+        let mut os = cache_test_os();
+        os.open_tape_manager();
+        // Set up a fake delete path that doesn't exist (delete will fail,
+        // but the cache should still be repopulated).
+        os.tape_manager_delete_path = Some(std::path::PathBuf::from("/nonexistent/tape.yaml"));
+        os.tape_manager_mode = TapeManagerMode::ConfirmDelete;
+        os.tape_manager_confirm_delete();
+        // Cache should be repopulated (not None) after confirm_delete.
+        assert!(os.tape_manager_cache.is_some());
+        assert_eq!(os.tape_manager_mode, TapeManagerMode::List);
     }
 }
