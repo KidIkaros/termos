@@ -8,6 +8,7 @@
 
 pub mod actions;
 pub mod agent_alert;
+pub mod border_grid;
 pub mod copymode_ext;
 pub mod dock;
 pub mod dock_session_buttons;

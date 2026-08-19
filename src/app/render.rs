@@ -121,6 +121,29 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         draw_pane_border(buf, tui_rect, &title, is_focused, border_color, os);
     }
 
+    // Render junction-aware border grid for shared borders.
+    if !os.config.appearance.use_ascii_only && os.gap == 0 {
+        let pane_rects: Vec<TuiRect> = all_ids
+            .iter()
+            .filter_map(|&wid| {
+                let window = os.windows.get(wid as usize)?;
+                if window.zoomed {
+                    return Some(rect_to_tui(bounds, content_area));
+                }
+                layout.get(&wid).map(|r| rect_to_tui(*r, content_area))
+            })
+            .collect();
+        if pane_rects.len() > 1 {
+            crate::app::border_grid::render_border_grid(
+                buf,
+                &pane_rects,
+                unfocused_border_color(os),
+                os.config.appearance.use_ascii_only,
+                os.gap,
+            );
+        }
+    }
+
     // Draw the dock bar.
     render_dock(os, buf, dock_area, &sorted_ids);
 
@@ -154,24 +177,7 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     } else if os.tape_manager_open {
         render_tape_manager(os, buf, content_area);
     } else if os.browser_open {
-        let mode = match os.browser_mode {
-            crate::scrollback::BrowseMode::Commands => "commands",
-            crate::scrollback::BrowseMode::Output => "output",
-            crate::scrollback::BrowseMode::Json => "json",
-            crate::scrollback::BrowseMode::Paths => "paths",
-        };
-        let rows = os.browser_rows();
-        let mut lines: Vec<String> = Vec::new();
-        let start = os.browser_scroll;
-        for row in rows.iter().skip(start).take(20) {
-            lines.push(row.clone());
-        }
-        lines.push(String::new());
-        lines.push(format!(
-            "mode: {mode} · {} block(s) · j/k select, m mode, Enter jump, Esc close",
-            os.browser_blocks.len()
-        ));
-        render_overlay(buf, content_area, &lines, "Scrollback browser");
+        render_scrollback_browser_overlay(os, buf, content_area);
     } else if os.aggregate_open {
         let items = os.aggregate_items();
         let mut lines: Vec<String> = Vec::new();
@@ -200,19 +206,7 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         lines.push("↑↓ select · Enter focus · Esc close".into());
         render_overlay(buf, content_area, &lines, "Aggregate view");
     } else if os.settings_open {
-        let rows = os.settings_rows();
-        let mut lines: Vec<String> = Vec::new();
-        for (i, (label, value)) in rows.iter().enumerate() {
-            let marker = if i == os.settings_selected {
-                "› "
-            } else {
-                "  "
-            };
-            lines.push(format!("{marker}{label:<20} {value}"));
-        }
-        lines.push(String::new());
-        lines.push("↑↓ select · ←/→ or Enter adjust · Esc close".into());
-        render_overlay(buf, content_area, &lines, "Settings");
+        render_settings_overlay(os, buf, content_area);
     } else if let Some((session, selected)) = &os.session_close {
         let (panes, agents) = os.session_toll(session);
         let mut toll = format!("{panes} pane(s)");
@@ -251,24 +245,7 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     } else if os.theme_picker_open {
         render_theme_picker_overlay(os, buf, content_area);
     } else if os.accent_picker_open {
-        let lines: Vec<String> = os
-            .accent_list
-            .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                if i == os.accent_picker_selected {
-                    format!("> {}", name)
-                } else {
-                    format!("  {}", name)
-                }
-            })
-            .collect();
-        render_overlay(
-            buf,
-            content_area,
-            &lines,
-            "Accent  (j/k: select, Enter: apply, Esc: cancel)",
-        );
+        render_accent_picker_overlay(os, buf, content_area);
     } else if os.help_open {
         render_help_modal(os, buf, content_area);
     } else if os.scrollback_mode {
@@ -1343,6 +1320,271 @@ fn render_tooltip(buf: &mut Buffer, area: TuiRect, text: &str, x: i32, y: i32) {
         let ch = chars.next().unwrap_or(' ');
         let cell = &mut buf[(x + 1 + j, y + 1)];
         cell.set_char(ch);
+    }
+}
+
+/// Render the settings overlay using the Panel system.
+fn render_settings_overlay(os: &Os, buf: &mut Buffer, area: TuiRect) {
+    use crate::config::theme::ThemeColors;
+    use crate::ui::overlay::{Hint, Palette, Panel};
+
+    let rows = os.settings_rows();
+    let preferred_width = 60i32;
+    let screen_w = area.width as i32;
+    let inner_w = crate::ui::overlay::fit_width(preferred_width, screen_w);
+
+    // Build the body: each row is "label  value" with a selection marker.
+    let mut body_lines = Vec::new();
+    for (i, (label, value)) in rows.iter().enumerate() {
+        let marker = if i == os.settings_selected { "› " } else { "  " };
+        let label_padded = format!("{:<20}", label);
+        body_lines.push(format!("{marker}{label_padded} {value}"));
+    }
+    body_lines.push(String::new());
+    body_lines.push("↑↓ select · ←/→ or Enter adjust · Esc close".into());
+
+    let panel = Panel {
+        glyph: String::new(),
+        title: "Settings".into(),
+        width: inner_w,
+        tabs: Vec::new(),
+        active_tab: 0,
+        body: body_lines.join("\n"),
+        hints: vec![
+            Hint::new("↑↓", "move"),
+            Hint::new("←→", "change"),
+            Hint::new("esc", "close"),
+        ],
+    };
+
+    let pal = Palette::default();
+    let (lines, geo) = panel.render(&pal);
+
+    // Place the panel centered in the content area.
+    let panel_w = geo.width as u16;
+    let panel_h = geo.height as u16;
+    let px = area.x + area.width.saturating_sub(panel_w) / 2;
+    let py = area.y + area.height.saturating_sub(panel_h) / 2;
+
+    // Fill the panel background.
+    let bg = os.theme.overlay_bg();
+    let fg = os.theme.overlay_fg();
+    for y in 0..panel_h {
+        for x in 0..panel_w {
+            if px + x < area.x + area.width && py + y < area.y + area.height {
+                let cell = &mut buf[(px + x, py + y)];
+                cell.set_char(' ');
+                cell.set_style(TuiStyle::default().fg(fg).bg(bg));
+            }
+        }
+    }
+
+    // Render the panel lines.
+    for (i, line) in lines.iter().enumerate() {
+        let ly = py + i as u16;
+        if ly >= area.y + area.height {
+            break;
+        }
+        for (j, ch) in line.chars().enumerate() {
+            let lx = px + j as u16;
+            if lx >= area.x + area.width {
+                break;
+            }
+            let cell = &mut buf[(lx, ly)];
+            cell.set_char(ch);
+            cell.set_style(TuiStyle::default().fg(fg).bg(bg));
+        }
+    }
+}
+
+/// Render the scrollback browser overlay using the Panel system with tabs.
+fn render_scrollback_browser_overlay(os: &Os, buf: &mut Buffer, area: TuiRect) {
+    use crate::config::theme::ThemeColors;
+    use crate::ui::overlay::{Hint, Palette, Panel};
+
+    let preferred_width = 70i32;
+    let screen_w = area.width as i32;
+    let inner_w = crate::ui::overlay::fit_width(preferred_width, screen_w);
+
+    let rows = os.browser_rows();
+    let start = os.browser_scroll;
+    let visible_rows = 20;
+
+    let mut body_lines: Vec<String> = Vec::new();
+    for row in rows.iter().skip(start).take(visible_rows) {
+        body_lines.push(row.clone());
+    }
+
+    let active_tab = match os.browser_mode {
+        crate::scrollback::BrowseMode::Commands => 0,
+        crate::scrollback::BrowseMode::Output => 1,
+        crate::scrollback::BrowseMode::Json => 2,
+        crate::scrollback::BrowseMode::Paths => 3,
+    };
+
+    let panel = Panel {
+        glyph: String::new(),
+        title: "Scrollback browser".into(),
+        width: inner_w,
+        tabs: vec!["Commands".into(), "Output".into(), "Json".into(), "Paths".into()],
+        active_tab,
+        body: body_lines.join("\n"),
+        hints: vec![
+            Hint::new("j/k", "select"),
+            Hint::new("m", "mode"),
+            Hint::new("enter", "jump"),
+            Hint::new("esc", "close"),
+        ],
+    };
+
+    let pal = Palette::default();
+    let (lines, geo) = panel.render(&pal);
+
+    let panel_w = geo.width as u16;
+    let panel_h = geo.height as u16;
+    let px = area.x + area.width.saturating_sub(panel_w) / 2;
+    let py = area.y + area.height.saturating_sub(panel_h) / 2;
+
+    let bg = os.theme.overlay_bg();
+    let fg = os.theme.overlay_fg();
+
+    // Fill the panel background.
+    for y in 0..panel_h {
+        for x in 0..panel_w {
+            if px + x < area.x + area.width && py + y < area.y + area.height {
+                let cell = &mut buf[(px + x, py + y)];
+                cell.set_char(' ');
+                cell.set_style(TuiStyle::default().fg(fg).bg(bg));
+            }
+        }
+    }
+
+    // Render the panel lines.
+    for (i, line) in lines.iter().enumerate() {
+        let ly = py + i as u16;
+        if ly >= area.y + area.height {
+            break;
+        }
+        for (j, ch) in line.chars().enumerate() {
+            let lx = px + j as u16;
+            if lx >= area.x + area.width {
+                break;
+            }
+            let cell = &mut buf[(lx, ly)];
+            cell.set_char(ch);
+            cell.set_style(TuiStyle::default().fg(fg).bg(bg));
+        }
+    }
+
+    // Render block count info at the bottom of the body.
+    let info_y = py + panel_h.saturating_sub(3);
+    let info = format!("{} block(s)", os.browser_blocks.len());
+    for (j, ch) in info.chars().enumerate() {
+        let lx = px + 2 + j as u16;
+        if lx < area.x + area.width && info_y < area.y + area.height {
+            let cell = &mut buf[(lx, info_y)];
+            cell.set_char(ch);
+            cell.set_style(TuiStyle::default().fg(os.theme.dock_dimmed()).bg(bg));
+        }
+    }
+}
+
+/// Render the accent picker overlay with color swatches.
+fn render_accent_picker_overlay(os: &Os, buf: &mut Buffer, area: TuiRect) {
+    use crate::config::theme::ThemeColors;
+    use crate::ui::overlay::{Hint, Palette, Panel};
+
+    let preferred_width = 40i32;
+    let screen_w = area.width as i32;
+    let inner_w = crate::ui::overlay::fit_width(preferred_width, screen_w);
+
+    // Build the body with accent color names.
+    let mut body_lines = Vec::new();
+    for (i, name) in os.accent_list.iter().enumerate() {
+        let marker = if i == os.accent_picker_selected { "› " } else { "  " };
+        body_lines.push(format!("{marker}{name}"));
+    }
+
+    let panel = Panel {
+        glyph: String::new(),
+        title: "Accent".into(),
+        width: inner_w,
+        tabs: Vec::new(),
+        active_tab: 0,
+        body: body_lines.join("\n"),
+        hints: vec![
+            Hint::new("j/k", "select"),
+            Hint::new("enter", "apply"),
+            Hint::new("esc", "cancel"),
+        ],
+    };
+
+    let pal = Palette::default();
+    let (lines, geo) = panel.render(&pal);
+
+    let panel_w = geo.width as u16;
+    let panel_h = geo.height as u16;
+    let px = area.x + area.width.saturating_sub(panel_w) / 2;
+    let py = area.y + area.height.saturating_sub(panel_h) / 2;
+
+    let bg = os.theme.overlay_bg();
+    let fg = os.theme.overlay_fg();
+
+    // Fill the panel background.
+    for y in 0..panel_h {
+        for x in 0..panel_w {
+            if px + x < area.x + area.width && py + y < area.y + area.height {
+                let cell = &mut buf[(px + x, py + y)];
+                cell.set_char(' ');
+                cell.set_style(TuiStyle::default().fg(fg).bg(bg));
+            }
+        }
+    }
+
+    // Render the panel lines.
+    for (i, line) in lines.iter().enumerate() {
+        let ly = py + i as u16;
+        if ly >= area.y + area.height {
+            break;
+        }
+        for (j, ch) in line.chars().enumerate() {
+            let lx = px + j as u16;
+            if lx >= area.x + area.width {
+                break;
+            }
+            let cell = &mut buf[(lx, ly)];
+            cell.set_char(ch);
+            cell.set_style(TuiStyle::default().fg(fg).bg(bg));
+        }
+    }
+
+    // Draw color swatch next to each accent name.
+    let accent_colors: [(&str, TuiColor); 8] = [
+        ("blue", TuiColor::Blue),
+        ("cyan", TuiColor::Cyan),
+        ("green", TuiColor::Green),
+        ("magenta", TuiColor::Magenta),
+        ("orange", TuiColor::Rgb(0xff, 0x87, 0x00)),
+        ("purple", TuiColor::Rgb(0x88, 0x39, 0xbf)),
+        ("red", TuiColor::Red),
+        ("yellow", TuiColor::Yellow),
+    ];
+    for (i, name) in os.accent_list.iter().enumerate() {
+        let swatch_color = accent_colors
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, c)| *c)
+            .unwrap_or(TuiColor::White);
+        let line_y = py + 3 + i as u16; // 3 = top pad + title + blank
+        if line_y >= area.y + area.height {
+            break;
+        }
+        let sx = px + 4 + name.len() as u16 + 2;
+        if sx < area.x + area.width {
+            let cell = &mut buf[(sx, line_y)];
+            cell.set_char('\u{2588}');
+            cell.set_style(TuiStyle::default().fg(swatch_color).bg(bg));
+        }
     }
 }
 
