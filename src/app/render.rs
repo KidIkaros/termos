@@ -743,12 +743,34 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
         .as_ref()
         .map(|t| TuiColor::Rgb(t.foreground.0, t.foreground.1, t.foreground.2))
         .unwrap_or(TuiColor::White);
+    let accent = os
+        .theme
+        .as_ref()
+        .map(|t| TuiColor::Rgb(t.ansi[4].0, t.ansi[4].1, t.ansi[4].2))
+        .unwrap_or(TuiColor::Cyan);
+    let muted = os
+        .theme
+        .as_ref()
+        .map(|t| TuiColor::Rgb(t.ansi[8].0, t.ansi[8].1, t.ansi[8].2))
+        .unwrap_or(TuiColor::DarkGray);
 
     // Fill the dock background.
     for x in 0..area.width {
         buf[(area.x + x, area.y)].set_bg(bg);
     }
 
+    let ascii_only = os.config.appearance.use_ascii_only;
+    let dock_width = area.width as usize;
+    let y = area.y;
+
+    // Calculate the dock layout.
+    let layout = super::dock::calculate_dock_layout(os);
+
+    // --- Left region: mode pill + workspace strip ---
+
+    let mut x: u16;
+
+    // Mode pill label.
     let mode_name = if os.palette_open {
         "PALETTE"
     } else if os.switcher_open {
@@ -762,46 +784,330 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
         }
     };
 
-    let mut text = format!(
+    let mut left_text = format!(
         " {} {}:{} ",
         mode_name,
         os.current_workspace,
         sorted_ids.len()
     );
     if os.prefix != Prefix::None {
-        text.push_str("⌨ ");
+        left_text.push_str("⌨ ");
     }
     // Tape playback progress indicator.
     if os.script_active() {
         let pct = os.script_progress().unwrap_or(0);
         let state = if os.script_paused { "⏸" } else { "▶" };
-        text.push_str(&format!(" {state} tape {pct:>3}%"));
+        left_text.push_str(&format!(" {state} tape {pct:>3}%"));
     }
     // Recording indicator.
     if os.recording_active() {
-        text.push_str(" ● rec");
+        left_text.push_str(" ● rec");
     }
     // Agent-state indicator for the focused pane.
     let agent = os.focused_agent_state();
     if !agent.is_empty() && agent != "none" {
-        text.push_str(&format!(" ✦{agent}"));
+        left_text.push_str(&format!(" ✦{agent}"));
         let msg = os.focused_agent_message();
         if !msg.is_empty() {
-            text.push_str(&format!(" \"{msg}\""));
+            left_text.push_str(&format!(" \"{msg}\""));
         }
-        text.push(' ');
-    }
-    if let Some(notif) = os.notifications.last() {
-        text.push_str(&format!(" | {}", notif.message));
+        left_text.push(' ');
     }
 
-    // Draw the text, truncating to the dock width.
-    for (i, ch) in text.chars().enumerate().take(area.width as usize) {
-        let cell = &mut buf[(area.x + i as u16, area.y)];
+    // Draw the left text, truncating to the dock width.
+    for (i, ch) in left_text.chars().enumerate().take(dock_width) {
+        let cell = &mut buf[(area.x + i as u16, y)];
         cell.set_char(ch);
         cell.set_style(TuiStyle::default().fg(fg).bg(bg));
     }
+    x = left_text.chars().count() as u16;
+
+    // --- Workspace pills strip ---
+
+    let strip = &layout.workspace_strip;
+    if strip.width > 0 && x as usize + strip.width <= dock_width {
+        let mut sx = x;
+
+        // Leading column separator.
+        if sx < area.width {
+            let cell = &mut buf[(area.x + sx, y)];
+            cell.set_char(' ');
+            cell.set_style(TuiStyle::default().fg(fg).bg(bg));
+            sx += 1;
+        }
+
+        // Overflow arrow (left).
+        if strip.scrolls && strip.more_left {
+            if sx < area.width {
+                let cell = &mut buf[(area.x + sx, y)];
+                cell.set_char('‹');
+                cell.set_style(TuiStyle::default().fg(muted).bg(bg));
+                sx += 1;
+            }
+            if sx < area.width {
+                let cell = &mut buf[(area.x + sx, y)];
+                cell.set_char(' ');
+                cell.set_style(TuiStyle::default().fg(fg).bg(bg));
+                sx += 1;
+            }
+        }
+
+        // Pills.
+        for pill in &strip.pills {
+            if sx as usize + pill.width > dock_width {
+                break;
+            }
+            let pill_style = if pill.active {
+                TuiStyle::default().fg(bg).bg(accent).add_modifier(Modifier::BOLD)
+            } else {
+                TuiStyle::default().fg(fg).bg(bg)
+            };
+            let cap_l = if ascii_only { "" } else { "\u{e0b6}" };
+            for ch in cap_l.chars() {
+                if sx < area.width {
+                    let cell = &mut buf[(area.x + sx, y)];
+                    cell.set_char(ch);
+                    cell.set_style(pill_style);
+                    sx += 1;
+                }
+            }
+            let label = format!(" {} ", pill.label);
+            for ch in label.chars() {
+                if sx < area.width {
+                    let cell = &mut buf[(area.x + sx, y)];
+                    cell.set_char(ch);
+                    cell.set_style(pill_style);
+                    sx += 1;
+                }
+            }
+            let cap_r = if ascii_only { "" } else { "\u{e0b4}" };
+            for ch in cap_r.chars() {
+                if sx < area.width {
+                    let cell = &mut buf[(area.x + sx, y)];
+                    cell.set_char(ch);
+                    cell.set_style(pill_style);
+                    sx += 1;
+                }
+            }
+            if sx < area.width {
+                let cell = &mut buf[(area.x + sx, y)];
+                cell.set_char(' ');
+                cell.set_style(TuiStyle::default().fg(fg).bg(bg));
+                sx += 1;
+            }
+        }
+
+        // Overflow arrow (right).
+        if strip.scrolls && strip.more_right {
+            if sx < area.width {
+                let cell = &mut buf[(area.x + sx, y)];
+                cell.set_char(' ');
+                cell.set_style(TuiStyle::default().fg(fg).bg(bg));
+                sx += 1;
+            }
+            if sx < area.width {
+                let cell = &mut buf[(area.x + sx, y)];
+                cell.set_char('›');
+                cell.set_style(TuiStyle::default().fg(muted).bg(bg));
+                sx += 1;
+            }
+        }
+
+        // Pinned "+" tab.
+        if let Some(ref add) = strip.add {
+            if sx as usize + add.width <= dock_width {
+                let add_style = TuiStyle::default().fg(accent).bg(bg);
+                let cap_l = if ascii_only { "" } else { "\u{e0b6}" };
+                for ch in cap_l.chars() {
+                    if sx < area.width {
+                        let cell = &mut buf[(area.x + sx, y)];
+                        cell.set_char(ch);
+                        cell.set_style(add_style);
+                        sx += 1;
+                    }
+                }
+                let label = format!(" {} ", add.label);
+                for ch in label.chars() {
+                    if sx < area.width {
+                        let cell = &mut buf[(area.x + sx, y)];
+                        cell.set_char(ch);
+                        cell.set_style(add_style);
+                        sx += 1;
+                    }
+                }
+                let cap_r = if ascii_only { "" } else { "\u{e0b4}" };
+                for ch in cap_r.chars() {
+                    if sx < area.width {
+                        let cell = &mut buf[(area.x + sx, y)];
+                        cell.set_char(ch);
+                        cell.set_style(add_style);
+                        sx += 1;
+                    }
+                }
+            }
+        }
+
+        x = sx;
+    }
+
+    // --- Center region: minimized window items ---
+
+    for (i, item) in layout.visible_items.iter().enumerate() {
+        let item_x = layout.item_positions.get(i).copied().unwrap_or(0);
+        let mut ix = item_x as u16;
+        let item_style = TuiStyle::default().fg(fg).bg(bg);
+        let cap_l = crate::config::constants::dock_pill_left(ascii_only);
+        let cap_r = crate::config::constants::dock_pill_right(ascii_only);
+        for ch in cap_l.chars() {
+            if ix < area.width {
+                let cell = &mut buf[(area.x + ix, y)];
+                cell.set_char(ch);
+                cell.set_style(item_style);
+                ix += 1;
+            }
+        }
+        for ch in item.label.chars() {
+            if ix < area.width {
+                let cell = &mut buf[(area.x + ix, y)];
+                cell.set_char(ch);
+                cell.set_style(item_style);
+                ix += 1;
+            }
+        }
+        for ch in cap_r.chars() {
+            if ix < area.width {
+                let cell = &mut buf[(area.x + ix, y)];
+                cell.set_char(ch);
+                cell.set_style(item_style);
+                ix += 1;
+            }
+        }
+    }
+
+    // Truncation indicator.
+    if layout.truncated_count > 0 {
+        let trunc_x = x;
+        let trunc_text = format!(" +{} ", layout.truncated_count);
+        let trunc_style = TuiStyle::default().fg(muted).bg(bg);
+        for (i, ch) in trunc_text.chars().enumerate() {
+            let tx = trunc_x as usize + i;
+            if tx < dock_width {
+                let cell = &mut buf[(area.x + tx as u16, y)];
+                cell.set_char(ch);
+                cell.set_style(trunc_style);
+            }
+        }
+    }
+
+    // --- Right region: session controls ---
+
+    let session_fit = super::dock_session_buttons::dock_session_controls_fit(dock_width);
+    if session_fit {
+        let buttons = super::dock_session_buttons::dock_session_buttons(ascii_only);
+        let mut rx = area.width;
+        for (action, icon) in buttons.iter().rev() {
+            let label = format!(" {} ", icon);
+            let btn_width = label.chars().count() as u16;
+            if rx < btn_width + 1 {
+                break;
+            }
+            rx = rx.saturating_sub(btn_width);
+            let style = match action {
+                super::dock_session_buttons::DockSessionAction::Close => {
+                    TuiStyle::default().fg(muted).bg(bg)
+                }
+                super::dock_session_buttons::DockSessionAction::Detach => {
+                    TuiStyle::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
+                }
+                super::dock_session_buttons::DockSessionAction::Rename => {
+                    TuiStyle::default().fg(fg).bg(bg)
+                }
+            };
+            for (i, ch) in label.chars().enumerate() {
+                let cx = area.x + rx + i as u16;
+                if cx < area.x + area.width {
+                    let cell = &mut buf[(cx, y)];
+                    cell.set_char(ch);
+                    cell.set_style(style);
+                }
+            }
+            if rx > 0 {
+                rx = rx.saturating_sub(1);
+            }
+        }
+    }
+
+    // --- Copy mode help (when in copy mode) ---
+
+    if os.scrollback_mode {
+        let state = super::dock::copy_mode_state_from_os(os);
+        let tiers = super::dock::copy_mode_help_tiers(state);
+        let room = dock_width
+            .saturating_sub(layout.left_width)
+            .saturating_sub(layout.right_width);
+        let chosen = tiers.iter().rev().find(|tier| {
+            let w: usize = tier.iter().map(|h| h.width() + 2).sum::<usize>() + 2;
+            w <= room
+        });
+        if let Some(tier) = chosen {
+            let mut hx = layout.left_width as u16;
+            let help_style = TuiStyle::default().fg(muted).bg(bg);
+            let key_style = TuiStyle::default().fg(fg).bg(bg);
+            if hx < area.width {
+                let cell = &mut buf[(area.x + hx, y)];
+                cell.set_char(' ');
+                cell.set_style(help_style);
+                hx += 1;
+            }
+            for hint in tier {
+                let key_text = format!("{} ", hint.key);
+                for ch in key_text.chars() {
+                    if hx < area.width {
+                        let cell = &mut buf[(area.x + hx, y)];
+                        cell.set_char(ch);
+                        cell.set_style(key_style);
+                        hx += 1;
+                    }
+                }
+                let label_text = format!("{}  ", hint.label);
+                for ch in label_text.chars() {
+                    if hx < area.width {
+                        let cell = &mut buf[(area.x + hx, y)];
+                        cell.set_char(ch);
+                        cell.set_style(help_style);
+                        hx += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Notification (right-aligned when no copy mode help) ---
+
+    if let Some(notif) = os.notifications.last() {
+        if !os.scrollback_mode {
+            let notif_text = format!(" | {} ", notif.message);
+            let notif_style = TuiStyle::default().fg(fg).bg(bg);
+            let max_x = if session_fit {
+                area.width.saturating_sub(
+                    super::dock_session_buttons::dock_session_strip_width(ascii_only) as u16,
+                )
+            } else {
+                area.width
+            };
+            let start = max_x.saturating_sub(notif_text.chars().count() as u16);
+            for (i, ch) in notif_text.chars().enumerate() {
+                let nx = start + i as u16;
+                if nx < area.width {
+                    let cell = &mut buf[(area.x + nx, y)];
+                    cell.set_char(ch);
+                    cell.set_style(notif_style);
+                }
+            }
+        }
+    }
 }
+
 
 /// Render the tape manager overlay: a filterable list of recorded tapes.
 fn render_tape_manager(os: &Os, buf: &mut Buffer, area: TuiRect) {

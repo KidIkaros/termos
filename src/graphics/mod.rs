@@ -18,5 +18,9 @@ pub mod sixel;
 
 pub use capability::{detect_host_terminal, inside_multiplexer, Capabilities, HostTerminal};
 pub use kitty::{is_kitty_response, KittyPassthrough};
-pub use placement::{Placement, PlacementStore};
-pub use sixel::SixelPassthrough;
+pub use placement::{
+    compute_placement_geometry, hide_all_placements, is_occluded_by_higher_window, position_changed,
+    refresh_all_placements, Placement, PlacementGeometry, PlacementStore, RefreshResult,
+    WindowPositionInfo,
+};
+pub use sixel::{SixelPassthrough, SixelPassthroughPlacement};

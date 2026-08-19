@@ -11,11 +11,15 @@
 //!   - placement coordinates (`x=`, `y=`) to absolute screen positions
 //!   - and forwards the payload bytes verbatim (no decode/re-encode).
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Mutex;
 
 use super::capability::Capabilities;
-use super::placement::PlacementStore;
+use super::placement::{
+    hide_all_placements, refresh_all_placements, PassthroughPlacement, PlacementGeometry,
+    PlacementStore, WindowPositionInfo,
+};
 
 /// True if a graphics payload looks like an echoed kitty protocol response
 /// rather than real image data. Matched against the RAW wire payload (the
@@ -220,6 +224,69 @@ impl KittyPassthrough {
         Ok(())
     }
 
+    /// Refresh all placements across all windows using the full geometry
+    /// logic (occlusion, clipping, alt-screen handling). This is the Rust
+    /// equivalent of Go's `KittyPassthrough.RefreshAllPlacements`.
+    ///
+    /// For each placement, this:
+    /// - Calculates the current screen position based on window geometry
+    /// - Detects occlusion by higher-z windows
+    /// - Calculates clipping (ClipTop, ClipBottom, ClipLeft, ClipRight)
+    /// - Hides placements that are fully occluded or out of viewport
+    /// - Emits re-placement commands only when position changes
+    /// - Handles alt screen mode (skips placements when in alt screen)
+    /// - Clamps to screen boundaries
+    pub fn refresh_all_placements(
+        &self,
+        all_windows: &HashMap<u32, WindowPositionInfo>,
+    ) -> std::io::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let mut store = self.placements.lock().unwrap();
+        let result = refresh_all_placements(
+            &mut store,
+            all_windows,
+            |p, geo, out| {
+                emit_place_one(p, geo, out);
+            },
+            |p, out| {
+                emit_hide_one(p, out);
+            },
+        );
+        drop(store);
+        if !result.output.is_empty() {
+            let mut out = self.host_out.lock().unwrap();
+            out.write_all(&result.output)?;
+            out.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Hide all visible image placements. Used during resize to prevent stale
+    /// positions. `refresh_all_placements` will re-place them.
+    pub fn hide_all_placements(&self) -> std::io::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let mut store = self.placements.lock().unwrap();
+        let output = hide_all_placements(&mut store, |p, out| {
+            emit_hide_one(p, out);
+        });
+        drop(store);
+        if !output.is_empty() {
+            let mut out = self.host_out.lock().unwrap();
+            out.write_all(&output)?;
+            out.flush()?;
+        }
+        Ok(())
+    }
+
+    /// True if any window has passthrough placements.
+    pub fn has_any_placements(&self) -> bool {
+        self.placements.lock().unwrap().has_any_passthrough()
+    }
+
     /// Clear everything (host reset).
     pub fn clear_all(&self) -> std::io::Result<()> {
         self.placements.lock().unwrap().clear_all();
@@ -232,6 +299,113 @@ impl KittyPassthrough {
         out.flush()?;
         Ok(())
     }
+}
+
+/// Emit a kitty delete-placement command (d=i, keeps image data resident so
+/// a subsequent a=p can re-show without retransmitting). Ported from Go's
+/// `deleteOnePlacement`.
+fn emit_hide_one(p: &PassthroughPlacement, out: &mut Vec<u8>) {
+    let _ = write!(out, "\x1b_Ga=d,d=i,i={},q=2\x1b\\", p.host_image_id);
+}
+
+/// Emit a kitty re-place command (a=p) at the computed geometry. Ported from
+/// Go's `placeOne`. Uses a stable placement id so the same (i, p) replaces
+/// in-place rather than stacking.
+fn emit_place_one(p: &PassthroughPlacement, geo: &PlacementGeometry, out: &mut Vec<u8>) {
+    // Use a stable, non-zero placement ID so we can delete the previous
+    // placement unambiguously before creating a new one.
+    let placement_id = if p.placement_id == 0 { 1 } else { p.placement_id };
+
+    // Save cursor, move to target position, emit a=p, restore cursor.
+    out.extend_from_slice(b"\x1b7");
+    let _ = write!(out, "\x1b[{};{}H", geo.host_y + 1, geo.host_x + 1);
+    out.extend_from_slice(b"\x1b_G");
+    let _ = write!(out, "a=p,i={},p={}", p.host_image_id, placement_id);
+
+    // Visible rows/cols (clamped).
+    let visible_rows = if geo.max_showable_rows > 0 {
+        geo.max_showable_rows
+    } else if p.display_rows > 0 {
+        p.display_rows
+    } else if p.rows > 0 {
+        p.rows
+    } else {
+        1
+    };
+    let visible_cols = if geo.max_showable_cols > 0 && geo.max_showable_cols < p.cols {
+        geo.max_showable_cols
+    } else {
+        p.cols
+    };
+
+    if visible_cols > 0 {
+        let _ = write!(out, ",c={}", visible_cols);
+    }
+    if visible_rows > 0 {
+        let _ = write!(out, ",r={}", visible_rows);
+    }
+
+    // Source clipping parameters: emit the full x,y,w,h rectangle when
+    // clipping is needed so kitty crops the source to the visible slice.
+    let is_clipping = geo.clip_top > 0 || geo.clip_bottom > 0 || visible_cols < p.cols;
+    if is_clipping {
+        let pixels_per_row = if p.rows > 0 && p.image_pixel_height > 0 {
+            p.image_pixel_height / p.rows
+        } else if p.rows > 0 && p.source_height > 0 {
+            p.source_height / p.rows
+        } else {
+            20
+        };
+        let pixels_per_col = if p.cols > 0 && p.image_pixel_width > 0 {
+            p.image_pixel_width / p.cols
+        } else if p.cols > 0 && p.source_width > 0 {
+            p.source_width / p.cols
+        } else {
+            9
+        };
+
+        let src_x = p.source_x;
+        let src_y = p.source_y + geo.clip_top * pixels_per_row;
+        let mut src_w = p.source_width;
+        if src_w == 0 && pixels_per_col > 0 {
+            src_w = p.cols * pixels_per_col;
+        }
+        if visible_cols < p.cols && pixels_per_col > 0 {
+            src_w = visible_cols * pixels_per_col;
+        }
+        let mut src_h = visible_rows * pixels_per_row;
+        if p.image_pixel_height > 0 && src_y + src_h > p.image_pixel_height {
+            src_h = (p.image_pixel_height - src_y).max(0);
+        }
+        if p.image_pixel_width > 0 && src_x + src_w > p.image_pixel_width {
+            src_w = (p.image_pixel_width - src_x).max(0);
+        }
+        let _ = write!(out, ",x={},y={},w={},h={}", src_x, src_y, src_w, src_h);
+    } else if p.source_width > 0 || p.source_height > 0 {
+        if p.source_x > 0 {
+            let _ = write!(out, ",x={}", p.source_x);
+        }
+        if p.source_y > 0 {
+            let _ = write!(out, ",y={}", p.source_y);
+        }
+        if p.source_width > 0 {
+            let _ = write!(out, ",w={}", p.source_width);
+        }
+        if p.source_height > 0 {
+            let _ = write!(out, ",h={}", p.source_height);
+        }
+    }
+
+    if p.x_offset > 0 {
+        let _ = write!(out, ",X={}", p.x_offset);
+    }
+    if p.y_offset > 0 {
+        let _ = write!(out, ",Y={}", p.y_offset);
+    }
+    if p.z_index != 0 {
+        let _ = write!(out, ",z={}", p.z_index);
+    }
+    out.extend_from_slice(b",q=2\x1b\\\x1b8");
 }
 
 #[cfg(test)]
@@ -347,5 +521,218 @@ mod tests {
         // No placements — should be a no-op.
         kp.refresh_placements(1, 10, 5).unwrap();
         assert!(!kp.has_placements(1));
+    }
+
+    fn shared_writer() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        Box<dyn Write + Send>,
+    ) {
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+        let buf: Arc<StdMutex<Vec<u8>>> = Arc::new(StdMutex::new(Vec::new()));
+        struct SharedWriter(Arc<StdMutex<Vec<u8>>>);
+        impl Write for SharedWriter {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf_clone = buf.clone();
+        (buf, Box::new(SharedWriter(buf_clone)))
+    }
+
+    #[test]
+    fn refresh_all_placements_places_visible() {
+        let (buf, writer) = shared_writer();
+        let kp = KittyPassthrough::new(test_caps(true), writer);
+
+        {
+            let mut store = kp.placements.lock().unwrap();
+            let mut p = PassthroughPlacement::new(1, 1, 1);
+            p.cols = 10;
+            p.rows = 5;
+            p.absolute_line = 0;
+            p.hidden = true;
+            store.place_passthrough(1, p);
+        }
+
+        let mut windows = HashMap::new();
+        windows.insert(
+            1,
+            WindowPositionInfo {
+                window_x: 5,
+                window_y: 5,
+                width: 80,
+                height: 24,
+                visible: true,
+                screen_width: 200,
+                screen_height: 100,
+                window_z: 1,
+                ..Default::default()
+            },
+        );
+
+        kp.refresh_all_placements(&windows).unwrap();
+        let buf_inner = buf.lock().unwrap();
+        let s = String::from_utf8_lossy(&buf_inner);
+        assert!(s.contains("a=p,i=1"), "should emit place command: {s:?}");
+        assert!(s.contains("\x1b[6;6H"), "should position at (5,5): {s:?}");
+    }
+
+    #[test]
+    fn refresh_all_placements_hides_occluded() {
+        let (buf, writer) = shared_writer();
+        let kp = KittyPassthrough::new(test_caps(true), writer);
+
+        {
+            let mut store = kp.placements.lock().unwrap();
+            let mut p = PassthroughPlacement::new(1, 1, 1);
+            p.cols = 10;
+            p.rows = 10;
+            p.absolute_line = 0;
+            p.hidden = false;
+            store.place_passthrough(1, p);
+        }
+
+        let mut windows = HashMap::new();
+        windows.insert(
+            1,
+            WindowPositionInfo {
+                width: 80,
+                height: 24,
+                visible: true,
+                window_z: 1,
+                ..Default::default()
+            },
+        );
+        windows.insert(
+            2,
+            WindowPositionInfo {
+                width: 80,
+                height: 24,
+                visible: true,
+                window_z: 10,
+                ..Default::default()
+            },
+        );
+
+        kp.refresh_all_placements(&windows).unwrap();
+        let buf_inner = buf.lock().unwrap();
+        let s = String::from_utf8_lossy(&buf_inner);
+        assert!(s.contains("a=d,d=i,i=1"), "should emit hide: {s:?}");
+        assert!(!s.contains("a=p,i=1"), "should not place occluded: {s:?}");
+    }
+
+    #[test]
+    fn refresh_all_placements_no_replace_when_unchanged() {
+        let (buf, writer) = shared_writer();
+        let kp = KittyPassthrough::new(test_caps(true), writer);
+
+        {
+            let mut store = kp.placements.lock().unwrap();
+            let mut p = PassthroughPlacement::new(1, 1, 1);
+            p.cols = 10;
+            p.rows = 5;
+            p.absolute_line = 0;
+            p.host_x = 5;
+            p.host_y = 5;
+            p.clip_top = 0;
+            p.clip_bottom = 0;
+            p.max_showable = 5;
+            p.max_showable_cols = 10;
+            p.hidden = false;
+            p.is_placed = true;
+            p.placed_at_x = 5;
+            p.placed_at_y = 5;
+            store.place_passthrough(1, p);
+        }
+
+        let mut windows = HashMap::new();
+        windows.insert(
+            1,
+            WindowPositionInfo {
+                window_x: 5,
+                window_y: 5,
+                width: 80,
+                height: 24,
+                visible: true,
+                screen_width: 200,
+                screen_height: 100,
+                window_z: 1,
+                ..Default::default()
+            },
+        );
+
+        kp.refresh_all_placements(&windows).unwrap();
+        let buf_inner = buf.lock().unwrap();
+        let s = String::from_utf8_lossy(&buf_inner);
+        assert!(
+            !s.contains("a=p,i=1"),
+            "should not re-place when unchanged: {s:?}"
+        );
+    }
+
+    #[test]
+    fn hide_all_placements_emits_delete() {
+        let (buf, writer) = shared_writer();
+        let kp = KittyPassthrough::new(test_caps(true), writer);
+
+        {
+            let mut store = kp.placements.lock().unwrap();
+            let mut p = PassthroughPlacement::new(1, 1, 1);
+            p.cols = 10;
+            p.rows = 5;
+            p.hidden = false;
+            store.place_passthrough(1, p);
+        }
+
+        kp.hide_all_placements().unwrap();
+        let buf_inner = buf.lock().unwrap();
+        let s = String::from_utf8_lossy(&buf_inner);
+        assert!(s.contains("a=d,d=i,i=1"), "should emit delete: {s:?}");
+    }
+
+    #[test]
+    fn has_any_placements_detects() {
+        let kp = KittyPassthrough::new(test_caps(true), Box::new(std::io::sink()));
+        assert!(!kp.has_any_placements());
+        {
+            let mut store = kp.placements.lock().unwrap();
+            store.place_passthrough(1, PassthroughPlacement::new(1, 1, 1));
+        }
+        assert!(kp.has_any_placements());
+    }
+
+    #[test]
+    fn emit_place_one_writes_apc() {
+        let mut out = Vec::new();
+        let mut p = PassthroughPlacement::new(10, 1, 1);
+        p.cols = 10;
+        p.rows = 5;
+        let geo = PlacementGeometry {
+            host_x: 5,
+            host_y: 10,
+            max_showable_rows: 5,
+            max_showable_cols: 10,
+            ..Default::default()
+        };
+        emit_place_one(&p, &geo, &mut out);
+        let s = String::from_utf8_lossy(&out);
+        assert!(s.contains("a=p,i=1"), "should contain a=p: {s:?}");
+        assert!(s.contains("\x1b[11;6H"), "should position cursor: {s:?}");
+        assert!(s.contains(",c=10"), "should contain cols: {s:?}");
+        assert!(s.contains(",r=5"), "should contain rows: {s:?}");
+    }
+
+    #[test]
+    fn emit_hide_one_writes_delete() {
+        let mut out = Vec::new();
+        let p = PassthroughPlacement::new(10, 5, 1);
+        emit_hide_one(&p, &mut out);
+        let s = String::from_utf8_lossy(&out);
+        assert!(s.contains("a=d,d=i,i=5"), "should contain delete: {s:?}");
     }
 }

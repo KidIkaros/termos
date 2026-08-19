@@ -9,6 +9,8 @@
 pub mod actions;
 pub mod agent_alert;
 pub mod copymode_ext;
+pub mod dock;
+pub mod dock_session_buttons;
 pub mod effect;
 pub mod input;
 pub mod interaction;
@@ -1709,16 +1711,77 @@ impl Os {
     /// Re-emit placement commands for all windows at their current pane
     /// positions. Called after a layout change (resize, move, workspace
     /// switch) so images follow their panes.
+    ///
+    /// This builds `WindowPositionInfo` for every window in the current
+    /// workspace and delegates to the kitty and sixel passthrough refresh
+    /// logic, which handles occlusion detection, clipping, alt-screen
+    /// mismatch, and change detection.
     pub fn refresh_all_placements(&self) {
-        if self.kitty_passthrough.is_none() {
+        if self.kitty_passthrough.is_none() && self.sixel_passthrough.is_none() {
             return;
         }
-        let origins = self.compute_pane_origins();
-        for (i, (px, py)) in origins.iter().enumerate() {
-            if let Some(kp) = &self.kitty_passthrough {
-                let _ = kp.refresh_placements(i as u32, *px, *py);
-            }
+        let all_windows = self.compute_all_window_positions();
+        if let Some(kp) = &self.kitty_passthrough {
+            let _ = kp.refresh_all_placements(&all_windows);
         }
+        if let Some(sp) = &self.sixel_passthrough {
+            let cell_height = 20;
+            let host_height = self.height;
+            sp.refresh_placements(
+                &|wid| all_windows.get(&wid).cloned(),
+                cell_height,
+                host_height,
+            );
+        }
+    }
+
+    /// Compute `WindowPositionInfo` for every window on the current workspace,
+    /// keyed by window index (as u32). This is the geometry snapshot the
+    /// placement refresh logic needs: absolute screen position, content
+    /// offsets, scroll state, z-index, and visibility.
+    fn compute_all_window_positions(
+        &self,
+    ) -> HashMap<u32, crate::graphics::placement::WindowPositionInfo> {
+        let ws = self.current_workspace;
+        let bounds = self.workspace_bounds(ws);
+        let rects = self.workspace(ws).tree.apply_layout(bounds, self.gap);
+        let mut result = HashMap::new();
+        for (i, w) in self.windows.iter().enumerate() {
+            let Some(rect) = rects.get(&(i as i32)) else {
+                continue;
+            };
+            let border_offset = if w.tiled { 0 } else { 1 };
+            let (scrollback_len, scroll_offset, is_alt) = {
+                match w.emulator.try_lock() {
+                    Ok(emu) => (
+                        emu.scrollback_len() as i32,
+                        w.scrollback_offset() as i32,
+                        emu.is_alt_screen(),
+                    ),
+                    Err(_) => (0, w.scrollback_offset() as i32, false),
+                }
+            };
+            result.insert(
+                i as u32,
+                crate::graphics::placement::WindowPositionInfo {
+                    window_x: rect.x,
+                    window_y: rect.y,
+                    content_offset_x: border_offset,
+                    content_offset_y: border_offset,
+                    width: rect.w,
+                    height: rect.h,
+                    visible: true,
+                    scrollback_len,
+                    scroll_offset,
+                    is_being_manipulated: false,
+                    screen_width: self.width,
+                    screen_height: self.height,
+                    window_z: 1,
+                    is_alt_screen: is_alt,
+                },
+            );
+        }
+        result
     }
 
     // -----------------------------------------------------------------------
