@@ -150,7 +150,7 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
             // `daemon --no-restore` skips auto-restoring saved sessions
             // (mirrors Go's daemon flag; `tuios resurrect` restores on demand).
             // `daemon --log-level <level>` sets the debug log level.
-            let daemon_opts = termos::cli::parse_daemon_args(&args[2..])?;
+            let daemon_opts = termos::cli::parse_daemon_args(&args[1..])?;
             let daemon = Arc::new(Daemon::new());
             daemon.load_hooks(&UserConfig::load().hooks);
             if !daemon_opts.no_restore {
@@ -161,15 +161,15 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
             daemon.run_default()?;
             Ok(())
         }
-        "list" | "ls" => cmd_list(&args[2..]),
+        "list" | "ls" => cmd_list(&args[1..]),
         "kill" => {
-            let name = args.get(2).ok_or("usage: tuios kill <name>")?;
+            let name = args.get(1).ok_or("usage: tuios kill <name>")?;
             cmd_kill(name)
         }
         "attach" => {
             let mut name: Option<&str> = None;
             let mut create = false;
-            let mut i = 2;
+            let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
                     "-c" | "--create" => create = true,
@@ -189,7 +189,7 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
         "run" | "new" => {
             let mut name: Option<&str> = None;
             let mut detach = false;
-            let mut i = 2;
+            let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
                     "-d" | "--detach" => detach = true,
@@ -211,7 +211,7 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
             }
         }
         "resurrect" => {
-            let name = args.get(2).map(|s| s.as_str());
+            let name = args.get(1).map(|s| s.as_str());
             cmd_resurrect(name)
         }
         "start-server" => {
@@ -222,38 +222,41 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
             Ok(())
         }
         "kill-server" => cmd_kill_server(),
-        "session-info" => cmd_session_info(&args[2..]),
-        "list-windows" => cmd_list_windows(&args[2..]),
-        "set-session-name" => cmd_set_session_name(&args[2..]),
-        "set-session-accent" => cmd_set_session_accent(&args[2..]),
-        "logs" => cmd_logs(&args[2..]),
+        "session-info" => cmd_session_info(&args[1..]),
+        "list-windows" => cmd_list_windows(&args[1..]),
+        "set-session-name" => cmd_set_session_name(&args[1..]),
+        "set-session-accent" => cmd_set_session_accent(&args[1..]),
+        "logs" => cmd_logs(&args[1..]),
         "layout" => {
-            let sub = args.get(2).map(|s| s.as_str()).unwrap_or("list");
-            cmd_layout(sub, &args[3..])
+            let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
+            cmd_layout(sub, &args[2..])
         }
-        "set-agent-state" => cmd_set_agent_state(&args[2..]),
-        "get-agent-state" => cmd_agent_verb(&args[2..], Verb::GetAgentState),
-        "send-keys" => cmd_agent_verb(&args[2..], Verb::SendKeys),
-        "send-text" => cmd_agent_verb(&args[2..], Verb::SendText),
-        "capture-pane" => cmd_agent_verb(&args[2..], Verb::CapturePane),
-        "wait-for" => cmd_agent_verb(&args[2..], Verb::WaitFor),
-        "list-verbs" => cmd_list_verbs(&args[2..]),
-        "ssh" => cmd_ssh(&args[2..]),
-        "new-window" => cmd_new_window(&args[2..]),
-        "run-command" => cmd_run_command(&args[2..]),
-        "set-config" => cmd_set_config(&args[2..]),
-        "get-config" => cmd_get_config(&args[2..]),
-        "explain-agent-screen" => cmd_explain_agent_screen(&args[2..]),
-        "set-workspace-name" => cmd_set_workspace_name(&args[2..]),
-        "get-window" => cmd_get_window(&args[2..]),
+        "set-agent-state" => cmd_set_agent_state(&args[1..]),
+        "get-agent-state" => cmd_agent_verb(&args[1..], Verb::GetAgentState),
+        "send-keys" => cmd_agent_verb(&args[1..], Verb::SendKeys),
+        "send-text" => cmd_agent_verb(&args[1..], Verb::SendText),
+        "capture-pane" => cmd_agent_verb(&args[1..], Verb::CapturePane),
+        "wait-for" => cmd_agent_verb(&args[1..], Verb::WaitFor),
+        "list-verbs" => cmd_list_verbs(&args[1..]),
+        "action" => cmd_action(&args[1..]),
+        "subscribe" => cmd_subscribe(&args[1..]),
+        "block-until-exit" => cmd_block_until_exit(&args[1..]),
+        "ssh" => cmd_ssh(&args[1..]),
+        "new-window" => cmd_new_window(&args[1..]),
+        "run-command" => cmd_run_command(&args[1..]),
+        "set-config" => cmd_set_config(&args[1..]),
+        "get-config" => cmd_get_config(&args[1..]),
+        "explain-agent-screen" => cmd_explain_agent_screen(&args[1..]),
+        "set-workspace-name" => cmd_set_workspace_name(&args[1..]),
+        "get-window" => cmd_get_window(&args[1..]),
         "completion" => {
             let shell = args
-                .get(2)
+                .get(1)
                 .ok_or("usage: tuios completion <bash|zsh|fish>")?;
             cmd_completion(shell)
         }
         "config" => {
-            let sub = args.get(2).map(|s| s.as_str()).unwrap_or("show");
+            let sub = args.get(1).map(|s| s.as_str()).unwrap_or("show");
             match termos::cli::ConfigCommand::parse(sub) {
                 Some(termos::cli::ConfigCommand::Show) => {
                     let path = termos::cli::config_path();
@@ -341,7 +344,7 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
             }
         }
         "keybinds" => {
-            let sub = args.get(2).map(|s| s.as_str()).unwrap_or("list");
+            let sub = args.get(1).map(|s| s.as_str()).unwrap_or("list");
             match sub {
                 "list" => {
                     let registry = termos::config::registry::KeybindRegistry::new();
@@ -362,7 +365,7 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
                 }
                 "list-custom" => cmd_keybinds_list_custom(),
                 "describe" => {
-                    let name = args.get(3).ok_or("usage: tuios keybinds describe <action>")?;
+                    let name = args.get(2).ok_or("usage: tuios keybinds describe <action>")?;
                     let registry = termos::config::registry::KeybindRegistry::new();
                     let bindings = termos::config::keybindings::get_prefix_keybindings("", false);
                     let hit = bindings
@@ -381,23 +384,23 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
             }
         }
         "tape" => {
-            let sub = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            let sub = args.get(1).map(|s| s.as_str()).unwrap_or("");
             match sub {
                 "play" => {
-                    let file = args.get(3).ok_or("usage: tuios tape play <file.tape>")?;
+                    let file = args.get(2).ok_or("usage: tuios tape play <file.tape>")?;
                     cmd_tape_play(file)
                 }
                 "validate" => {
-                    let file = args.get(3).ok_or("usage: tuios tape validate <file.tape>")?;
+                    let file = args.get(2).ok_or("usage: tuios tape validate <file.tape>")?;
                     cmd_tape_validate(file)
                 }
                 "list" | "ls" => cmd_tape_list(),
                 "show" => {
-                    let name = args.get(3).ok_or("usage: tuios tape show <name>")?;
+                    let name = args.get(2).ok_or("usage: tuios tape show <name>")?;
                     cmd_tape_show(name)
                 }
                 "delete" | "rm" => {
-                    let name = args.get(3).ok_or("usage: tuios tape delete <name>")?;
+                    let name = args.get(2).ok_or("usage: tuios tape delete <name>")?;
                     cmd_tape_delete(name)
                 }
                 "dir" => {
@@ -408,7 +411,7 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
                 "exec" => {
                     let mut session: Option<String> = None;
                     let mut file: Option<String> = None;
-                    let mut i = 3;
+                    let mut i = 2;
                     while i < args.len() {
                         match args[i].as_str() {
                             "-s" | "--session" => {
@@ -522,6 +525,9 @@ fn print_help() {
     println!("    capture-pane <args> [-S] [--ansi] [--lines N]  Capture pane content");
     println!("    wait-for <args> [--idle N] [--timeout N] [--json]  Wait for a condition");
     println!("    list-verbs [verb] [--json] List control protocol verbs");
+    println!("    action <verb> [k=v ...] [--json]  Call any control-protocol verb (see docs/CONTROL_SURFACE.md)");
+    println!("    subscribe [-s S] [-w W] [--json]  Tail a pane's output stream");
+    println!("    block-until-exit [-s S] [-w W] [--success|--failure] [--timeout ms]  Wait for a pane to exit");
     println!("    new-window [name] [--json]  Open a new window in a session");
     println!("    run-command <cmd> [args] [--list] [--json]  Execute tape commands remotely");
     println!("    set-config <path> <value>  Set a runtime config option");
@@ -540,6 +546,9 @@ fn print_help() {
     println!("    termos attach my-session -c    # Attach, creating if missing");
     println!("    termos new-window build        # Open a named window");
     println!("    termos send-keys -l --raw 'echo hello'  # Send literal text to PTY");
+    println!("    termos ls --json -W          # List sessions and windows as JSON");
+    println!("    termos subscribe -s dev -w w0  # Tail w0's output until exit");
+    println!("    termos block-until-exit -s dev -w w0 --failure --timeout 10000");
     println!("    termos capture-pane -S --lines 40  # Capture last 40 lines of scrollback");
     println!("    termos tape play demo.tape     # Play a tape script");
     println!("    termos completion bash         # Generate bash completions");
@@ -547,22 +556,50 @@ fn print_help() {
 
 fn cmd_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut json = false;
+    let mut windows = false;
     for a in args {
-        if a == "--json" {
-            json = true;
+        match a.as_str() {
+            "--json" => json = true,
+            "--windows" | "-W" => windows = true,
+            a if a.starts_with('-') => return Err(format!("unknown flag '{a}'").into()),
+            _ => return Err(format!("unexpected argument '{a}'").into()),
         }
     }
     let client = DaemonClient::connect()?;
     let sessions = client.list()?;
     if json {
-        let val = serde_json::json!({ "sessions": sessions });
-        println!("{}", serde_json::to_string_pretty(&val)?);
+        if windows {
+            let mut out = serde_json::Map::new();
+            let mut list = Vec::new();
+            let mut vc = connect_verb_client()?;
+            for s in &sessions {
+                let info = serde_json::json!({
+                    "name": s.name,
+                    "id": s.id,
+                    "attached": s.attached,
+                    "windows": vc
+                        .request_json(
+                            "list-windows",
+                            serde_json::json!({ "session": s.name }),
+                        )
+                        .map(|w| w.get("windows").cloned().unwrap_or(serde_json::json!([])))
+                        .unwrap_or(serde_json::json!([])),
+                });
+                list.push(info);
+            }
+            out.insert("sessions".into(), serde_json::Value::Array(list));
+            println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(out))?);
+        } else {
+            let val = serde_json::json!({ "sessions": sessions });
+            println!("{}", serde_json::to_string_pretty(&val)?);
+        }
         return Ok(());
     }
     if sessions.is_empty() {
         println!("no sessions");
         return Ok(());
     }
+    let mut vc = windows.then_some(()).map(|_| connect_verb_client()).transpose()?;
     for s in sessions {
         let mut line = format!("{}\t{} window(s)", s.name, s.windows);
         if s.attached {
@@ -572,8 +609,243 @@ fn cmd_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             line.push_str("\t(restored)");
         }
         println!("{line}");
+        if windows {
+            if let Some(vc) = vc.as_mut() {
+                if let Ok(w) = vc.request_json(
+                    "list-windows",
+                    serde_json::json!({ "session": s.name }),
+                ) {
+                    if let Some(ws) = w.get("windows").and_then(|x| x.as_array()) {
+                        for win in ws {
+                            let id = win.get("id").and_then(|x| x.as_str()).unwrap_or("?");
+                            let title = win.get("title").and_then(|x| x.as_str()).unwrap_or("?");
+                            let cols = win.get("cols").and_then(|x| x.as_u64()).unwrap_or(0);
+                            let rows = win.get("rows").and_then(|x| x.as_u64()).unwrap_or(0);
+                            let ws_n = win.get("workspace").and_then(|x| x.as_i64()).unwrap_or(1);
+                            println!("  {id}\t{title}\t{cols}x{rows}\tws {ws_n}");
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(())
+}
+
+/// `termos action <verb> [key=value ...] [--json]` — drive any verb of the
+/// daemon's public control protocol (the same surface `list-verbs`
+/// documents). Parameters are passed as `key=value` pairs; values are
+/// strings (the daemon coerces as needed).
+fn cmd_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut json = false;
+    let mut verb: Option<String> = None;
+    let mut params = serde_json::Map::new();
+    for a in args {
+        match a.as_str() {
+            "--json" => json = true,
+            a if a.starts_with('-') && a != "-" => {
+                return Err(format!("unknown flag '{a}'").into());
+            }
+            _ => {
+                if verb.is_none() {
+                    verb = Some(a.to_string());
+                } else if let Some((k, v)) = a.split_once('=') {
+                    params.insert(k.to_string(), parse_param_value(v));
+                } else {
+                    return Err(
+                        format!("parameters must be key=value pairs (got '{a}')").into(),
+                    );
+                }
+            }
+        }
+    }
+    let verb = verb.ok_or("usage: termos action <verb> [key=value ...] [--json]")?;
+    let mut client = connect_verb_client()?;
+    let resp = match client.request(&verb, serde_json::Value::Object(params)) {
+        Ok(r) => r,
+        Err(termos::session::verb_client::VerbClientError::Verb(e)) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        Err(termos::session::verb_client::VerbClientError::Io(e)) => {
+            return Err(e.into());
+        }
+    };
+    print_verb_response(&resp, json);
+    Ok(())
+}
+
+/// Parse a `key=value` parameter: JSON-shaped values (numbers, booleans,
+/// null, arrays, objects, quoted strings) become typed JSON so the daemon
+/// receives `timeout=5000` as a number, while anything else stays a plain
+/// string (`text=exit 0`, `pattern=test.*`).
+fn parse_param_value(v: &str) -> serde_json::Value {
+    if v.starts_with('{') || v.starts_with('[') || v.starts_with('"')
+        || v == "true" || v == "false" || v == "null"
+    {
+        return serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.into()));
+    }
+    if let Ok(n) = v.parse::<i64>() {
+        return serde_json::Value::from(n);
+    }
+    if let Ok(f) = v.parse::<f64>() {
+        return serde_json::Value::from(f);
+    }
+    serde_json::Value::String(v.to_string())
+}
+
+/// Connect a verb-protocol client, with a helpful message when the daemon
+/// is not reachable.
+fn connect_verb_client() -> Result<termos::session::VerbClient, Box<dyn std::error::Error>> {
+    termos::session::VerbClient::connect().map_err(|e| {
+        format!(
+            "cannot connect to the daemon at {}: {e}\n\nstart it with `termos daemon` (or point TERMOS_SOCKET at it)",
+            termos::session::default_socket_path().display()
+        )
+        .into()
+    })
+}
+
+/// Print a verb response: pretty JSON with `--json`, compact JSON otherwise.
+/// The caller is responsible for turning verb errors into exit codes.
+fn print_verb_response(resp: &termos::session::VerbResponse, json: bool) {
+    if let Some(result) = &resp.result {
+        if json {
+            println!("{}", serde_json::to_string_pretty(result).unwrap_or_default());
+        } else {
+            println!("{}", serde_json::to_string(result).unwrap_or_default());
+        }
+    } else if let Some(err) = &resp.error {
+        eprintln!("error: {err}");
+    }
+}
+
+/// `termos subscribe [-s session] [-w window] [--json]` — tail a pane's raw
+/// output as it is produced (plain mode prints just the data; `--json` prints
+/// each streamed event). Ends when the window's shell exits or is closed.
+fn cmd_subscribe(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut session: Option<String> = None;
+    let mut window: Option<String> = None;
+    let mut json = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                session = args.get(i).cloned();
+            }
+            "-w" | "--window" => {
+                i += 1;
+                window = args.get(i).cloned();
+            }
+            "--json" => json = true,
+            a if a.starts_with('-') => {
+                return Err(format!("unknown flag '{a}'").into());
+            }
+            a => {
+                return Err(format!("unexpected argument '{a}'").into());
+            }
+        }
+        i += 1;
+    }
+    let mut params = serde_json::Map::new();
+    if let Some(s) = session {
+        params.insert("session".into(), serde_json::Value::String(s));
+    }
+    if let Some(w) = window {
+        params.insert("window".into(), serde_json::Value::String(w));
+    }
+    let mut client = connect_verb_client()?;
+    client.stream(
+        "subscribe",
+        serde_json::Value::Object(params),
+        |line| {
+            if json {
+                println!("{}", serde_json::to_string_pretty(line).unwrap_or_default());
+            } else if let Some(data) = line.get("data").and_then(|d| d.as_str()) {
+                print!("{data}");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+            }
+            // Stop after the terminal closed event.
+            !line.get("closed").and_then(|c| c.as_bool()).unwrap_or(false)
+        },
+    )?;
+    Ok(())
+}
+
+/// `termos block-until-exit [-s session] [-w window] [--success|--failure]
+/// [--timeout ms]` — block until the pane's shell exits, then report the
+/// exit code. The process exit status is 0 when the requested condition is
+/// met, 1 when it is not, and 2 on timeout or error (so scripts can chain
+/// retries).
+fn cmd_block_until_exit(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut session: Option<String> = None;
+    let mut window: Option<String> = None;
+    let mut want: Option<bool> = None; // None = plain success
+    let mut timeout: u64 = 30_000;
+    let mut json = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                session = args.get(i).cloned();
+            }
+            "-w" | "--window" => {
+                i += 1;
+                window = args.get(i).cloned();
+            }
+            "--success" => want = Some(true),
+            "--failure" => want = Some(false),
+            "--timeout" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    timeout = v.parse().unwrap_or(30_000);
+                }
+            }
+            "--json" => json = true,
+            a if a.starts_with('-') => {
+                return Err(format!("unknown flag '{a}'").into());
+            }
+            a => {
+                return Err(format!("unexpected argument '{a}'").into());
+            }
+        }
+        i += 1;
+    }
+    let mut params = serde_json::Map::new();
+    if let Some(s) = session {
+        params.insert("session".into(), serde_json::Value::String(s));
+    }
+    if let Some(w) = window {
+        params.insert("window".into(), serde_json::Value::String(w));
+    }
+    params.insert("timeout".into(), serde_json::Value::from(timeout.to_string()));
+
+    let mut client = connect_verb_client()?;
+    let result = match client.request_json("block-until-exit", serde_json::Value::Object(params)) {
+        Ok(r) => r,
+        Err(termos::session::verb_client::VerbClientError::Verb(e)) => {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+        Err(termos::session::verb_client::VerbClientError::Io(e)) => {
+            return Err(e.into());
+        }
+    };
+    let exit_code = result.get("exit_code").and_then(|c| c.as_i64()).unwrap_or(-1);
+    let success = result.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("exit code {exit_code}");
+    }
+    let want = want.unwrap_or(true);
+    if success == want {
+        std::process::exit(0);
+    } else {
+        std::process::exit(1);
+    }
 }
 
 fn cmd_kill(name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1898,9 +2170,16 @@ fn cmd_list_windows(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     match target {
         Some(s) => {
             if opts.json {
+                // Full per-window detail (id, geometry, workspace) comes from
+                // the daemon's `list-windows` verb, not the session count.
+                let mut vc = connect_verb_client()?;
+                let windows = vc
+                    .request_json("list-windows", serde_json::json!({ "session": s.name }))
+                    .map(|w| w.get("windows").cloned().unwrap_or(serde_json::json!([])))
+                    .unwrap_or(serde_json::json!([]));
                 let val = serde_json::json!({
                     "session": s.name,
-                    "windows": s.windows,
+                    "windows": windows,
                 });
                 println!("{}", serde_json::to_string_pretty(&val)?);
             } else {
@@ -2464,6 +2743,48 @@ fn preview_theme_colors(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn completion_scripts_include_control_surface_commands() {
+        for script in [
+            super::generate_bash_completions(),
+            super::generate_zsh_completions(),
+            super::generate_fish_completions(),
+        ] {
+            for cmd in ["action", "subscribe", "block-until-exit"] {
+                assert!(
+                    script.contains(cmd),
+                    "completion script missing '{cmd}': {script}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_param_value_keeps_plain_strings() {
+        assert_eq!(super::parse_param_value("exit 0"), serde_json::json!("exit 0"));
+        assert_eq!(super::parse_param_value("test.*"), serde_json::json!("test.*"));
+        assert_eq!(super::parse_param_value("w0"), serde_json::json!("w0"));
+    }
+
+    #[test]
+    fn parse_param_value_types_json_shapes() {
+        assert_eq!(super::parse_param_value("5000"), serde_json::json!(5000));
+        assert_eq!(super::parse_param_value("0"), serde_json::json!(0));
+        assert_eq!(super::parse_param_value("1.5"), serde_json::json!(1.5));
+        assert_eq!(super::parse_param_value("true"), serde_json::json!(true));
+        assert_eq!(super::parse_param_value("null"), serde_json::json!(null));
+        assert_eq!(
+            super::parse_param_value("[\"a\", \"b\"]"),
+            serde_json::json!(["a", "b"])
+        );
+        assert_eq!(
+            super::parse_param_value("\"hello world\""),
+            serde_json::json!("hello world")
+        );
+        // A malformed JSON-looking value degrades to a plain string.
+        assert_eq!(super::parse_param_value("[unclosed"), serde_json::json!("[unclosed"));
+    }
+
     /// The embedded skill must match the on-disk file, so the printed copy
     /// always matches the build (mirrors Go's `skill_test.go`).
     #[test]

@@ -11,7 +11,7 @@
 //! watch the same session at once.
 
 use std::collections::HashMap;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -271,6 +271,10 @@ pub struct Daemon {
     /// Session labels/accents keyed by session name.
     meta: Mutex<HashMap<String, SessionMeta>>,
     windows: Arc<Mutex<HashMap<String, Vec<LiveWindow>>>>,
+    /// Per-session monotonic counter for window ids (`w0`, `w1`, ...).
+    /// Never reuses a number, even after windows close — so ids stay unique
+    /// for the life of the session (scripting targets by id must not collide).
+    win_seq: Mutex<HashMap<String, u64>>,
     broadcast: Mutex<HashMap<String, Arc<SessionBroadcast>>>,
     /// Lifecycle hooks fired daemon-side for the window/session events the
     /// daemon owns (authoritative for daemon-mode windows).
@@ -286,6 +290,15 @@ pub struct Daemon {
     /// (held state, when it was recorded). A quieter state must stand
     /// unchanged for [`OSC_HOLD_WINDOW`] before it is published.
     osc_holds: Arc<Mutex<HashMap<String, (AgentState, std::time::Instant)>>>,
+    /// Exit codes of windows whose shell has exited, keyed by
+    /// (session, window). Populated by the PTY pump at EOF; `-1` marks a
+    /// window terminated by an explicit close. Powers `block-until-exit`
+    /// and the `closed` signal in `subscribe`.
+    exit_statuses: Arc<Mutex<HashMap<(String, String), i32>>>,
+    /// Wake-up channel for `block-until-exit` waiters (fires on every
+    /// recorded exit).
+    exit_tx: crossbeam_channel::Sender<()>,
+    exit_rx: crossbeam_channel::Receiver<()>,
     /// Shutdown flag — set by `KillServer` to stop the accept loop.
     shutdown: Arc<std::sync::atomic::AtomicBool>,
     /// When the daemon started, for uptime reporting in `diagnose`.
@@ -302,15 +315,20 @@ const OSC_HOLD_WINDOW: Duration = Duration::from_millis(700);
 
 impl Daemon {
     pub fn new() -> Self {
+        let (exit_tx, exit_rx) = crossbeam_channel::unbounded();
         Self {
             manager: Manager::new(),
             meta: Mutex::new(HashMap::new()),
             windows: Arc::new(Mutex::new(HashMap::new())),
+            win_seq: Mutex::new(HashMap::new()),
             broadcast: Mutex::new(HashMap::new()),
             hook_manager: crate::hooks::Manager::new(),
             last_active: Mutex::new(HashMap::new()),
             rings: Arc::new(Mutex::new(HashMap::new())),
             osc_holds: Arc::new(Mutex::new(HashMap::new())),
+            exit_statuses: Arc::new(Mutex::new(HashMap::new())),
+            exit_tx,
+            exit_rx,
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             started_at: std::time::Instant::now(),
         }
@@ -374,12 +392,13 @@ impl Daemon {
         };
         let session = self.manager.create(name, &cfg).map_err(|e| e.to_string())?;
         let broadcast = self.broadcast_for(name);
-        let window = self.spawn_window(name, "w0", "Terminal", 1, &cfg.shell, &broadcast)?;
+        let id = self.next_window_id(name);
+        let window = self.spawn_window(name, &id, "Terminal", 1, &cfg.shell, &broadcast)?;
         self.fire_hook(
             crate::hooks::Event::AfterNewWindow,
             name,
             crate::hooks::Context {
-                window_id: "w0".into(),
+                window_id: id.clone(),
                 window_name: "Terminal".into(),
                 workspace: 1,
                 ..crate::hooks::Context::default()
@@ -409,6 +428,14 @@ impl Daemon {
                 Err(e) => log::warn!("failed to respawn window '{id}' in session '{name}': {e}"),
             }
         }
+        // Seed the id counter past the restored windows so new spawns never
+        // collide with ids re-derived from the saved state.
+        self.win_seq
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(name.to_string())
+            .and_modify(|n| *n = (*n).max(state.windows.len() as u64))
+            .or_insert(state.windows.len() as u64);
         self.windows.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_string(), wins);
         Ok(())
     }
@@ -436,6 +463,9 @@ impl Daemon {
         let rings = Arc::clone(&self.rings);
         let pump_windows = Arc::clone(&self.windows);
         let pump_holds = Arc::clone(&self.osc_holds);
+        let pump_pid = handle.pid();
+        let pump_statuses = Arc::clone(&self.exit_statuses);
+        let pump_exit_tx = self.exit_tx.clone();
         std::thread::spawn(move || {
             pump(
                 reader.rx,
@@ -445,6 +475,9 @@ impl Daemon {
                 rings,
                 pump_windows,
                 pump_holds,
+                pump_pid,
+                pump_statuses,
+                pump_exit_tx,
             )
         });
         Ok(LiveWindow {
@@ -916,6 +949,60 @@ impl Daemon {
         }
     }
 
+    /// Block until the window's shell has exited, returning its exit code.
+    /// `timeout_ms == 0` waits indefinitely. Wake-ups come from the exit
+    /// channel (every recorded exit), so the poll is event-driven rather
+    /// than a busy loop.
+    fn block_until_exit(&self, session: &str, window: &str, timeout_ms: u64) -> Result<i32, String> {
+        let deadline = if timeout_ms == 0 {
+            None
+        } else {
+            Some(std::time::Instant::now() + Duration::from_millis(timeout_ms))
+        };
+        loop {
+            let code = self
+                .exit_statuses
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&(session.to_string(), window.to_string()))
+                .copied();
+            if let Some(code) = code {
+                return Ok(code);
+            }
+            match deadline {
+                Some(d) if std::time::Instant::now() >= d => return Err("timeout".into()),
+                _ => {}
+            }
+            let wait = deadline
+                .map(|d| d.saturating_duration_since(std::time::Instant::now()))
+                .unwrap_or(Duration::from_millis(200));
+            let _ = self.exit_rx.recv_timeout(wait.min(Duration::from_millis(200)));
+        }
+    }
+
+    /// Resolve a verb's `session` + optional `window` into a concrete
+    /// (session, window id) pair. A missing session defaults to the only
+    /// session (or errors on zero/multiple); the window resolves by id,
+    /// exact/prefix title, or the most recently active window.
+    fn resolve_verb_target(
+        &self,
+        session: &str,
+        window: Option<&str>,
+    ) -> Result<(String, String), String> {
+        let name = if session.is_empty() {
+            let sessions = self.list_infos();
+            match sessions.len() {
+                1 => sessions[0].name.clone(),
+                0 => return Err("no sessions exist".into()),
+                _ => return Err("multiple sessions exist; pass a session".into()),
+            }
+        } else {
+            session.to_string()
+        };
+        let window = self.resolve_window(&name, window)?;
+        Ok((name, window))
+    }
+
     /// Dispatch one verb-protocol request with daemon state access.
     ///
     /// Verbs that touch daemon state (`list-sessions`, `capture-pane`,
@@ -945,6 +1032,41 @@ impl Daemon {
             "list-sessions" => {
                 let sessions = self.list_infos();
                 Ok(serde_json::json!({ "sessions": sessions }))
+            }
+            "new-session" => {
+                let name = verb_param(params, "name")
+                    .ok_or_else(|| verb_error(ERR_INVALID_PARAMS, "missing name parameter"))?;
+                let shell = verb_param(params, "shell").unwrap_or_default();
+                self.create_session(&name, &shell)
+                    .map_err(|e| verb_error(ERR_COMMAND_FAILED, e))?;
+                let info = self
+                    .list_infos()
+                    .into_iter()
+                    .find(|s| s.name == name)
+                    .ok_or_else(|| verb_error(ERR_SESSION_NOT_FOUND, "session not found"))?;
+                Ok(serde_json::json!({ "session": info }))
+            }
+            "block-until-exit" => {
+                let name = verb_session(params)?;
+                let window = verb_param(params, "window");
+                let timeout_ms = verb_param(params, "timeout")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(30_000);
+                let target = self
+                    .resolve_window(&name, window.as_deref())
+                    .map_err(|e| verb_error(ERR_WINDOW_NOT_FOUND, e))?;
+                match self.block_until_exit(&name, &target, timeout_ms) {
+                    Ok(exit_code) => Ok(serde_json::json!({
+                        "window": target,
+                        "exit_code": exit_code,
+                        "success": exit_code == 0,
+                    })),
+                    Err(e) if e == "timeout" => Err(verb_error(
+                        ERR_TIMEOUT,
+                        "window did not exit before the timeout",
+                    )),
+                    Err(e) => Err(verb_error(ERR_COMMAND_FAILED, e)),
+                }
             }
             "list-windows" => {
                 let name = verb_session(params)?;
@@ -989,8 +1111,13 @@ impl Daemon {
             "capture-pane" => {
                 let name = verb_session(params)?;
                 let window = verb_param(params, "window");
+                // Resolve first so a bad target yields window_not_found
+                // rather than a generic command failure.
+                let target = self
+                    .resolve_window(&name, window.as_deref())
+                    .map_err(|e| verb_error(ERR_WINDOW_NOT_FOUND, e))?;
                 let (target, content) = self
-                    .capture_pane(&name, window.as_deref())
+                    .capture_pane(&name, Some(&target))
                     .map_err(|e| verb_error(ERR_COMMAND_FAILED, e))?;
                 Ok(serde_json::json!({ "window": target, "content": content }))
             }
@@ -1136,12 +1263,22 @@ impl Daemon {
         }
     }
 
+    /// Allocate the next window id for a session. Monotonic per session and
+    /// never reuses a number, even after windows close (see `win_seq`).
+    fn next_window_id(&self, session: &str) -> String {
+        let mut seq = self.win_seq.lock().unwrap_or_else(|e| e.into_inner());
+        let n = seq.entry(session.to_string()).or_insert(0);
+        let id = format!("w{n}");
+        *n += 1;
+        id
+    }
+
     fn add_window(&self, session: &str, shell: &str, workspace: i32) -> Result<WindowInfo, String> {
         let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let wins = windows
             .get_mut(session)
             .ok_or_else(|| format!("session '{session}' not found"))?;
-        let id = format!("w{}", wins.len());
+        let id = self.next_window_id(session);
         let shell = resolve_shell(shell);
         let broadcast = self
             .broadcast
@@ -1189,6 +1326,13 @@ impl Daemon {
             return Err(format!("window '{window}' not found"));
         }
         drop(windows);
+        // A window closed by the user is terminated (SIGHUP + reap in the
+        // handle's Drop); record -1 unless the shell already exited naturally
+        // and the pump recorded its real code.
+        if let Ok(mut st) = self.exit_statuses.lock() {
+            st.entry((session.to_string(), window.to_string())).or_insert(-1);
+        }
+        let _ = self.exit_tx.send(());
         self.save_session(session);
         if let Some(info) = closed {
             self.fire_hook(
@@ -1599,10 +1743,15 @@ fn agent_loudness(state: &AgentState) -> i32 {
 
 /// Extract a string parameter from a verb request's params object.
 fn verb_param(params: &Value, name: &str) -> Option<String> {
-    params
-        .get(name)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    // Accept string parameters plus JSON numbers/bools (clients like
+    // `termos action timeout=5000` send typed values); coerce them to their
+    // string form so verb handlers keep one parsing path.
+    match params.get(name) {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Number(n)) => Some(n.to_string()),
+        Some(Value::Bool(b)) => Some(b.to_string()),
+        _ => None,
+    }
 }
 
 /// The session a verb targets: the `session` param, else the daemon's single
@@ -1638,13 +1787,31 @@ fn handle_verb_client<R: BufRead>(
         if trimmed.is_empty() {
             continue;
         }
-        let response = match serde_json::from_str::<VerbRequest>(trimmed) {
-            Ok(req) => daemon.dispatch_verb(&req),
-            Err(e) => VerbResponse::err(
-                None,
-                verb_error(ERR_INVALID_REQUEST, format!("malformed JSON request: {e}")),
-            ),
+        let req = match serde_json::from_str::<VerbRequest>(trimmed) {
+            Ok(req) => req,
+            Err(e) => {
+                let response = VerbResponse::err(
+                    None,
+                    verb_error(ERR_INVALID_REQUEST, format!("malformed JSON request: {e}")),
+                );
+                let mut out = writer.lock().unwrap_or_else(|e| e.into_inner());
+                if out.write_all(response.to_line().as_bytes()).is_err() {
+                    return;
+                }
+                if out.flush().is_err() {
+                    return;
+                }
+                continue;
+            }
         };
+        // `subscribe` switches this connection to a long-lived output stream
+        // (pane tail), which runs until the window closes or the client
+        // disconnects.
+        if req.verb == "subscribe" {
+            handle_verb_subscribe(writer, daemon, &req);
+            return;
+        }
+        let response = daemon.dispatch_verb(&req);
         let mut out = writer.lock().unwrap_or_else(|e| e.into_inner());
         if out.write_all(response.to_line().as_bytes()).is_err() {
             return;
@@ -1652,6 +1819,115 @@ fn handle_verb_client<R: BufRead>(
         if out.flush().is_err() {
             return;
         }
+    }
+}
+
+/// The `subscribe` verb: tail a window's raw output over this connection.
+///
+/// Replies with an ack line, then streams one JSON line per output chunk
+/// (`{"data": "<lossy utf-8>"}`) and finally a `{"closed": true}` line when
+/// the window's shell exits or the window is closed. The stream ends when
+/// the client disconnects (the read timeout fires on every poll and doubles
+/// as the liveness probe).
+fn handle_verb_subscribe(
+    writer: &Arc<Mutex<UnixStream>>,
+    daemon: &Arc<Daemon>,
+    req: &VerbRequest,
+) {
+    let id = req.id.clone();
+    let params = req.params.clone().unwrap_or(Value::Null);
+    let session = verb_session(&params).unwrap_or_default();
+    let window = verb_param(&params, "window");
+    let (session, window) = match daemon.resolve_verb_target(&session, window.as_deref()) {
+        Ok(t) => t,
+        Err(e) => {
+            let resp = VerbResponse::err(id, verb_error(ERR_WINDOW_NOT_FOUND, e));
+            let mut out = writer.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = out.write_all(resp.to_line().as_bytes());
+            let _ = out.flush();
+            return;
+        }
+    };
+
+    let mut seq = daemon
+        .rings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(session.clone(), window.clone()))
+        .map(|r| r.current_seq())
+        .unwrap_or(0);
+
+    // Ack: the client knows which window it is tailing and the start position.
+    let ack = VerbResponse::ok(
+        id.clone(),
+        serde_json::json!({
+            "window": window,
+            "subscribed": true,
+            "seq": seq,
+        }),
+    );
+    let mut out = writer.lock().unwrap_or_else(|e| e.into_inner());
+    if out.write_all(ack.to_line().as_bytes()).is_err() {
+        return;
+    }
+    if out.flush().is_err() {
+        return;
+    }
+    drop(out);
+
+    // Poll the ring for new output; the 100ms read timeout on the raw
+    // stream doubles as the disconnect probe.
+    if let Ok(s) = writer.lock() {
+        let _ = s.set_read_timeout(Some(Duration::from_millis(100)));
+    }
+    let mut probe = [0u8; 1];
+    loop {
+        // Client disconnect / stray input (unsubscribe) ends the stream.
+        match writer.lock().unwrap_or_else(|e| e.into_inner()).read(&mut probe) {
+            Ok(0) => return, // EOF: client closed the connection
+            Ok(_) => return, // client sent something (unsubscribe) — close the stream
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {}
+            Err(_) => return,
+        }
+
+        let (chunk, closed) = {
+            let rings = daemon.rings.lock().unwrap_or_else(|e| e.into_inner());
+            let ring = rings.get(&(session.clone(), window.clone()));
+            let chunk = ring.map(|r| r.output_since(seq)).unwrap_or_default();
+            let drained = chunk.is_empty();
+            let exited = daemon
+                .exit_statuses
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&(session.clone(), window.clone()));
+            (chunk, drained && exited)
+        };
+        if !chunk.is_empty() {
+            let data = String::from_utf8_lossy(&chunk).into_owned();
+            let resp = VerbResponse::ok(id.clone(), serde_json::json!({"data": data}));
+            let mut out = writer.lock().unwrap_or_else(|e| e.into_inner());
+            if out.write_all(resp.to_line().as_bytes()).is_err() {
+                return;
+            }
+            if out.flush().is_err() {
+                return;
+            }
+            if let Ok(rings) = daemon.rings.lock() {
+                if let Some(r) = rings.get(&(session.clone(), window.clone())) {
+                    seq = r.current_seq();
+                }
+            }
+        }
+        if closed {
+            let resp = VerbResponse::ok(id.clone(), serde_json::json!({"closed": true}));
+            let mut out = writer.lock().unwrap_or_else(|e| e.into_inner());
+            if out.write_all(resp.to_line().as_bytes()).is_err() {
+                return;
+            }
+            let _ = out.flush();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(30));
     }
 }
 
@@ -2272,7 +2548,9 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
 
 /// Drain a window's PTY output channel: fan each chunk out to every client
 /// attached to its session and append it to the window's output ring. When
-/// the shell exits (channel closes), announce the close.
+/// the shell exits (channel closes), record its exit code, wake
+/// `block-until-exit` waiters, and announce the close.
+#[allow(clippy::too_many_arguments)]
 fn pump(
     rx: Receiver<Vec<u8>>,
     broadcast: Arc<SessionBroadcast>,
@@ -2281,6 +2559,9 @@ fn pump(
     rings: Arc<Mutex<HashMap<(String, String), OutputRing>>>,
     windows: Arc<Mutex<HashMap<String, Vec<LiveWindow>>>>,
     holds: Arc<Mutex<HashMap<String, (AgentState, std::time::Instant)>>>,
+    pid: i32,
+    exit_statuses: Arc<Mutex<HashMap<(String, String), i32>>>,
+    exit_tx: crossbeam_channel::Sender<()>,
 ) {
     let mut scanner = crate::session::osc_scan::OscProgressScanner::new();
     while let Ok(chunk) = rx.recv() {
@@ -2311,6 +2592,20 @@ fn pump(
             data: chunk,
         });
     }
+    // The shell exited (PTY EOF). Reap it and record the exit code. If the
+    // window was explicitly closed first, the handle's Drop already reaped
+    // the child (waitpid returns ECHILD) and `close_window` recorded -1.
+    if let Ok(status) = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(pid), None) {
+        let code = match status {
+            nix::sys::wait::WaitStatus::Exited(_, c) => c,
+            nix::sys::wait::WaitStatus::Signaled(_, sig, _) => -(sig as i32),
+            _ => -1,
+        };
+        if let Ok(mut st) = exit_statuses.lock() {
+            st.entry((session.clone(), window.clone())).or_insert(code);
+        }
+    }
+    let _ = exit_tx.send(());
     broadcast.send_to_all(&Message::PtyClosed { window });
 }
 
@@ -2506,6 +2801,50 @@ mod tests {
     fn daemon_new_is_empty() {
         let d = Daemon::new();
         assert!(d.list_infos().is_empty());
+    }
+
+    #[test]
+    fn window_ids_are_monotonic_across_closes() {
+        // Regression: ids were `w{live-count}`, so closing a window reused
+        // its id for the next spawn (two live windows sharing `w2` broke
+        // scripting targets). They must be monotonic per session.
+        let d = Daemon::new();
+        // `create_session` spawns the first window (w0) and registers the
+        // session in the windows map.
+        d.create_session("seq-test", "/bin/sh").expect("create");
+
+        let w1 = d.add_window("seq-test", "/bin/sh", 1).unwrap();
+        let w2 = d.add_window("seq-test", "/bin/sh", 1).unwrap();
+        assert_eq!(w1.id, "w1");
+        assert_eq!(w2.id, "w2");
+
+        // Close w1 — the next spawn must NOT reuse `w1`.
+        d.close_window("seq-test", &w1.id).unwrap();
+        let w3 = d.add_window("seq-test", "/bin/sh", 1).unwrap();
+        assert_eq!(w3.id, "w3");
+
+        // All live ids are unique.
+        let live = d.windows.lock().unwrap_or_else(|e| e.into_inner());
+        let wins = live.get("seq-test").unwrap();
+        let ids: Vec<&String> = wins.iter().map(|w| &w.info.id).collect();
+        let uniq: std::collections::HashSet<&&String> = ids.iter().collect();
+        assert_eq!(uniq.len(), ids.len(), "duplicate window ids: {ids:?}");
+    }
+
+    #[test]
+    fn window_ids_are_unique_per_session() {
+        // Two sessions allocate independently — both get `w0` first, and
+        // neither collides within itself.
+        let d = Daemon::new();
+        d.create_session("sess-a", "/bin/sh").expect("create");
+        d.create_session("sess-b", "/bin/sh").expect("create");
+        // First add per session: both must continue from their own counter.
+        let a1 = d.add_window("sess-a", "/bin/sh", 1).unwrap();
+        let b1 = d.add_window("sess-b", "/bin/sh", 1).unwrap();
+        let a2 = d.add_window("sess-a", "/bin/sh", 1).unwrap();
+        assert_eq!(a1.id, "w1");
+        assert_eq!(b1.id, "w1");
+        assert_eq!(a2.id, "w2");
     }
 
     #[test]
@@ -2926,6 +3265,22 @@ mod verb_tests {
         let d = Daemon::new();
         let resp = call(&d, "capture-pane", serde_json::json!({}));
         assert!(resp.error.is_some());
+    }
+
+    #[test]
+    fn verb_param_coerces_typed_json_values() {
+        // Clients like `termos action timeout=5000` send a JSON number;
+        // verb handlers still read it as a string.
+        let params = serde_json::json!({
+            "timeout": 5000,
+            "success": true,
+            "text": "exit 0",
+        });
+        assert_eq!(verb_param(&params, "timeout").as_deref(), Some("5000"));
+        assert_eq!(verb_param(&params, "success").as_deref(), Some("true"));
+        assert_eq!(verb_param(&params, "text").as_deref(), Some("exit 0"));
+        assert_eq!(verb_param(&params, "missing"), None);
+        assert_eq!(verb_param(&params, "session"), None);
     }
 
     #[test]

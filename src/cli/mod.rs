@@ -1136,6 +1136,9 @@ pub const COMPLETION_COMMANDS: &[&str] = &[
     "capture-pane",
     "wait-for",
     "list-verbs",
+    "action",
+    "subscribe",
+    "block-until-exit",
     "ssh",
     "new-window",
     "run-command",
@@ -1773,6 +1776,9 @@ mod tests {
         assert!(COMPLETION_COMMANDS.contains(&"set-workspace-name"));
         assert!(COMPLETION_COMMANDS.contains(&"get-window"));
         assert!(COMPLETION_COMMANDS.contains(&"completion"));
+        assert!(COMPLETION_COMMANDS.contains(&"action"));
+        assert!(COMPLETION_COMMANDS.contains(&"subscribe"));
+        assert!(COMPLETION_COMMANDS.contains(&"block-until-exit"));
     }
 
     #[test]

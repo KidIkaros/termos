@@ -44,3 +44,5 @@ pub use resurrection::{
 pub use verb::{
     VerbError, VerbHint, VerbRegistry, VerbRequest, VerbResponse, VERB_PROTOCOL_VERSION,
 };
+pub mod verb_client;
+pub use verb_client::{VerbClient, VerbClientError};

@@ -149,19 +149,34 @@ ID capture); tmux has control mode + monitors. TermOS already has an internal
 daemon verb protocol (`src/session/verb.rs`, `list_verbs`) and an agent
 (`--skill`) mode — this phase makes both first-class and external.
 
-- ⬜ Public CLI verbs mirroring the internal protocol: spawn/close/split
-  panes, send input, focus/switch, list sessions/windows/panes.
-- ⬜ Structured state queries: `termos ls --json`, per-pane exit status and
-  geometry, session info.
-- ⬜ Output streaming: `termos subscribe` tails a pane's rendered output
-  (plain or JSON), like `zellij subscribe`.
-- ⬜ Blocking variants: `--block-until-exit(-success/-failure)` for
-  scripted pipelines that retry interactively.
-- ⬜ ID capture: creation commands print the new pane/window ID for
-  script targeting.
-- ⬜ Docs: `docs/CONTROL_SURFACE.md` + examples (CI pipeline, AI-agent driver
-  using the same protocol as `--skill` mode).
-- ⬜ Tests: end-to-end script driving a daemon session over the socket.
+- ✅ Public CLI verbs: `termos action <verb> [key=value ...]` calls any verb
+  of the protocol (`new-session`, `new-window`, `close-window`, `send-text`,
+  `capture-pane`, `wait-for`, `kill-session`, ...) over the socket; the
+  existing named commands (`send-keys`, `capture-pane`, `wait-for`,
+  `new-window`, `get-window`, `run-command`) now reach the daemon correctly
+  (fixed a pre-existing `args[2..]` off-by-one that panicked every
+  zero-argument CLI command and swallowed the first flag).
+- ✅ Structured state queries: `termos ls --json` (sessions), `termos ls
+  --json -W` (sessions + per-window geometry via `list-windows`),
+  `session-info`, `get-window`, per-pane exit status (tracked daemon-side).
+- ✅ Output streaming: `termos subscribe [-s S] [-w W] [--json]` tails a
+  pane's raw output over a long-lived verb connection (`{data}` chunks + a
+  final `{closed}`), with daemon-side ring replay (`output_since`).
+- ✅ Blocking variants: `termos block-until-exit [-s S] [-w W]
+  [--success|--failure] [--timeout ms]` — exit statuses are recorded by the
+  PTY pump at EOF (signals as negative codes, close as -1) and surfaced with
+  process exit 0/1/2 for scripts.
+- ✅ ID capture: `new-window`/`new-session` return the full entity info
+  (id, geometry, workspace) — `termos action new-window session=ci` prints
+  `{"window":{"id":"w1",...}}` for script targeting.
+- ✅ Docs: `docs/CONTROL_SURFACE.md` — socket, verb table with parameters,
+  error envelope codes, the scripted workflow, and CI / retry-loop /
+  agent-driver examples.
+- ✅ Tests: `tests/control_surface.rs` drives a real daemon over a temp
+  socket end-to-end (new-session → new-window ID → send/capture/wait →
+  subscribe stream → exit code 7 → timeout and not-found error envelopes);
+  also fixed `VerbHint` deserialization (`#[serde(default)]`) so client-side
+  parsing survives sparse hints.
 
 ## Phase 10 — OSC 133 hook events (Tier 1: cheap, high value)
 
