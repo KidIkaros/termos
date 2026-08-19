@@ -46,6 +46,10 @@ pub struct LayoutWindow {
     /// Working directory for the shell.
     #[serde(default)]
     pub working_dir: String,
+    /// `start_suspended` semantics: the command pane waits for a manual
+    /// trigger (Enter) before running.
+    #[serde(default)]
+    pub suspended: bool,
 }
 
 /// Get the layout templates directory (`~/.config/termos/layouts/`).
@@ -181,6 +185,7 @@ mod tests {
                     title: "editor".into(),
                     command: "vim".into(),
                     working_dir: "/tmp".into(),
+                    suspended: true,
                 },
                 LayoutWindow::default(),
             ],
@@ -216,6 +221,7 @@ mod tests {
                 title: "editor".into(),
                 command: "vim".into(),
                 working_dir: "/home".into(),
+                suspended: false,
             }],
             screen_width: 0,
             screen_height: 0,

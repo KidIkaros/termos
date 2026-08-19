@@ -50,6 +50,7 @@ impl Os {
                 Vec::new()
             }
             Msg::Tick => {
+                self.poll_window_exits();
                 self.tick_agent_progress();
                 self.tick_agent_alerts();
                 self.tick_notifications();

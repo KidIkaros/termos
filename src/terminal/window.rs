@@ -74,6 +74,22 @@ const MAX_VT_CHUNK: usize = 8 * 1024;
 // Window
 // ---------------------------------------------------------------------------
 
+/// Extra spawn options beyond the base interactive shell.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SpawnOptions<'a> {
+    /// Run `sh -c <command>` instead of an interactive shell (command pane).
+    pub command: Option<&'a str>,
+    /// `start_suspended`: hold the child stopped until the first Enter.
+    pub suspended: bool,
+}
+
+impl SpawnOptions<'_> {
+    /// The default interactive shell window.
+    pub const fn shell() -> Self {
+        SpawnOptions { command: None, suspended: false }
+    }
+}
+
 /// A terminal window: one shell session in a pane.
 pub struct Window {
     pub id: String,
@@ -85,6 +101,15 @@ pub struct Window {
     reading: Arc<AtomicBool>,
     /// Whether the shell exited.
     pub exited: bool,
+    /// The fixed command this pane runs (`sh -c <command>`), or `None` for
+    /// an interactive shell. Command panes show their exit status and re-run
+    /// with Enter.
+    pub command: Option<String>,
+    /// `start_suspended`: the child is held with SIGSTOP until the pane is
+    /// manually triggered (first Enter sends SIGCONT).
+    pub suspended: bool,
+    /// The command's exit status once it has finished (`None` while running).
+    pub exit_code: Option<i32>,
     /// The last size applied, so a same-size resize is a no-op.
     last_size: Option<WinSize>,
     /// Whether the window is zoomed.
@@ -168,16 +193,17 @@ impl Window {
         title: impl Into<String>,
         size: WinSize,
         shell: &str,
-        command: Option<&str>,
+        opts: SpawnOptions<'_>,
         wake: Box<dyn Fn() + Send + 'static>,
         extra_env: &[(String, String)],
     ) -> Result<Self, crate::terminal::pty::PtyError> {
+        let SpawnOptions { command, suspended } = opts;
         let argv: Vec<String> = match command {
             Some(cmd) => vec!["sh".to_string(), "-c".to_string(), cmd.to_string()],
             None => vec![shell.to_string()],
         };
 
-        let (writer, handle, reader) = spawn_pty(size, &argv, wake, extra_env, None)?;
+        let (writer, handle, reader) = spawn_pty(size, &argv, wake, extra_env, None, suspended)?;
         let emulator = Arc::new(Mutex::new(Emulator::new(
             size.cols as i32,
             size.rows as i32,
@@ -185,6 +211,19 @@ impl Window {
 
         let emu_clone = Arc::clone(&emulator);
         std::thread::spawn(move || drain_thread(reader.rx, emu_clone));
+
+        // A suspended command pane starts blank; write a hint into the
+        // emulator so the pane explains itself until Enter triggers it.
+        if suspended {
+            if let Some(cmd) = command {
+                if let Ok(mut emu) = emulator.lock() {
+                    emu.write(
+                        format!("\r\n[suspended] press Enter to run: {cmd}\r\n")
+                            .as_bytes(),
+                    );
+                }
+            }
+        }
 
         let win = Self {
             id: id.into(),
@@ -194,6 +233,9 @@ impl Window {
             handle: Some(handle),
             reading: Arc::new(AtomicBool::new(true)),
             exited: false,
+            command: command.map(|c| c.to_string()),
+            suspended,
+            exit_code: None,
             agent_state: String::new(),
             agent_message: String::new(),
             agent_harness: String::new(),
@@ -257,6 +299,9 @@ impl Window {
             handle: None,
             reading: Arc::new(AtomicBool::new(true)),
             exited: false,
+            command: None,
+            suspended: false,
+            exit_code: None,
             agent_state: String::new(),
             agent_message: String::new(),
             agent_harness: String::new(),
@@ -307,6 +352,9 @@ impl Window {
             handle: None,
             reading: Arc::new(AtomicBool::new(true)),
             exited: false,
+            command: None,
+            suspended: false,
+            exit_code: None,
             agent_state: String::new(),
             agent_message: String::new(),
             agent_harness: String::new(),
@@ -402,6 +450,101 @@ impl Window {
         if let Some(handle) = &mut self.handle {
             handle.close();
         }
+    }
+
+    /// Whether this window is a command pane whose command has finished.
+    pub fn can_rerun(&self) -> bool {
+        self.command.is_some() && self.exit_code.is_some()
+    }
+
+    /// Non-blocking exit check for command panes: reaps the child with
+    /// `waitpid(WNOHANG)` and records its status. Call periodically from the
+    /// UI thread. Returns `true` when the exit status changed.
+    pub fn poll_exit(&mut self) -> bool {
+        if self.command.is_none() || self.exit_code.is_some() {
+            return false;
+        }
+        let Some(handle) = &self.handle else {
+            return false;
+        };
+        let pid = nix::unistd::Pid::from_raw(handle.pid());
+        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(_, code)) => {
+                self.exit_code = Some(code);
+                self.exited = true;
+                handle.reaped_flag().store(true, Ordering::Release);
+                true
+            }
+            Ok(WaitStatus::Signaled(_, sig, _)) => {
+                // Mirrors the shell convention: 128 + signal number.
+                self.exit_code = Some(128 + sig as i32);
+                self.exited = true;
+                handle.reaped_flag().store(true, Ordering::Release);
+                true
+            }
+            Ok(WaitStatus::Stopped(_, _) | WaitStatus::Continued(_)) | Ok(_) => false,
+            Err(nix::errno::Errno::ECHILD) => {
+                // Already reaped elsewhere; treat as finished with unknown
+                // status so the pane doesn't look perpetually alive.
+                self.exited = true;
+                self.exit_code = self.exit_code.or(Some(-1));
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// If this is a suspended command pane, resume it with SIGCONT and return
+    /// `true`. The first Enter in the pane calls this.
+    pub fn resume_if_suspended(&mut self) -> bool {
+        if !self.suspended || self.command.is_none() {
+            return false;
+        }
+        let Some(handle) = &self.handle else {
+            return false;
+        };
+        let pid = handle.pid();
+        if pid > 0 {
+            let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::Signal::SIGCONT);
+        }
+        self.suspended = false;
+        true
+    }
+
+    /// Re-run a finished command pane: spawn a fresh PTY for the same command
+    /// and swap in the new writer/handle/emulator. Keeps the window's id,
+    /// title and `command`.
+    pub fn restart(
+        &mut self,
+        size: WinSize,
+        wake: Box<dyn Fn() + Send + 'static>,
+        extra_env: &[(String, String)],
+    ) -> Result<(), crate::terminal::pty::PtyError> {
+        let Some(cmd) = self.command.clone() else {
+            return Err(crate::terminal::pty::PtyError::Nix(nix::errno::Errno::EINVAL));
+        };
+        let argv = vec!["sh".to_string(), "-c".to_string(), cmd.clone()];
+        let (writer, handle, reader) =
+            spawn_pty(size, &argv, wake, extra_env, None, false)?;
+        let emulator = Arc::new(Mutex::new(Emulator::new(
+            size.cols as i32,
+            size.rows as i32,
+        )));
+        let emu_clone = Arc::clone(&emulator);
+        std::thread::spawn(move || drain_thread(reader.rx, emu_clone));
+
+        // Replacing `handle` drops the old one; its child already exited so
+        // the reaped flag skips the kill.
+        self.emulator = emulator;
+        self.writer = Some(Box::new(writer));
+        self.handle = Some(handle);
+        self.exited = false;
+        self.exit_code = None;
+        self.suspended = false;
+        self.last_size = Some(size);
+        self.publish_geometry(0, 0, size.cols as i32, size.rows as i32, 0);
+        Ok(())
     }
 
     /// The shell's working directory, or empty when unknown.
@@ -1344,5 +1487,105 @@ mod tests {
         let writer = Arc::new(super::super::window_io::DaemonOutputWriter::new(emulator, None));
         win.set_daemon_writer(writer);
         assert!(win.daemon_writer().is_some());
+    }
+
+    // --- Command panes ---
+
+    fn spawn_cmd(cmd: &str, suspended: bool) -> Window {
+        let size = WinSize { cols: 80, rows: 24 };
+        // Retry briefly on PTY pressure (this box runs near the pty ceiling).
+        let mut last = None;
+        for _ in 0..10 {
+            let wake = Box::new(|| {}) as Box<dyn Fn() + Send + 'static>;
+            let opts = SpawnOptions { command: Some(cmd), suspended };
+            match Window::spawn("cp", "cmd", size, "/bin/sh", opts, wake, &[]) {
+                Ok(w) => return w,
+                Err(e) => {
+                    last = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
+        panic!("spawn kept failing: {last:?}")
+    }
+
+    fn wait_text(win: &Window, needle: &str, timeout: std::time::Duration) -> String {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let text = win.emulator.lock().unwrap().render_text();
+            if text.contains(needle) {
+                return text;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {needle:?}; text: {text:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn command_pane_captures_exit_code_and_reruns() {
+        let mut win = spawn_cmd("echo FIRST_RUN; exit 7", false);
+        wait_text(&win, "FIRST_RUN", std::time::Duration::from_secs(10));
+
+        // Poll until the child is reaped and the exit status recorded.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && !win.poll_exit() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(win.exit_code, Some(7), "exit status not captured");
+        assert!(win.can_rerun());
+        assert!(win.exited);
+
+        // Re-run the same command: fresh emulator, running again.
+        let size = WinSize { cols: 80, rows: 24 };
+        win.restart(size, Box::new(|| {}) as Box<dyn Fn() + Send + 'static>, &[])
+            .expect("restart");
+        assert_eq!(win.exit_code, None);
+        assert!(!win.exited);
+        wait_text(&win, "FIRST_RUN", std::time::Duration::from_secs(10));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && !win.poll_exit() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(win.exit_code, Some(7), "exit status after re-run");
+    }
+
+    /// The child's process state letter from /proc: `T` = stopped,
+    /// `S`/`R` = running, `Z` = zombie, `X` = gone.
+    fn proc_state(pid: i32) -> String {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| s.split_whitespace().nth(2).map(|c| c.to_string()))
+            .unwrap_or_else(|| "gone".into())
+    }
+
+    #[test]
+    fn suspended_command_pane_waits_for_trigger() {
+        let mut win = spawn_cmd("echo SUSPENDED_OUTPUT", true);
+        // The pane explains itself, and the child is genuinely stopped.
+        wait_text(&win, "[suspended]", std::time::Duration::from_secs(5));
+        assert!(win.suspended);
+        assert!(!win.can_rerun());
+        let pid = win.pid().expect("child pid");
+        assert_eq!(
+            proc_state(pid),
+            "T",
+            "suspended child must be stopped (SIGSTOP), got {:?}",
+            proc_state(pid)
+        );
+        assert!(!win.poll_exit(), "a stopped child must not count as exited");
+
+        // First Enter resumes it; the command then runs and exits cleanly.
+        assert!(win.resume_if_suspended());
+        assert!(!win.suspended);
+        assert!(!win.resume_if_suspended(), "second resume must be a no-op");
+        wait_text(&win, "SUSPENDED_OUTPUT", std::time::Duration::from_secs(10));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && !win.poll_exit() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(win.exit_code, Some(0), "resumed command should exit 0");
     }
 }

@@ -470,7 +470,8 @@ impl Daemon {
         // Advertise TermOS to the pane so agents can detect the environment.
         let env = crate::util::guestenv::base_guest_env(session, id, false, false);
         let (writer, handle, reader) =
-            spawn_pty(size, &argv, Box::new(|| {}), &env, cwd).map_err(|e| e.to_string())?;
+            spawn_pty(size, &argv, Box::new(|| {}), &env, cwd, false)
+                .map_err(|e| e.to_string())?;
         // Pump this window's PTY output into the session's broadcast hub and
         // its output ring (keyed by (session, window) for the verbs).
         let pump_broadcast = Arc::clone(broadcast);

@@ -243,6 +243,11 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         return handle_rename_dialog_key(os, key);
     }
 
+    // The command-pane dialog consumes text input.
+    if os.command_pane_dialog.is_some() {
+        return handle_command_pane_dialog_key(os, key);
+    }
+
     // The open context menu consumes navigation/selection keys.
     if os.context_menu.is_some() {
         return handle_context_menu_key(os, key);
@@ -315,6 +320,29 @@ fn handle_rename_dialog_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         }
         KeyCode::Char(c) => {
             if let Some((_, text)) = os.rename_dialog.as_mut() {
+                text.push(c);
+            }
+        }
+        _ => {}
+    }
+    KeyResult::Consumed
+}
+
+fn handle_command_pane_dialog_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Esc => {
+            os.cancel_command_pane_dialog();
+        }
+        KeyCode::Enter => {
+            os.commit_command_pane_dialog();
+        }
+        KeyCode::Backspace => {
+            if let Some(text) = os.command_pane_dialog.as_mut() {
+                text.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(text) = os.command_pane_dialog.as_mut() {
                 text.push(c);
             }
         }
@@ -548,6 +576,16 @@ fn handle_terminal_mode(os: &mut Os, key: &KeyEvent) -> KeyResult {
         os.leave_terminal_mode();
         return KeyResult::Consumed;
     }
+    // Enter in a command pane: resume a suspended one, or re-run a finished
+    // one. Otherwise Enter passes through to the process.
+    if key.code == KeyCode::Enter {
+        if os.resume_focused_suspended_pane() {
+            return KeyResult::Consumed;
+        }
+        if os.rerun_focused_command_pane() {
+            return KeyResult::Consumed;
+        }
+    }
     // Alt+n / Alt+p — next/prev window without leaving terminal mode.
     if alt && !shift && key.code == KeyCode::Char('n') {
         os.focus_next();
@@ -641,6 +679,14 @@ fn handle_window_management(os: &mut Os, key: &KeyEvent) -> KeyResult {
             return KeyResult::Consumed;
         }
         KeyCode::Enter => {
+            // Enter on a command pane acts on the pane (resume suspended /
+            // re-run finished); otherwise it enters terminal mode.
+            if os.resume_focused_suspended_pane() {
+                return KeyResult::Consumed;
+            }
+            if os.rerun_focused_command_pane() {
+                return KeyResult::Consumed;
+            }
             if let Some(_idx) = os.focused_window {
                 os.enter_terminal_mode();
                 return KeyResult::Consumed;

@@ -161,6 +161,14 @@ pub fn render(os: &Os, buf: &mut Buffer) {
             "Enter apply · Esc cancel".to_string(),
         ];
         render_overlay(buf, content_area, &lines, "Rename window");
+    } else if let Some(text) = &os.command_pane_dialog {
+        let lines = vec![
+            "Run a command in a new pane; Enter re-runs it when it finishes.".to_string(),
+            format!("  {text}_"),
+            String::new(),
+            "Enter run · Esc cancel".to_string(),
+        ];
+        render_overlay(buf, content_area, &lines, "Command pane");
     } else if let Some(menu) = &os.context_menu {
         render_context_menu(buf, content_area, menu);
     } else if let Some(pending) = &os.project_tape_pending {
@@ -523,6 +531,15 @@ fn paint_pane(os: &Os, buf: &mut Buffer, window_id: usize, tui_rect: TuiRect) {
         }
         if f.pinned {
             title = format!("\u{1f4cc} {title}");
+        }
+    }
+    // Command-pane state is shown in the title: suspended until Enter, or
+    // the exit status once the command finished.
+    if window.command.is_some() {
+        if window.suspended {
+            title = format!("\u{23f8} {title}  [Enter to run]");
+        } else if let Some(code) = window.exit_code {
+            title = format!("{title}  [exit {code}]");
         }
     }
     draw_pane_border(buf, tui_rect, &title, is_focused, border_color, os);

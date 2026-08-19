@@ -182,6 +182,9 @@ impl PtySink for PtyWriter {
 pub struct PtyHandle {
     child_pid: Pid,
     master_fd: Option<std::os::fd::OwnedFd>,
+    /// Set once the child has been reaped elsewhere (e.g. a command pane's
+    /// `poll_exit`), so `Drop` skips the stale-pid SIGHUP.
+    reaped: Arc<AtomicBool>,
 }
 
 impl PtyHandle {
@@ -189,7 +192,13 @@ impl PtyHandle {
         PtyHandle {
             child_pid,
             master_fd: Some(master_fd),
+            reaped: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// A shared flag the owner can set once it has reaped the child itself.
+    pub fn reaped_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.reaped)
     }
 
     pub fn pid(&self) -> i32 {
@@ -210,9 +219,20 @@ impl PtyHandle {
 
 impl Drop for PtyHandle {
     fn drop(&mut self) {
+        if self.reaped.load(Ordering::Acquire) {
+            // The child was already reaped (command pane exit detection);
+            // killing a recycled pid would be dangerous.
+            return;
+        }
         // Send SIGHUP to the child process group (shell + its children).
         unsafe {
             libc::kill(self.child_pid.as_raw(), libc::SIGHUP);
+        }
+        // A suspended (SIGSTOPped) child never delivers SIGHUP; continue it
+        // so the pending signal lands and the child can be reaped. Harmless
+        // for a running child (already dead or on its way out).
+        unsafe {
+            libc::kill(self.child_pid.as_raw(), libc::SIGCONT);
         }
         // Reap the child to avoid zombies.
         let _ = nix::sys::wait::waitpid(self.child_pid, None);
@@ -330,6 +350,7 @@ pub fn spawn_pty(
     wake: WakeCallback,
     extra_env: &[(String, String)],
     cwd: Option<&str>,
+    suspended: bool,
 ) -> Result<(PtyWriter, PtyHandle, PtyReader), PtyError> {
     // 1. Open master.
     let master: PtyMaster = posix_openpt(OFlag::O_RDWR | OFlag::O_NOCTTY)?;
@@ -413,6 +434,17 @@ pub fn spawn_pty(
                         write_errno_msg(2, b"chdir failed, errno ", errno);
                         libc::_exit(1);
                     }
+                }
+            }
+
+            // `start_suspended`: stop the child just before exec, so the pane
+            // is created but the command only runs after a manual trigger
+            // (first Enter sends SIGCONT). Self-stopping here is deterministic
+            // (the parent cannot race the fast exec path). `raise` is
+            // async-signal-safe.
+            if suspended {
+                unsafe {
+                    libc::raise(libc::SIGSTOP);
                 }
             }
 
@@ -531,7 +563,16 @@ mod tests {
         use crate::terminal::window::Window;
         let size = WinSize { cols: 80, rows: 24 };
         let wake = Box::new(|| {}) as Box<dyn Fn() + Send + 'static>;
-        let w = Window::spawn("df", "Terminal", size, "/bin/bash", None, wake, &[]).unwrap();
+        let w = Window::spawn(
+            "df",
+            "Terminal",
+            size,
+            "/bin/bash",
+            crate::terminal::window::SpawnOptions::shell(),
+            wake,
+            &[],
+        )
+        .unwrap();
         // Wait until the shell has printed its prompt (its termios setup is
         // done by then, so typed input is not flushed).
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -580,7 +621,7 @@ mod tests {
             "printf pty-stage1".to_string(),
         ];
         let (writer, handle, reader) =
-            spawn_pty(size, &argv, Box::new(|| {}), &[], None).expect("spawn PTY");
+            spawn_pty(size, &argv, Box::new(|| {}), &[], None, false).expect("spawn PTY");
 
         let mut output = Vec::new();
         for _ in 0..4 {

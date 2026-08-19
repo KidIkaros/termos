@@ -36,7 +36,7 @@ use crate::layout::{AutoScheme, BSPTree, PreselectionDir, Rect, SerializedBSPTre
 use crate::session::model::WindowInfo;
 use crate::session::protocol::Message;
 use crate::terminal::pty::{PtySink, WinSize};
-use crate::terminal::window::Window;
+use crate::terminal::window::{SpawnOptions, Window};
 use crate::vt::Emulator;
 
 /// The interaction mode.
@@ -85,6 +85,7 @@ pub enum Command {
     Quit,
     Theme,
     ThemeDetect,
+    CommandPane,
     Settings,
     // Extended commands for category-aware palette.
     FocusLeft,
@@ -160,6 +161,7 @@ impl Command {
         cmds.push(Command::Quit);
         cmds.push(Command::Theme);
         cmds.push(Command::ThemeDetect);
+        cmds.push(Command::CommandPane);
         cmds
     }
 
@@ -179,6 +181,7 @@ impl Command {
             Command::Quit => "Quit".into(),
             Command::Theme => "Theme picker".into(),
             Command::ThemeDetect => "Re-detect light/dark theme".into(),
+            Command::CommandPane => "New command pane…".into(),
             Command::Settings => "Settings".into(),
             Command::FocusLeft => "Focus left".into(),
             Command::FocusRight => "Focus right".into(),
@@ -213,7 +216,8 @@ impl Command {
         match self {
             Command::NewWindow | Command::CloseWindow | Command::SplitHorizontal
             | Command::SplitVertical | Command::ZoomToggle | Command::Fullscreen
-            | Command::RenameWindow | Command::ToggleFloat | Command::FloatNew => "Window",
+            | Command::RenameWindow | Command::ToggleFloat | Command::FloatNew
+            | Command::CommandPane => "Window",
             Command::NextWindow | Command::PrevWindow | Command::FocusLeft
             | Command::FocusRight | Command::FocusUp | Command::FocusDown
             | Command::SwapLeft | Command::SwapRight | Command::SwapUp
@@ -486,6 +490,8 @@ pub struct Os {
     pub context_menu: Option<ContextMenu>,
     /// The open rename dialog: (window index, current text).
     pub rename_dialog: Option<(usize, String)>,
+    /// Text-input dialog for the "New command pane" palette command.
+    pub command_pane_dialog: Option<String>,
     /// The last yanked text (internal clipboard).
     pub clipboard: String,
     /// Mouse border-drag resize state: (window_id, edge, start_pos).
@@ -847,6 +853,7 @@ impl Os {
             mouse_selecting: false,
             context_menu: None,
             rename_dialog: None,
+            command_pane_dialog: None,
             clipboard: String::new(),
             drag_resize: None,
             last_click: None,
@@ -2375,11 +2382,24 @@ impl Os {
         let id = format!("win-{index}");
         let size = WinSize { cols: 80, rows: 24 };
         let env = crate::util::guestenv::base_guest_env("local", &id, false, false);
-        let window = Window::spawn(id, "Terminal", size, shell, None, wake, &env)
-            .map_err(|e| e.to_string())?;
-        self.windows.push(window);
+        let window = Window::spawn(
+            id,
+            "Terminal",
+            size,
+            shell,
+            SpawnOptions::shell(),
+            wake,
+            &env,
+        )
+        .map_err(|e| e.to_string())?;
+        self.push_window(window, index);
+        Ok(index)
+    }
 
-        // Insert into the current workspace's BSP tree.
+    /// Insert a freshly spawned window into the current workspace's BSP tree
+    /// and focus it.
+    fn push_window(&mut self, window: Window, index: usize) {
+        self.windows.push(window);
         let ws = self.current_workspace;
         let bounds = self.workspace_bounds(ws);
         let focused = self.workspace(ws).focused;
@@ -2398,6 +2418,45 @@ impl Os {
         self.record_action("new_window", &[]);
         let ctx = self.window_hook_ctx(index);
         self.fire_hook(hooks::Event::AfterNewWindow, ctx);
+    }
+
+    /// Spawn a command pane: a window that runs `sh -c <command>` instead of
+    /// an interactive shell, shows its exit status, re-runs on Enter, and can
+    /// start suspended (`start_suspended` semantics) until manually triggered.
+    pub fn spawn_command_window(
+        &mut self,
+        command: &str,
+        suspended: bool,
+    ) -> Result<usize, String> {
+        let command = command.trim();
+        if command.is_empty() {
+            return Err("empty command".into());
+        }
+        let index = self.windows.len();
+        let id = format!("win-{index}");
+        let size = WinSize { cols: 80, rows: 24 };
+        let env = crate::util::guestenv::base_guest_env("local", &id, false, false);
+        let title = command.split_whitespace().next().unwrap_or(command).to_string();
+        let wake = Box::new(|| {}) as Box<dyn Fn() + Send + 'static>;
+        let window = Window::spawn(
+            id,
+            format!("cmd: {title}"),
+            size,
+            "/bin/sh",
+            SpawnOptions { command: Some(command), suspended },
+            wake,
+            &env,
+        )
+        .map_err(|e| e.to_string())?;
+        self.push_window(window, index);
+        self.notify(
+            if suspended {
+                format!("command pane '{title}' (suspended — Enter to run)")
+            } else {
+                format!("command pane '{title}'")
+            },
+            "info",
+        );
         Ok(index)
     }
 
@@ -2885,8 +2944,16 @@ impl Os {
         let id = format!("win-{index}");
         let size = WinSize { cols: 40, rows: 12 };
         let env = vec![("TERMOS_ENV".to_string(), "1".to_string())];
-        let window = Window::spawn(id, "Terminal", size, shell, None, wake, &env)
-            .map_err(|e| e.to_string())?;
+        let window = Window::spawn(
+            id,
+            "Terminal",
+            size,
+            shell,
+            SpawnOptions::shell(),
+            wake,
+            &env,
+        )
+        .map_err(|e| e.to_string())?;
         self.windows.push(window);
 
         let ws = self.current_workspace;
@@ -3293,8 +3360,16 @@ impl Os {
         let id = format!("win-{index}");
         let size = WinSize { cols: 40, rows: 12 };
         let env = crate::util::guestenv::base_guest_env("local", &id, false, false);
-        let window = Window::spawn(id, "Terminal", size, shell, None, wake, &env)
-            .map_err(|e| e.to_string())?;
+        let window = Window::spawn(
+            id,
+            "Terminal",
+            size,
+            shell,
+            SpawnOptions::shell(),
+            wake,
+            &env,
+        )
+        .map_err(|e| e.to_string())?;
         self.windows.push(window);
 
         let ws = self.current_workspace;
@@ -3692,6 +3767,7 @@ impl Os {
             }
             Command::Theme => self.open_theme_picker(),
             Command::ThemeDetect => self.redetect_theme(),
+            Command::CommandPane => self.open_command_pane_dialog(),
             Command::Settings => self.open_settings(),
             Command::FocusLeft => {
                 let _ = self.focus_direction("left");
@@ -4147,6 +4223,87 @@ impl Os {
     /// Cancel the rename dialog without applying.
     pub fn cancel_rename_dialog(&mut self) {
         self.rename_dialog = None;
+    }
+
+    /// Open the "New command pane" text-input dialog.
+    pub fn open_command_pane_dialog(&mut self) {
+        self.command_pane_dialog = Some(String::new());
+    }
+
+    /// Commit the command-pane dialog text: spawn the command as a command
+    /// pane (running, not suspended).
+    pub fn commit_command_pane_dialog(&mut self) {
+        if let Some(text) = self.command_pane_dialog.take() {
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                return;
+            }
+            match self.spawn_command_window(&text, false) {
+                Ok(_) => self.log_action(&format!("command_pane {text}")),
+                Err(e) => self.notify(format!("command pane: {e}"), "error"),
+            }
+        }
+    }
+
+    /// Cancel the command-pane dialog without spawning.
+    pub fn cancel_command_pane_dialog(&mut self) {
+        self.command_pane_dialog = None;
+    }
+
+    /// Re-run the focused window if it is a finished command pane.
+    /// Returns `true` when a re-run was triggered.
+    pub fn rerun_focused_command_pane(&mut self) -> bool {
+        let Some(i) = self.focused_window else {
+            return false;
+        };
+        if !self.windows[i].can_rerun() {
+            return false;
+        }
+        let size = self.windows[i]
+            .last_geometry()
+            .map(|g| WinSize {
+                cols: g.width.max(1) as u16,
+                rows: g.height.max(1) as u16,
+            })
+            .unwrap_or(WinSize { cols: 80, rows: 24 });
+        let env = crate::util::guestenv::base_guest_env("local", &self.windows[i].id, false, false);
+        let wake = Box::new(|| {}) as Box<dyn Fn() + Send + 'static>;
+        match self.windows[i].restart(size, wake, &env) {
+            Ok(()) => {
+                let title = self.windows[i].title.clone();
+                self.notify(format!("re-ran {title}"), "info");
+                self.log_action("command_pane_rerun");
+                true
+            }
+            Err(e) => {
+                self.notify(format!("command pane: {e}"), "error");
+                true
+            }
+        }
+    }
+
+    /// Resume the focused window if it is a suspended command pane.
+    /// Returns `true` when a pane was resumed.
+    pub fn resume_focused_suspended_pane(&mut self) -> bool {
+        let Some(i) = self.focused_window else {
+            return false;
+        };
+        self.windows[i].resume_if_suspended()
+    }
+
+    /// Poll every command pane for a finished child and record its exit
+    /// status. Called from the render path each frame.
+    pub fn poll_window_exits(&mut self) {
+        let mut finished: Vec<(String, i32)> = Vec::new();
+        for w in &mut self.windows {
+            if w.poll_exit() {
+                finished.push((w.title.clone(), w.exit_code.unwrap_or(-1)));
+            }
+        }
+        for (title, code) in finished {
+            let level = if code == 0 { "success" } else { "error" };
+            self.notify(format!("command pane '{title}' finished (exit {code})"), level);
+        }
     }
 
     /// Open the scrollback browser for the focused window: parse its
@@ -8113,6 +8270,95 @@ mod auto_theme_tests {
         // redetect with no terminal signal keeps a valid theme and logs.
         os.run_command(Command::ThemeDetect);
         assert!(os.theme.is_some());
+    }
+}
+
+#[cfg(test)]
+mod command_pane_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::{Duration, Instant};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn os() -> Os {
+        Os::new(UserConfig::default_config())
+    }
+
+    fn wait_exit(os: &mut Os, index: usize, expected: i32) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            os.poll_window_exits();
+            if os.windows[index].exit_code == Some(expected) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "timed out waiting for exit {expected}, got {:?}",
+            os.windows[index].exit_code
+        );
+    }
+
+    #[test]
+    fn spawn_command_window_captures_exit_code() {
+        let mut os = os();
+        let i = os
+            .spawn_command_window("echo PANE_RAN; exit 3", false)
+            .unwrap();
+        assert_eq!(
+            os.windows[i].command.as_deref(),
+            Some("echo PANE_RAN; exit 3")
+        );
+        assert_eq!(os.focused_window, Some(i));
+        wait_exit(&mut os, i, 3);
+        assert!(os.windows[i].can_rerun());
+        assert!(os.windows[i].exited);
+    }
+
+    #[test]
+    fn dialog_commit_spawns_command_pane() {
+        let mut os = os();
+        os.open_command_pane_dialog();
+        assert!(os.command_pane_dialog.is_some());
+        for c in "echo DIALOG_OK".chars() {
+            crate::app::input::handle_key(&mut os, &key(KeyCode::Char(c)));
+        }
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Enter));
+        assert!(os.command_pane_dialog.is_none());
+        assert_eq!(os.windows.len(), 1);
+        assert_eq!(os.windows[0].command.as_deref(), Some("echo DIALOG_OK"));
+        // Esc cancels without spawning.
+        os.open_command_pane_dialog();
+        crate::app::input::handle_key(&mut os, &key(KeyCode::Esc));
+        assert!(os.command_pane_dialog.is_none());
+        assert_eq!(os.windows.len(), 1, "cancel must not spawn");
+    }
+
+    #[test]
+    fn rerun_after_exit_resets_pane() {
+        let mut os = os();
+        let i = os.spawn_command_window("true", false).unwrap();
+        wait_exit(&mut os, i, 0);
+        assert!(os.windows[i].can_rerun());
+        assert!(os.rerun_focused_command_pane());
+        assert_eq!(os.windows[i].exit_code, None, "rerun resets the exit status");
+        assert!(!os.windows[i].exited);
+        assert!(os.windows[i].command.is_some(), "command survives rerun");
+    }
+
+    #[test]
+    fn suspended_spawn_resumes_on_enter() {
+        let mut os = os();
+        let i = os.spawn_command_window("echo SUSP; exit 0", true).unwrap();
+        assert!(os.windows[i].suspended);
+        assert!(os.resume_focused_suspended_pane());
+        assert!(!os.windows[i].suspended);
+        assert!(!os.resume_focused_suspended_pane(), "second resume no-ops");
+        wait_exit(&mut os, i, 0);
     }
 }
 

@@ -40,6 +40,7 @@ pub const ACTION_MINIMIZE: &str = "minimize";
 pub const ACTION_RESTORE: &str = "restore";
 pub const ACTION_THEME_PICKER: &str = "theme_picker";
 pub const ACTION_THEME_DETECT: &str = "theme_detect";
+pub const ACTION_COMMAND_PANE: &str = "command_pane";
 pub const ACTION_TAPE_MANAGER: &str = "tape_manager";
 pub const ACTION_TOGGLE_BORDER: &str = "toggle_border";
 pub const ACTION_RESIZE_LEFT: &str = "resize_left";

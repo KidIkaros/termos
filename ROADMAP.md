@@ -246,11 +246,22 @@ exit code, re-run with Enter, `start_suspended` for on-demand execution.
 Tape scripting covers *recording/replay*; command panes cover *interactive
 run* — complementary.
 
-- ⬜ Pane type `command`: shows exit status after completion; Enter re-runs;
-  `start_suspended` waits for manual trigger.
-- ⬜ Layout/template support: command panes in saved layouts with
-  `start_suspended` semantics.
-- ⬜ Tests: exit-code capture, re-run, suspended start.
+- ✅ Pane type `command`: a window running `sh -c <command>` via the palette
+  command "New command pane…" (text dialog). The border shows the exit
+  status once the child is reaped (`[exit N]`, `waitpid(WNOHANG)` polled per
+  frame via `Window::poll_exit`), Enter re-runs a finished pane
+  (`Window::restart` respawns the same command), and `start_suspended`
+  holds the child with a self-`SIGSTOP` before exec — shown as
+  `⏸ … [Enter to run]` — until the first Enter (`SIGCONT`). Enter works
+  from both WM and terminal mode.
+- 🟡 Layout/template support: `LayoutWindow` gained a `suspended` field
+  (forward-compatible). Templates already store per-window `command`, but
+  applying a template still types commands into shells (tape script);
+  applying a template as real command panes is deferred to a later pass.
+- ✅ Tests: exit-code capture + re-run and suspended-start (window/pty level),
+  plus Os-level spawn/dialog/rerun/resume tests. Also fixed a latent
+  hang: `PtyHandle::Drop` blocked forever on a SIGSTOPped child (SIGHUP
+  stays pending while stopped); it now sends SIGCONT before reaping.
 
 ## Phase 14 — Stacked panes & multi-pane bulk ops (Tier 3)
 
