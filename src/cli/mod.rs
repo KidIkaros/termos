@@ -1139,6 +1139,7 @@ pub const COMPLETION_COMMANDS: &[&str] = &[
     "action",
     "subscribe",
     "block-until-exit",
+    "exec",
     "ssh",
     "new-window",
     "run-command",
@@ -1779,6 +1780,7 @@ mod tests {
         assert!(COMPLETION_COMMANDS.contains(&"action"));
         assert!(COMPLETION_COMMANDS.contains(&"subscribe"));
         assert!(COMPLETION_COMMANDS.contains(&"block-until-exit"));
+        assert!(COMPLETION_COMMANDS.contains(&"exec"));
     }
 
     #[test]

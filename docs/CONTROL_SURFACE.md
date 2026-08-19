@@ -155,6 +155,40 @@ printf '%s\n' '{"verb":"list-sessions","params":{}}' \
 
 ## Examples
 
+### Run a command and get its output + exit code (`termos exec`)
+
+The `exec` command wraps the session/window/send/stream/exit dance into one
+call. It creates a throwaway session, tails the pane, runs the command as
+`cmd; exit $?`, prints the streamed output, and exits with the command's own
+code (0 = success; a signal maps to 128+signum; 2 = timeout or daemon error):
+
+```bash
+termos exec 'cargo test'                  # output streams live; exit code mirrors cargo
+termos exec -s ci 'make test' --timeout 300000   # reuse/named session, 5 min cap
+termos exec --json 'cargo build'          # {"session", "window", "output", "exit_code"}
+termos exec --keep 'run-server'           # keep the session alive afterward
+termos exec --shell /bin/bash 'make test' # pick the pane shell (default /bin/sh)
+termos exec --cwd ./termos 'cargo test'   # start the pane in a directory
+termos exec --cwd . --shell /bin/zsh 'pwd; git status'  # both together
+```
+
+`--shell` selects the pane's shell (default `/bin/sh` — deterministic for
+scripting). `--cwd` starts the pane in a directory; a nonexistent directory
+fails the run loudly rather than running somewhere else. Both apply to the
+session's first window and to the dedicated window of a reused session.
+
+```bash
+termos exec --shell /bin/bash --cwd . 'pwd; exit $?'   # -> your cwd, bash's $0
+```
+
+The process exit status matches the command's, so it composes with `&&`/`||`
+and CI gates: `termos exec 'cargo test' || echo 'tests failed'`.
+
+Cleanup is deliberate: a session `exec` created itself is killed afterward
+unless `--keep`; a pre-existing session targeted with `-s` is **never**
+killed (it belongs to you). In a reused session the command gets a
+fresh dedicated window that is closed again when it exits.
+
 ### CI: run a command and gate on its result
 
 ```bash

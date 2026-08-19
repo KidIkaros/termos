@@ -10,8 +10,17 @@
 //!     → grantpt / unlockpt
 //!     → ptsname  (get slave device path)
 //!     → fork
-//!       child:  open slave, setsid, dup2 → stdin/stdout/stderr, execvp(shell)
+//!       child:  open slave, setsid, dup2 → stdin/stdout/stderr, execve(shell)
 //!       parent: owns master fd
+//!
+//! # Fork safety
+//!
+//! `spawn_pty` can be called from a multithreaded process (the daemon), so
+//! everything the child needs — argv, the full environment, the slave path,
+//! the working directory — is prepared **before** `fork`. The child then runs
+//! only async-signal-safe calls (`setsid`, `open`, `dup2`, `chdir`, `execve`).
+//! Allocating or calling `setenv` after `fork` can deadlock the child on a
+//! malloc/environ lock another thread held at the fork instant.
 
 use std::{
     ffi::CString,
@@ -30,7 +39,7 @@ use nix::{
     libc,
     pty::{grantpt, posix_openpt, ptsname, unlockpt, PtyMaster},
     sys::stat::Mode,
-    unistd::{close, dup2, execvp, fork, setsid, ForkResult, Pid},
+    unistd::{close, dup2, fork, setsid, ForkResult, Pid},
 };
 
 /// A window size in cells.
@@ -216,6 +225,101 @@ pub struct PtyReader {
     pub reading: Arc<AtomicBool>,
 }
 
+/// Resolve a program name to an absolute path via PATH lookup, in the parent,
+/// so the post-fork child only ever calls async-signal-safe functions.
+/// Absolute paths and names containing '/' pass through unchanged.
+fn resolve_program_path(name: &str) -> String {
+    if name.contains('/') {
+        return name.to_string();
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+    name.to_string()
+}
+
+/// Build the child's full environment **before** fork, so the child never
+/// touches the malloc/environ locks after fork. Mirrors the old child-side
+/// logic: inherit the parent environ, force TERM / COLORTERM / TERM_PROGRAM
+/// (so guest tools like chafa, yazi, kitten icat pick the right output
+/// format), then apply caller-supplied overrides (e.g. TERMOS_ENV).
+fn build_child_env(extra_env: &[(String, String)]) -> Vec<CString> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut env: Vec<(Vec<u8>, Vec<u8>)> = std::env::vars_os()
+        .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
+        .collect();
+    let mut set = |k: &str, v: &str| {
+        if let Some(e) = env.iter_mut().find(|(ek, _)| ek == k.as_bytes()) {
+            e.1 = v.as_bytes().to_vec();
+        } else {
+            env.push((k.as_bytes().to_vec(), v.as_bytes().to_vec()));
+        }
+    };
+    set("TERM", "xterm-256color");
+    set("COLORTERM", "1");
+    let term_program =
+        std::env::var("TERMOS_TERM_PROGRAM").unwrap_or_else(|_| "TermOS".to_string());
+    set("TERM_PROGRAM", &term_program);
+    let term_program_version =
+        std::env::var("TERMOS_TERM_PROGRAM_VERSION").unwrap_or_else(|_| "0.1.0".to_string());
+    set("TERM_PROGRAM_VERSION", &term_program_version);
+    for (k, v) in extra_env {
+        set(k, v);
+    }
+    env.into_iter()
+        .map(|(mut k, v)| {
+            k.push(b'=');
+            k.extend(v);
+            CString::new(k).expect("environment contains a NUL byte")
+        })
+        .collect()
+}
+
+/// Write `prefix` + the decimal `errno` + a newline to `fd` without
+/// allocating — async-signal-safe, for use after fork where malloc may be
+/// deadlocked. The child has no CString/format machinery available.
+unsafe fn write_errno_msg(fd: libc::c_int, prefix: &[u8], errno: i32) {
+    let mut buf = [0u8; 96];
+    let mut n = 0;
+    for &b in prefix {
+        if n < buf.len() {
+            buf[n] = b;
+            n += 1;
+        }
+    }
+    let mut digits = [0u8; 12];
+    let mut d = 0;
+    let mut v = errno.unsigned_abs();
+    if v == 0 {
+        digits[d] = b'0';
+        d += 1;
+    }
+    while v > 0 && d < digits.len() {
+        digits[d] = b'0' + (v % 10) as u8;
+        v /= 10;
+        d += 1;
+    }
+    if errno < 0 && n < buf.len() {
+        buf[n] = b'-';
+        n += 1;
+    }
+    while d > 0 && n < buf.len() {
+        d -= 1;
+        buf[n] = digits[d];
+        n += 1;
+    }
+    if n < buf.len() {
+        buf[n] = b'\n';
+        n += 1;
+    }
+    let _ = libc::write(fd, buf.as_ptr() as *const libc::c_void, n);
+}
+
 /// Open a PTY, fork a shell, and return the writer/handle plus an output
 /// channel that a reader thread feeds. `argv[0]` is the program to exec;
 /// `extra_env` is set in the child's environment before exec (after TERM /
@@ -225,6 +329,7 @@ pub fn spawn_pty(
     argv: &[String],
     wake: WakeCallback,
     extra_env: &[(String, String)],
+    cwd: Option<&str>,
 ) -> Result<(PtyWriter, PtyHandle, PtyReader), PtyError> {
     // 1. Open master.
     let master: PtyMaster = posix_openpt(OFlag::O_RDWR | OFlag::O_NOCTTY)?;
@@ -240,15 +345,41 @@ pub fn spawn_pty(
 
     let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = unbounded();
 
+    // ---- prepare everything the child will need, before fork ----
+    // The child must only run async-signal-safe calls: allocating (CString,
+    // Vec) or calling setenv after fork can deadlock on a lock another thread
+    // held at the fork instant.
+    let slave_path = CString::new(slave_name.as_str())?;
+    let program = resolve_program_path(&argv[0]);
+    let program_c = CString::new(program.as_str())?;
+    let argv_c: Vec<CString> = argv
+        .iter()
+        .map(|s| CString::new(s.as_str()).unwrap())
+        .collect();
+    let env_c = build_child_env(extra_env);
+    let argv_p: Vec<*const libc::c_char> = argv_c
+        .iter()
+        .map(|c| c.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect();
+    let envp: Vec<*const libc::c_char> = env_c
+        .iter()
+        .map(|c| c.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect();
+    let dir_c = match cwd {
+        Some(dir) => Some(CString::new(dir)?),
+        None => None,
+    };
+
     // 2. Fork.
     let fork_result = unsafe { fork()? };
 
     match fork_result {
         ForkResult::Child => {
-            // ---- child process ----
+            // ---- child process: async-signal-safe calls only ----
             let _ = setsid();
 
-            let slave_path = CString::new(slave_name.as_str())?;
             let slave_fd = nix_open(slave_path.as_c_str(), OFlag::O_RDWR, Mode::empty())?;
 
             dup2(slave_fd, libc::STDIN_FILENO)?;
@@ -273,56 +404,26 @@ pub fn spawn_pty(
                 libc::ioctl(libc::STDIN_FILENO, libc::TIOCSWINSZ, &ws);
             }
 
-            // Ensure TERM is set and advertise truecolor support.
-            unsafe {
-                let term = CString::new("xterm-256color").unwrap();
-                let value = CString::new("1").unwrap();
-                libc::setenv(CString::new("TERM").unwrap().as_ptr(), term.as_ptr(), 1);
-                libc::setenv(
-                    CString::new("COLORTERM").unwrap().as_ptr(),
-                    value.as_ptr(),
-                    1,
-                );
-                // Advertise TERM_PROGRAM so guest tools (chafa, yazi, kitten icat)
-                // pick the right output format for the graphics protocol we forward.
-                let term_program = CString::new(
-                    std::env::var("TERMOS_TERM_PROGRAM").unwrap_or_else(|_| "TermOS".to_string()),
-                )
-                .unwrap();
-                libc::setenv(
-                    CString::new("TERM_PROGRAM").unwrap().as_ptr(),
-                    term_program.as_ptr(),
-                    1,
-                );
-                let term_program_version = CString::new(
-                    std::env::var("TERMOS_TERM_PROGRAM_VERSION")
-                        .unwrap_or_else(|_| "0.1.0".to_string()),
-                )
-                .unwrap();
-                libc::setenv(
-                    CString::new("TERM_PROGRAM_VERSION").unwrap().as_ptr(),
-                    term_program_version.as_ptr(),
-                    1,
-                );
-                // Caller-supplied environment (e.g. TERMOS_ENV).
-                for (k, v) in extra_env {
-                    let Ok(kc) = CString::new(k.as_str()) else {
-                        continue;
-                    };
-                    let Ok(vc) = CString::new(v.as_str()) else {
-                        continue;
-                    };
-                    libc::setenv(kc.as_ptr(), vc.as_ptr(), 1);
+            // Start in the requested directory; bail loudly on failure rather
+            // than silently running in the wrong cwd.
+            if let Some(dir_c) = &dir_c {
+                if unsafe { libc::chdir(dir_c.as_ptr()) } != 0 {
+                    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                    unsafe {
+                        write_errno_msg(2, b"chdir failed, errno ", errno);
+                        libc::_exit(1);
+                    }
                 }
             }
 
-            // exec the program — never returns.
-            let program_c = CString::new(argv[0].as_str())?;
-            let c_args: Vec<CString> = argv
-                .iter()
-                .map(|s| CString::new(s.as_str()).unwrap())
-                .collect();
-            execvp(&program_c, &c_args)?;
+            // exec the program — never returns on success.
+            if unsafe { libc::execve(program_c.as_ptr(), argv_p.as_ptr(), envp.as_ptr()) } != 0 {
+                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                unsafe {
+                    write_errno_msg(2, b"termos: execve failed, errno ", errno);
+                    libc::_exit(126);
+                }
+            }
             unreachable!()
         }
 
@@ -434,7 +535,7 @@ mod tests {
             "printf pty-stage1".to_string(),
         ];
         let (writer, handle, reader) =
-            spawn_pty(size, &argv, Box::new(|| {}), &[]).expect("spawn PTY");
+            spawn_pty(size, &argv, Box::new(|| {}), &[], None).expect("spawn PTY");
 
         let mut output = Vec::new();
         for _ in 0..4 {

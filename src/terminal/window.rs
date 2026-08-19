@@ -177,7 +177,7 @@ impl Window {
             None => vec![shell.to_string()],
         };
 
-        let (writer, handle, reader) = spawn_pty(size, &argv, wake, extra_env)?;
+        let (writer, handle, reader) = spawn_pty(size, &argv, wake, extra_env, None)?;
         let emulator = Arc::new(Mutex::new(Emulator::new(
             size.cols as i32,
             size.rows as i32,

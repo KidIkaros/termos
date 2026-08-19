@@ -25,11 +25,18 @@ pub enum Event {
     /// config rather than by the raw fact, because it is an alert sink: firing
     /// it on every flip would make it the thing people mute.
     AfterAgentState,
+    /// Fires when a shell emits the OSC 133 `A` marker — a fresh prompt.
+    PaneShellPrompt,
+    /// Fires when a shell emits the OSC 133 `B` marker — a command started.
+    PaneCommandStarted,
+    /// Fires when a shell emits the OSC 133 `D` marker — a command finished.
+    /// The context carries the exit code the marker reported.
+    PaneCommandFinished,
 }
 
 impl Event {
     /// All valid hook event names.
-    pub const ALL: [Event; 9] = [
+    pub const ALL: [Event; 12] = [
         Event::AfterNewWindow,
         Event::AfterCloseWindow,
         Event::AfterFocusChange,
@@ -39,6 +46,9 @@ impl Event {
         Event::AfterLayoutChange,
         Event::AfterResize,
         Event::AfterAgentState,
+        Event::PaneShellPrompt,
+        Event::PaneCommandStarted,
+        Event::PaneCommandFinished,
     ];
 
     /// The wire name, e.g. `after-new-window`.
@@ -53,6 +63,9 @@ impl Event {
             Event::AfterLayoutChange => "after-layout-change",
             Event::AfterResize => "after-resize",
             Event::AfterAgentState => "after-agent-state",
+            Event::PaneShellPrompt => "pane-shell-prompt",
+            Event::PaneCommandStarted => "pane-command-started",
+            Event::PaneCommandFinished => "pane-command-finished",
         }
     }
 
@@ -101,6 +114,9 @@ pub struct Context {
     pub prev_agent_state: String,
     pub agent_harness: String,
     pub agent_message: String,
+    /// The exit status a pane-command-finished hook reports, from the OSC 133
+    /// `D` marker payload. `-1` when the marker carried none.
+    pub exit_code: i32,
 }
 
 impl Context {
@@ -137,6 +153,7 @@ impl Context {
                 "TERMOS_AGENT_MESSAGE".to_string(),
                 self.agent_message.clone(),
             ),
+            ("TERMOS_EXIT_CODE".to_string(), self.exit_code.to_string()),
         ]
     }
 }
@@ -418,6 +435,55 @@ mod tests {
         assert_eq!(Event::parse("  after-attach  "), Some(Event::AfterAttach));
         assert_eq!(Event::parse("invalid-event"), None);
         assert_eq!(Event::parse(""), None);
+    }
+
+    #[test]
+    fn parse_pane_marker_events() {
+        assert_eq!(Event::parse("pane-shell-prompt"), Some(Event::PaneShellPrompt));
+        assert_eq!(
+            Event::parse("pane-command-started"),
+            Some(Event::PaneCommandStarted)
+        );
+        assert_eq!(
+            Event::parse("pane-command-finished"),
+            Some(Event::PaneCommandFinished)
+        );
+        // Round-trip the wire names.
+        assert_eq!(Event::PaneCommandStarted.as_str(), "pane-command-started");
+        assert_eq!(Event::PaneCommandFinished.as_str(), "pane-command-finished");
+        assert_eq!(Event::PaneShellPrompt.as_str(), "pane-shell-prompt");
+        // The new events are part of the validated set.
+        assert!(Event::ALL.contains(&Event::PaneCommandFinished));
+    }
+
+    #[test]
+    fn exit_code_env_var_reaches_the_hook() {
+        let m = Manager::new();
+        let dir = std::env::temp_dir().join(format!("tuios-hooks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let env_file = dir.join("exit_env.txt");
+        let _ = std::fs::remove_file(&env_file);
+
+        m.register(
+            Event::PaneCommandFinished,
+            format!("env | grep TERMOS_EXIT_CODE > {}", env_file.display()),
+        );
+        m.fire(
+            Event::PaneCommandFinished,
+            Context {
+                window_id: "w5".into(),
+                exit_code: 7,
+                ..Context::default()
+            },
+        );
+        m.wait();
+
+        let content = std::fs::read_to_string(&env_file).expect("env file written");
+        assert!(
+            content.contains("TERMOS_EXIT_CODE=7"),
+            "expected TERMOS_EXIT_CODE=7 in output:\n{content}"
+        );
+        let _ = std::fs::remove_file(&env_file);
     }
 
     #[test]

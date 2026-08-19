@@ -185,11 +185,14 @@ tmux 3.8 fires `pane-command-started`, `pane-command-finished`, and
 markers (`src/vt/semantic_markers.rs`) for its scrollback browser
 (`src/scrollback/browser.rs`) — surface them to the hooks system.
 
-- ⬜ New hook events: `pane-command-started`, `pane-command-finished`
-  (carrying exit status), `pane-shell-prompt`.
-- ⬜ Hook payloads include the window/pane target and exit code (see
-  `src/hooks/mod.rs` payload conventions).
-- ⬜ Tests: marker stream → hook firing with correct payloads.
+- ✅ New hook events: `pane-command-started`, `pane-command-finished`
+  (carrying exit status), `pane-shell-prompt` (`src/hooks/mod.rs`).
+- ✅ Hook payloads include the window/pane target and exit code: the daemon's
+  PTY pump parses OSC 133 from the raw stream
+  (`src/session/marker_scan.rs`) and fires with window id/name, workspace and
+  `TERMOS_EXIT_CODE` (see `src/hooks/mod.rs` payload conventions).
+- ✅ Tests: marker stream → hook firing with correct payloads (scanner unit
+  tests + a pump-level hook-firing test).
 
 ## Phase 11 — Web client hardening + read-only observers (Tier 2)
 

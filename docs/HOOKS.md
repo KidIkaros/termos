@@ -35,7 +35,7 @@ valid events; it is not a fatal config error.
 
 ## Events
 
-All nine events fire. Each one lists the fields of the payload that are
+All twelve events fire. Each one lists the fields of the payload that are
 meaningful for it; the rest are present but zero.
 
 | Event | Fires when | Payload beyond the common fields |
@@ -49,6 +49,9 @@ meaningful for it; the rest are present but zero.
 | `after-layout-change` | The layout has changed, including tiling being turned on or off | `TERMOS_LAYOUT` |
 | `after-resize` | A window has settled at a new size | `TERMOS_WINDOW_ID`, `TERMOS_WIDTH`, `TERMOS_HEIGHT` |
 | `after-agent-state` | A pane's agent state changed to one you asked to be alerted about | `TERMOS_WINDOW_ID`, `TERMOS_WINDOW_NAME`, `TERMOS_AGENT_STATE`, `TERMOS_AGENT_PREV_STATE`, `TERMOS_AGENT_HARNESS`, `TERMOS_AGENT_MESSAGE` |
+| `pane-shell-prompt` | A shell emitted an OSC 133 `A` marker — a fresh prompt | `TERMOS_WINDOW_ID`, `TERMOS_WINDOW_NAME` |
+| `pane-command-started` | A shell emitted an OSC 133 `B` marker — a command was submitted | `TERMOS_WINDOW_ID`, `TERMOS_WINDOW_NAME` |
+| `pane-command-finished` | A shell emitted an OSC 133 `D` marker — a command finished | `TERMOS_WINDOW_ID`, `TERMOS_WINDOW_NAME`, `TERMOS_EXIT_CODE` |
 
 Notes on when these do and do not fire:
 
@@ -90,11 +93,20 @@ Every hook command receives the full parent environment plus:
 | `TERMOS_AGENT_PREV_STATE` | The state it came from, same vocabulary. Empty for a pane that had no state before |
 | `TERMOS_AGENT_HARNESS` | The harness id the reporting source named, for example `claude`. Empty when nothing named one, which includes every pane the foreground detector recognised on its own |
 | `TERMOS_AGENT_MESSAGE` | The free-text note reported alongside the state, for example what the agent is waiting for. Empty when none was sent |
+| `TERMOS_EXIT_CODE` | The exit status a `pane-command-finished` marker reported, `-1` when the marker carried none. `0` for every other event |
 
 The agent fields are passed as environment rather than arguments for the same
 reason as everything else here: `TERMOS_AGENT_MESSAGE` is free text written by a
 harness, and it must not be able to break a command line or shift the position
 of a later field.
+
+The three `pane-*` events are the one set that fires **daemon-side** (from the
+raw PTY stream) rather than client-side, so they work headless too. They depend
+on the shell actually emitting OSC 133 markers: bash needs `PROMPT_COMMAND` /
+`preexec`/`precmd` hooks that print them (e.g. via `preexec_functions` or a
+`trap DEBUG`), zsh users commonly use `p10k` / `starship`, and fish emits them
+natively since 3.4. A pane that does not emit markers simply never fires these
+three events.
 
 ## Examples
 
@@ -173,10 +185,10 @@ esac
   longer is abandoned rather than allowed to hold the client open.
 - Output and exit status are discarded. A hook that needs to report something
   should write to a file, a logger, or a notification daemon.
-- Hooks run on the client, not the daemon, which for `after-agent-state` means a
-  session with nobody attached fires nothing at all. Agent state keeps being
-  tracked while you are detached; the alert about it happens when a client is
-  there to raise it. In a multi-client session each
+- Most hooks run on the client, not the daemon, which for `after-agent-state`
+  means a session with nobody attached fires nothing at all. Agent state keeps
+  being tracked while you are detached; the alert about it happens when a client
+  is there to raise it. In a multi-client session each
   attached client fires its own hooks for the events it observes.
 - Hooks are read at startup from the config file.
 

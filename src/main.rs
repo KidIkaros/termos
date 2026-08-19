@@ -13,7 +13,7 @@
 //!   tuios                   legacy single-process mode
 
 use std::collections::HashMap;
-use std::io::stdout;
+use std::io::{stdout, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -241,6 +241,7 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
         "action" => cmd_action(&args[1..]),
         "subscribe" => cmd_subscribe(&args[1..]),
         "block-until-exit" => cmd_block_until_exit(&args[1..]),
+        "exec" => cmd_exec(&args[1..]),
         "ssh" => cmd_ssh(&args[1..]),
         "new-window" => cmd_new_window(&args[1..]),
         "run-command" => cmd_run_command(&args[1..]),
@@ -434,7 +435,7 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
                 .into()),
             }
         }
-        other => Err(format!("unknown command '{other}' (try: daemon, run, attach, list, kill, ssh, new-window, run-command, set-config, get-config, explain-agent-screen, set-workspace-name, get-window, completion, set-agent-state, get-agent-state, send-keys, send-text, capture-pane, wait-for, list-verbs, tape)").into()),
+        other => Err(format!("unknown command '{other}' (try: daemon, run, attach, list, kill, exec, ssh, new-window, run-command, set-config, get-config, explain-agent-screen, set-workspace-name, get-window, completion, set-agent-state, get-agent-state, send-keys, send-text, capture-pane, wait-for, list-verbs, action, subscribe, block-until-exit, tape)").into()),
     }
 }
 
@@ -528,6 +529,7 @@ fn print_help() {
     println!("    action <verb> [k=v ...] [--json]  Call any control-protocol verb (see docs/CONTROL_SURFACE.md)");
     println!("    subscribe [-s S] [-w W] [--json]  Tail a pane's output stream");
     println!("    block-until-exit [-s S] [-w W] [--success|--failure] [--timeout ms]  Wait for a pane to exit");
+    println!("    exec [-s S] [--timeout ms] [--json] [--keep] <cmd...>  Run a command in a session and report output + exit code");
     println!("    new-window [name] [--json]  Open a new window in a session");
     println!("    run-command <cmd> [args] [--list] [--json]  Execute tape commands remotely");
     println!("    set-config <path> <value>  Set a runtime config option");
@@ -846,6 +848,252 @@ fn cmd_block_until_exit(args: &[String]) -> Result<(), Box<dyn std::error::Error
     } else {
         std::process::exit(1);
     }
+}
+
+/// `termos exec [-s session] [--timeout ms] [--json] [--keep] <cmd...>`
+/// — create a session, run a command in it, and report the output and exit
+/// code (tmux `new-window 'cmd'` analogue). The default is a throwaway
+/// session (`exec-<pid>`); `-s` reuses a named one (creating it if missing,
+/// with a dedicated window for the command). The command runs via the pane
+/// shell as `cmd; exit $?`, so the reported exit code is the command's own.
+/// The process exits with the command's code (0 = success; a signal maps to
+/// 128+signum; 2 = timeout or daemon error).
+///
+/// Cleanup is deliberately conservative: a session `exec` created itself is
+/// killed afterward unless `--keep`; a pre-existing session targeted with
+/// `-s` is **never** killed — it belongs to the caller.
+/// Parsed `termos exec` flags. `shell`/`cwd` are optional: exec defaults the
+/// shell to `/bin/sh` (deterministic scripting) and the cwd to the daemon's
+/// working directory unless `--cwd` is given.
+#[derive(Debug)]
+struct ExecFlags {
+    session: Option<String>,
+    timeout_ms: u64,
+    json: bool,
+    keep: bool,
+    shell: Option<String>,
+    cwd: Option<String>,
+    cmd: Vec<String>,
+}
+
+fn parse_exec_flags(args: &[String]) -> Result<ExecFlags, String> {
+    let mut f = ExecFlags {
+        session: None,
+        timeout_ms: 30_000,
+        json: false,
+        keep: false,
+        shell: None,
+        cwd: None,
+        cmd: Vec::new(),
+    };
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--session" => {
+                i += 1;
+                f.session = args.get(i).cloned();
+            }
+            "--timeout" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    f.timeout_ms = v.parse().unwrap_or(30_000);
+                }
+            }
+            "--json" => f.json = true,
+            "--keep" => f.keep = true,
+            "--shell" => {
+                i += 1;
+                f.shell = args.get(i).cloned();
+            }
+            "--cwd" => {
+                i += 1;
+                f.cwd = args.get(i).cloned();
+            }
+            a if a.starts_with('-') && a != "-" => return Err(format!("unknown flag '{a}'")),
+            a => f.cmd.push(a.to_string()),
+        }
+        i += 1;
+    }
+    Ok(f)
+}
+
+fn cmd_exec(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let flags = parse_exec_flags(args).map_err(|e| e.to_string())?;
+    let session = flags.session;
+    let timeout_ms = flags.timeout_ms;
+    let json = flags.json;
+    let keep = flags.keep;
+    // Deterministic shell by default; `--shell` picks the pane shell.
+    let shell = flags.shell.unwrap_or_else(|| "/bin/sh".to_string());
+    let cwd = flags.cwd;
+    let command = flags.cmd.join(" ");
+    if command.is_empty() {
+        return Err(
+            "usage: tuios exec [-s session] [--shell sh] [--cwd dir] [--timeout ms] [--json] [--keep] <command> [args...]"
+                .into(),
+        );
+    }
+
+    let mut client = connect_verb_client()?;
+
+    // Resolve the target session: named (reuse or create), else a fresh one.
+    // `created` is true only when WE created the session — cleanup kills
+    // only those; a reused pre-existing session is never touched.
+    let fresh_session = session.is_none();
+    let (session, created) = match &session {
+        Some(s) => {
+            let exists = client
+                .request_json("list-sessions", serde_json::json!({}))?
+                .get("sessions")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .any(|x| x.get("name").and_then(|n| n.as_str()) == Some(s.as_str()))
+                })
+                .unwrap_or(false);
+            if exists {
+                (s.clone(), false)
+            } else {
+                client.request_json(
+                    "new-session",
+                    serde_json::json!({ "name": s, "shell": shell, "cwd": cwd }),
+                )?;
+                (s.clone(), true)
+            }
+        }
+        None => {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0);
+            let name = format!("exec-{}-{nanos}", std::process::id());
+            client.request_json(
+                "new-session",
+                serde_json::json!({ "name": name, "shell": shell, "cwd": cwd }),
+            )?;
+            (name, true)
+        }
+    };
+
+    // Window: a fresh session's default window is w0; a reused session gets
+    // a dedicated window so we never clobber whatever is running there (and
+    // that window is closed again when the command exits).
+    let (window, window_created) = if fresh_session {
+        ("w0".to_string(), false)
+    } else {
+        let resp = client.request_json(
+            "new-window",
+            serde_json::json!({ "session": session, "shell": shell, "cwd": cwd }),
+        )?;
+        let id = resp
+            .get("window")
+            .and_then(|w| w.get("id"))
+            .and_then(|i| i.as_str())
+            .unwrap_or("w0")
+            .to_string();
+        (id, true)
+    };
+
+    // Tail the pane on a second connection (subscribe takes over its
+    // connection). Signal on the ack so we send text only once the stream is
+    // live — nothing is missed and nothing earlier is replayed.
+    let (ack_tx, ack_rx) = unbounded();
+    let sub_session = session.clone();
+    let sub_window = window.clone();
+    let output: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let sub_out = Arc::clone(&output);
+    let subscriber = std::thread::spawn(move || -> Result<(), String> {
+        let mut sub = connect_verb_client().map_err(|e| e.to_string())?;
+        sub.stream(
+            "subscribe",
+            serde_json::json!({ "session": sub_session, "window": sub_window }),
+            |line| {
+                if line.get("subscribed").and_then(|s| s.as_bool()).unwrap_or(false) {
+                    let _ = ack_tx.send(());
+                }
+                if let Some(d) = line.get("data").and_then(|d| d.as_str()) {
+                    sub_out.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(d.as_bytes());
+                }
+                        // Keep streaming until the window closes (shell exited).
+                !line.get("closed").and_then(|c| c.as_bool()).unwrap_or(false)
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    });
+    match ack_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(()) => {}
+        Err(_) => {
+            if created && !keep {
+                let _ = client.request_json("kill-session", serde_json::json!({ "session": session }));
+            }
+            return Err("timed out waiting for subscribe ack".into());
+        }
+    }
+
+    // Run the command; `exit $?` makes the shell report its exit code.
+    let text = format!("{command}; exit $?\r");
+    client.request_json(
+        "send-text",
+        serde_json::json!({ "session": session, "window": window, "text": text }),
+    )?;
+
+    let exit_code = match client.request_json(
+        "block-until-exit",
+        serde_json::json!({
+            "session": session,
+            "window": window,
+            "timeout": timeout_ms.to_string(),
+        }),
+    ) {
+        Ok(r) => r.get("exit_code").and_then(|c| c.as_i64()).unwrap_or(-1) as i32,
+        Err(termos::session::verb_client::VerbClientError::Verb(e)) => {
+            eprintln!("error: {e}");
+            if created && !keep {
+                let _ = client.request_json("kill-session", serde_json::json!({ "session": session }));
+            } else if window_created {
+                let _ = client.request_json(
+                    "close-window",
+                    serde_json::json!({ "session": session, "window": window }),
+                );
+            }
+            std::process::exit(2);
+        }
+        Err(termos::session::verb_client::VerbClientError::Io(e)) => return Err(e.into()),
+    };
+    let _ = subscriber.join();
+
+    let out = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if json {
+        let val = serde_json::json!({
+            "session": session,
+            "window": window,
+            "output": String::from_utf8_lossy(&out),
+            "exit_code": exit_code,
+        });
+        println!("{}", serde_json::to_string_pretty(&val)?);
+    } else {
+        // Raw pane stream (prompt, echoed command, output) — like tmux.
+        let _ = stdout().write_all(&out);
+        let _ = stdout().flush();
+        println!("exit code {exit_code}");
+    }
+
+    // Cleanup: kill the session only if we created it; close the dedicated
+    // window (not the session) if we created one inside a reused session.
+    if created && !keep {
+        let _ = client.request_json("kill-session", serde_json::json!({ "session": session }));
+    } else if window_created {
+        let _ = client.request_json(
+            "close-window",
+            serde_json::json!({ "session": session, "window": window }),
+        );
+    }
+    if exit_code >= 0 {
+        std::process::exit(exit_code);
+    }
+    // Signal death: 128 + signum (shell convention; e.g. SIGTERM -> 143).
+    std::process::exit(128 + (-exit_code));
 }
 
 fn cmd_kill(name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -2750,13 +2998,69 @@ mod tests {
             super::generate_zsh_completions(),
             super::generate_fish_completions(),
         ] {
-            for cmd in ["action", "subscribe", "block-until-exit"] {
+            for cmd in ["action", "subscribe", "block-until-exit", "exec"] {
                 assert!(
                     script.contains(cmd),
                     "completion script missing '{cmd}': {script}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn exec_rejects_unknown_flags() {
+        // `-s` takes a value; a flag-like first arg is an error, not a command.
+        let err = super::cmd_exec(&["-x".to_string(), "echo hi".to_string()])
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            err.contains("unknown flag"),
+            "expected an unknown-flag error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn exec_requires_a_command() {
+        let err = super::cmd_exec(&[]).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            err.contains("usage: tuios exec"),
+            "expected a usage error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn exec_flags_default_shell_and_cwd() {
+        let f = super::parse_exec_flags(&["echo hi".to_string()]).unwrap();
+        assert!(f.shell.is_none());
+        assert!(f.cwd.is_none());
+        assert_eq!(f.cmd, vec!["echo hi"]);
+        assert_eq!(f.timeout_ms, 30_000);
+        assert!(!f.json && !f.keep);
+    }
+
+    #[test]
+    fn exec_flags_parse_shell_and_cwd() {
+        let args = vec![
+            "--shell".to_string(),
+            "/bin/bash".to_string(),
+            "--cwd".to_string(),
+            "/tmp".to_string(),
+            "-s".to_string(),
+            "build".to_string(),
+            "make".to_string(),
+        ];
+        let f = super::parse_exec_flags(&args).unwrap();
+        assert_eq!(f.shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(f.cwd.as_deref(), Some("/tmp"));
+        assert_eq!(f.session.as_deref(), Some("build"));
+        assert_eq!(f.cmd, vec!["make"]);
+    }
+
+    #[test]
+    fn exec_flags_unknown_flag_rejected() {
+        let err = super::parse_exec_flags(&["--bogus".to_string()]).unwrap_err();
+        assert!(err.contains("unknown flag '--bogus'"), "got: {err}");
     }
 
     #[test]

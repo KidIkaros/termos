@@ -87,6 +87,7 @@ impl OutputRing {
         }
     }
 
+
     fn as_lossy(&self) -> String {
         String::from_utf8_lossy(&self.buf).into_owned()
     }
@@ -277,8 +278,10 @@ pub struct Daemon {
     win_seq: Mutex<HashMap<String, u64>>,
     broadcast: Mutex<HashMap<String, Arc<SessionBroadcast>>>,
     /// Lifecycle hooks fired daemon-side for the window/session events the
-    /// daemon owns (authoritative for daemon-mode windows).
-    hook_manager: crate::hooks::Manager,
+    /// daemon owns (authoritative for daemon-mode windows). Arc so the PTY
+    /// pump threads (which parse OSC 133 markers from raw output) can fire
+    /// the pane-level hook events too.
+    hook_manager: Arc<crate::hooks::Manager>,
     /// Per-session id of the most recently active window (updated by
     /// `Input`/`Resize`). The `set-agent-state` verb targets it when no
     /// window is named — the port's approximation of "focused".
@@ -322,7 +325,7 @@ impl Daemon {
             windows: Arc::new(Mutex::new(HashMap::new())),
             win_seq: Mutex::new(HashMap::new()),
             broadcast: Mutex::new(HashMap::new()),
-            hook_manager: crate::hooks::Manager::new(),
+            hook_manager: Arc::new(crate::hooks::Manager::new()),
             last_active: Mutex::new(HashMap::new()),
             rings: Arc::new(Mutex::new(HashMap::new())),
             osc_holds: Arc::new(Mutex::new(HashMap::new())),
@@ -386,14 +389,25 @@ impl Daemon {
 
     /// Spawn the first window of a new session and register it.
     pub fn create_session(&self, name: &str, shell: &str) -> Result<Session, String> {
+        self.create_session_in(name, shell, None)
+    }
+
+    /// [`create_session`] with an explicit starting directory for the shell.
+    pub fn create_session_in(
+        &self,
+        name: &str,
+        shell: &str,
+        cwd: Option<&str>,
+    ) -> Result<Session, String> {
         let cfg = SessionConfig {
             shell: resolve_shell(shell),
-            cwd: None,
+            cwd: cwd.map(str::to_string),
         };
         let session = self.manager.create(name, &cfg).map_err(|e| e.to_string())?;
         let broadcast = self.broadcast_for(name);
         let id = self.next_window_id(name);
-        let window = self.spawn_window(name, &id, "Terminal", 1, &cfg.shell, &broadcast)?;
+        let window =
+            self.spawn_window(name, &id, "Terminal", 1, &cfg.shell, cwd, &broadcast)?;
         self.fire_hook(
             crate::hooks::Event::AfterNewWindow,
             name,
@@ -423,7 +437,7 @@ impl Daemon {
         let mut wins = Vec::new();
         for (i, w) in state.windows.iter().enumerate() {
             let id = format!("w{i}");
-            match self.spawn_window(name, &id, &w.title, w.workspace, &w.shell, &broadcast) {
+            match self.spawn_window(name, &id, &w.title, w.workspace, &w.shell, None, &broadcast) {
                 Ok(live) => wins.push(live),
                 Err(e) => log::warn!("failed to respawn window '{id}' in session '{name}': {e}"),
             }
@@ -440,6 +454,7 @@ impl Daemon {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_window(
         &self,
         session: &str,
@@ -447,6 +462,7 @@ impl Daemon {
         title: &str,
         workspace: i32,
         shell: &str,
+        cwd: Option<&str>,
         broadcast: &Arc<SessionBroadcast>,
     ) -> Result<LiveWindow, String> {
         let size = WinSize { cols: 80, rows: 24 };
@@ -454,7 +470,7 @@ impl Daemon {
         // Advertise TermOS to the pane so agents can detect the environment.
         let env = crate::util::guestenv::base_guest_env(session, id, false, false);
         let (writer, handle, reader) =
-            spawn_pty(size, &argv, Box::new(|| {}), &env).map_err(|e| e.to_string())?;
+            spawn_pty(size, &argv, Box::new(|| {}), &env, cwd).map_err(|e| e.to_string())?;
         // Pump this window's PTY output into the session's broadcast hub and
         // its output ring (keyed by (session, window) for the verbs).
         let pump_broadcast = Arc::clone(broadcast);
@@ -466,6 +482,7 @@ impl Daemon {
         let pump_pid = handle.pid();
         let pump_statuses = Arc::clone(&self.exit_statuses);
         let pump_exit_tx = self.exit_tx.clone();
+        let pump_hooks = Arc::clone(&self.hook_manager);
         std::thread::spawn(move || {
             pump(
                 reader.rx,
@@ -478,6 +495,7 @@ impl Daemon {
                 pump_pid,
                 pump_statuses,
                 pump_exit_tx,
+                pump_hooks,
             )
         });
         Ok(LiveWindow {
@@ -872,6 +890,57 @@ impl Daemon {
     }
 
     /// Write raw bytes to a window's PTY (`send-keys` / `send-text`).
+    /// Wait until the pane has finished starting up before writing input. An
+    /// interactive shell's terminal setup flushes queued input (and its own
+    /// early output), so `send-text` immediately after
+    /// `new-session`/`new-window` was flaky under load: the tty echoed the
+    /// command but the shell never executed it. Windows that already produced
+    /// output are past startup and are written to immediately. For a fresh
+    /// window, wait for its first output and then a short quiescence — the
+    /// startup burst (messages + prompt) ends when the shell blocks in its
+    /// read loop, at which point any flush has completed. Bounded: a pane
+    /// that produces no output (e.g. a non-interactive program) is written
+    /// to anyway after the deadline.
+    fn wait_pane_ready(&self, session: &str, window: &str) {
+        let ring_bytes = |rings: &Mutex<HashMap<(String, String), OutputRing>>| {
+            rings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&(session.to_string(), window.to_string()))
+                .map(|r| r.total_bytes)
+                .unwrap_or(0)
+        };
+        // Steady-state windows: skip the wait entirely.
+        if ring_bytes(&self.rings) > 0 {
+            return;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_millis(2000);
+        let mut seen_output = false;
+        let mut last_bytes = 0u64;
+        let mut quiet_since: Option<std::time::Instant> = None;
+        loop {
+            let bytes = ring_bytes(&self.rings);
+            if !seen_output {
+                if bytes > 0 {
+                    seen_output = true;
+                    last_bytes = bytes;
+                }
+            } else if bytes == last_bytes {
+                let q = quiet_since.get_or_insert_with(std::time::Instant::now);
+                if q.elapsed() >= Duration::from_millis(200) {
+                    return;
+                }
+            } else {
+                last_bytes = bytes;
+                quiet_since = None;
+            }
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn write_input_to(
         &self,
         session: &str,
@@ -879,6 +948,7 @@ impl Daemon {
         data: &[u8],
     ) -> Result<String, String> {
         let target = self.resolve_window(session, window)?;
+        self.wait_pane_ready(session, &target);
         let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let wins = windows
             .get(session)
@@ -1037,7 +1107,8 @@ impl Daemon {
                 let name = verb_param(params, "name")
                     .ok_or_else(|| verb_error(ERR_INVALID_PARAMS, "missing name parameter"))?;
                 let shell = verb_param(params, "shell").unwrap_or_default();
-                self.create_session(&name, &shell)
+                let cwd = verb_param(params, "cwd");
+                self.create_session_in(&name, &shell, cwd.as_deref())
                     .map_err(|e| verb_error(ERR_COMMAND_FAILED, e))?;
                 let info = self
                     .list_infos()
@@ -1080,11 +1151,12 @@ impl Daemon {
             "new-window" => {
                 let name = verb_session(params)?;
                 let shell = verb_param(params, "shell").unwrap_or_else(|| "/bin/sh".to_string());
+                let cwd = verb_param(params, "cwd");
                 let workspace = verb_param(params, "workspace")
                     .and_then(|s| s.parse::<i32>().ok())
                     .unwrap_or(1);
                 let info = self
-                    .add_window(&name, &shell, workspace)
+                    .add_window_in(&name, &shell, workspace, cwd.as_deref())
                     .map_err(|e| verb_error(ERR_COMMAND_FAILED, e))?;
                 Ok(serde_json::json!({ "window": info }))
             }
@@ -1274,6 +1346,17 @@ impl Daemon {
     }
 
     fn add_window(&self, session: &str, shell: &str, workspace: i32) -> Result<WindowInfo, String> {
+        self.add_window_in(session, shell, workspace, None)
+    }
+
+    /// [`add_window`] with an explicit starting directory for the shell.
+    fn add_window_in(
+        &self,
+        session: &str,
+        shell: &str,
+        workspace: i32,
+        cwd: Option<&str>,
+    ) -> Result<WindowInfo, String> {
         let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let wins = windows
             .get_mut(session)
@@ -1287,7 +1370,8 @@ impl Daemon {
             .get(session)
             .cloned()
             .ok_or_else(|| format!("session '{session}' not found"))?;
-        let live = self.spawn_window(session, &id, "Terminal", workspace, &shell, &broadcast)?;
+        let live = self
+            .spawn_window(session, &id, "Terminal", workspace, &shell, cwd, &broadcast)?;
         let info = live.info.clone();
         wins.push(live);
         drop(windows);
@@ -2562,8 +2646,10 @@ fn pump(
     pid: i32,
     exit_statuses: Arc<Mutex<HashMap<(String, String), i32>>>,
     exit_tx: crossbeam_channel::Sender<()>,
+    hook_manager: Arc<crate::hooks::Manager>,
 ) {
     let mut scanner = crate::session::osc_scan::OscProgressScanner::new();
+    let mut markers = crate::session::marker_scan::Osc133Scanner::new();
     while let Ok(chunk) = rx.recv() {
         if let Ok(mut rings) = rings.lock() {
             rings
@@ -2587,6 +2673,11 @@ fn pump(
                 );
             }
         }
+        // Detect OSC 133 semantic markers and fire the pane-level hooks
+        // (pane-shell-prompt / pane-command-started / pane-command-finished).
+        for marker in markers.feed(&chunk) {
+            fire_pane_marker_hook(&hook_manager, &windows, &session, &window, marker);
+        }
         broadcast.send_to_all(&Message::PtyOutput {
             window: window.clone(),
             data: chunk,
@@ -2607,6 +2698,42 @@ fn pump(
     }
     let _ = exit_tx.send(());
     broadcast.send_to_all(&Message::PtyClosed { window });
+}
+
+/// Map one OSC 133 marker onto its hook event and fire it with the window's
+/// context (id, name, workspace) and the marker's exit code. The `C` marker
+/// (command executed / output begins) has no dedicated hook, matching tmux's
+/// `pane-command-*` set.
+fn fire_pane_marker_hook(
+    hooks: &crate::hooks::Manager,
+    windows: &Mutex<HashMap<String, Vec<LiveWindow>>>,
+    session: &str,
+    window: &str,
+    marker: crate::session::marker_scan::Osc133Marker,
+) {
+    use crate::session::marker_scan::MarkerKind;
+    let event = match marker.kind {
+        MarkerKind::PromptStart => crate::hooks::Event::PaneShellPrompt,
+        MarkerKind::CommandStart => crate::hooks::Event::PaneCommandStarted,
+        MarkerKind::CommandFinished => crate::hooks::Event::PaneCommandFinished,
+        MarkerKind::CommandExecuted => return,
+    };
+    let (window_name, workspace) = windows
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(session)
+        .and_then(|wins| wins.iter().find(|w| w.info.id == window))
+        .map(|w| (w.info.title.clone(), w.info.workspace))
+        .unwrap_or_else(|| (String::new(), 1));
+    let ctx = crate::hooks::Context {
+        window_id: window.to_string(),
+        window_name,
+        workspace,
+        session_id: session.to_string(),
+        exit_code: marker.exit_code,
+        ..crate::hooks::Context::default()
+    };
+    hooks.fire(event, ctx);
 }
 
 /// Resolve the target session of a verb: the named one, else the session this
@@ -2801,6 +2928,85 @@ mod tests {
     fn daemon_new_is_empty() {
         let d = Daemon::new();
         assert!(d.list_infos().is_empty());
+    }
+
+    #[test]
+    fn pump_fires_pane_marker_hooks() {
+        // OSC 133 markers in the raw PTY stream must fire the pane-level
+        // hooks with the window context and the exit code from the D marker.
+        // The C marker (command executed) has no dedicated hook.
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let rings: Arc<Mutex<HashMap<(String, String), OutputRing>>> = Arc::new(Mutex::new(HashMap::new()));
+        let windows: Arc<Mutex<HashMap<String, Vec<LiveWindow>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let holds: Arc<Mutex<HashMap<String, (AgentState, std::time::Instant)>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let statuses: Arc<Mutex<HashMap<(String, String), i32>>> = Arc::new(Mutex::new(HashMap::new()));
+        let (exit_tx, _exit_rx) = crossbeam_channel::unbounded();
+
+        let hooks = Arc::new(crate::hooks::Manager::new());
+        hooks.register(crate::hooks::Event::PaneShellPrompt, "marker-hook");
+        hooks.register(crate::hooks::Event::PaneCommandStarted, "marker-hook");
+        hooks.register(crate::hooks::Event::PaneCommandFinished, "marker-hook");
+        let fired: Arc<Mutex<Vec<(String, String, i32)>>> = Arc::new(Mutex::new(Vec::new()));
+        let fired_capture = Arc::clone(&fired);
+        hooks.set_runner(move |_cmd: &str, ctx: &crate::hooks::Context| {
+            fired_capture.lock().unwrap().push((
+                ctx.event.map(|e| e.as_str().to_string()).unwrap_or_default(),
+                ctx.window_id.clone(),
+                ctx.exit_code,
+            ));
+        });
+
+        let hooks_pump = Arc::clone(&hooks);
+        std::thread::spawn(move || {
+            pump(
+                rx,
+                Arc::new(SessionBroadcast::new()),
+                "marker-sess".to_string(),
+                "w3".to_string(),
+                rings,
+                windows,
+                holds,
+                999_999_999,
+                statuses,
+                exit_tx,
+                hooks_pump,
+            )
+        });
+
+        tx.send(b"\x1b]133;A\x07".to_vec()).unwrap();
+        tx.send(b"\x1b]133;B\x07".to_vec()).unwrap();
+        tx.send(b"\x1b]133;D;7\x07".to_vec()).unwrap();
+        tx.send(b"\x1b]133;C\x07".to_vec()).unwrap(); // no hook fires
+        drop(tx);
+
+        // Hooks run on their own threads; poll until all three markers have
+        // been processed rather than sleeping a fixed interval.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let fired = loop {
+            let fired = fired.lock().unwrap().clone();
+            if fired.len() >= 3 || std::time::Instant::now() >= deadline {
+                break fired;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(fired.len(), 3, "got: {fired:?}");
+        // Hooks run on their own threads, so arrival order is not
+        // deterministic — check membership, not sequence.
+        let names: Vec<&str> = fired.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert!(names.contains(&"pane-shell-prompt"), "got: {names:?}");
+        assert!(names.contains(&"pane-command-started"), "got: {names:?}");
+        assert!(names.contains(&"pane-command-finished"), "got: {names:?}");
+        let finished = fired
+            .iter()
+            .find(|(n, _, _)| n == "pane-command-finished")
+            .expect("finished event fired");
+        assert_eq!(finished.2, 7, "D marker exit code must reach the context");
+        assert_eq!(finished.1, "w3");
+        for (_, wid, _) in &fired {
+            assert_eq!(wid, "w3");
+        }
     }
 
     #[test]

@@ -296,6 +296,202 @@ fn window_ids_stay_unique_across_close_and_reopen() {
 }
 
 #[test]
+fn exec_flow_reports_output_and_exit_code() {
+    // Replicates `termos exec` against a real daemon: fresh session, tail the
+    // pane (ack before any input so nothing is missed), send `cmd; exit $?`,
+    // and report the streamed output and the command's own exit code.
+    let (_dir, socket) = start_daemon();
+    let mut ctrl = VerbConn::connect(&socket);
+
+    // Fresh session — its default window is w0.
+    let resp = ctrl.call(
+        "new-session",
+        serde_json::json!({ "name": "exec-test", "shell": "/bin/sh" }),
+    );
+    assert_eq!(resp["result"]["session"]["name"], "exec-test");
+    assert_eq!(resp["result"]["session"]["windows"], 1);
+
+    // Subscribe first (like exec's background thread): the ack must arrive
+    // before we send text so the stream starts at the command.
+    let sub_path = socket.clone();
+    let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+    let subscriber = std::thread::spawn(move || {
+        let mut conn = VerbConn::connect(&sub_path);
+        let ack = conn.call(
+            "subscribe",
+            serde_json::json!({ "session": "exec-test", "window": "w0" }),
+        );
+        assert_eq!(ack["result"]["subscribed"], true);
+        let _ = ack_tx.send(());
+        let mut data = String::new();
+        loop {
+            let line = conn.read_line();
+            if line["result"]["closed"].as_bool().unwrap_or(false) {
+                break;
+            }
+            data.push_str(line["result"]["data"].as_str().unwrap_or(""));
+        }
+        data
+    });
+    // Wait for the ack (exec waits up to 5s).
+    ack_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("subscribe ack should arrive");
+
+    // Run the command; the `; exit $?` suffix makes the shell exit with its code.
+    ctrl.call(
+        "send-text",
+        serde_json::json!({ "session": "exec-test", "window": "w0", "text": "echo exec-marker-42; exit $?\r" }),
+    );
+
+    // block-until-exit reports the command's own code.
+    let resp = ctrl.call(
+        "block-until-exit",
+        serde_json::json!({ "session": "exec-test", "window": "w0", "timeout": "5000" }),
+    );
+    assert_eq!(resp["result"]["exit_code"], 0);
+    let streamed = subscriber.join().unwrap();
+    assert!(
+        streamed.contains("exec-marker-42"),
+        "stream should contain the command output, got: {streamed:?}"
+    );
+
+    // Reuse semantics (exec -s <existing>): the command runs in a dedicated
+    // window, and the session survives the run — exec must never kill a
+    // session it did not create.
+    let resp = ctrl.call("list-windows", serde_json::json!({ "session": "exec-test" }));
+    let before = resp["result"]["windows"].as_array().unwrap().len();
+    let resp = ctrl.call(
+        "new-window",
+        serde_json::json!({ "session": "exec-test", "shell": "/bin/sh" }),
+    );
+    let reuse_wid = resp["result"]["window"]["id"].as_str().unwrap().to_string();
+    ctrl.call(
+        "send-text",
+        serde_json::json!({ "session": "exec-test", "window": reuse_wid, "text": "echo reused-ok; exit $?\r" }),
+    );
+    let resp = ctrl.call(
+        "block-until-exit",
+        serde_json::json!({ "session": "exec-test", "window": reuse_wid, "timeout": "5000" }),
+    );
+    assert_eq!(resp["result"]["exit_code"], 0);
+    // exec closes the dedicated window after the run — but never the session.
+    ctrl.call(
+        "close-window",
+        serde_json::json!({ "session": "exec-test", "window": reuse_wid }),
+    );
+    let resp = ctrl.call("list-sessions", serde_json::json!({}));
+    assert!(
+        resp["result"]["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["name"] == "exec-test"),
+        "a reused session must survive an exec run"
+    );
+    let resp = ctrl.call("list-windows", serde_json::json!({ "session": "exec-test" }));
+    let after = resp["result"]["windows"].as_array().unwrap().len();
+    assert_eq!(after, before, "the dedicated window should be closed again");
+
+    // Failure path: a non-zero command surfaces its real code.
+    let resp = ctrl.call(
+        "new-window",
+        serde_json::json!({ "session": "exec-test", "shell": "/bin/sh" }),
+    );
+    let wid = resp["result"]["window"]["id"].as_str().unwrap().to_string();
+    ctrl.call(
+        "send-text",
+        serde_json::json!({ "session": "exec-test", "window": wid, "text": "exit 7\r" }),
+    );
+    let resp = ctrl.call(
+        "block-until-exit",
+        serde_json::json!({ "session": "exec-test", "window": wid, "timeout": "5000" }),
+    );
+    assert_eq!(resp["result"]["exit_code"], 7);
+
+    let resp = ctrl.call("kill-session", serde_json::json!({ "session": "exec-test" }));
+    assert_eq!(resp["result"]["killed"], "exec-test");
+}
+
+#[test]
+fn exec_flags_shell_and_cwd_reach_the_pane() {
+    // `termos exec --shell <sh> --cwd <dir>` must pick the pane's shell and
+    // start it in the directory — verified by asking the pane itself.
+    let (dir, socket) = start_daemon();
+    let mut ctrl = VerbConn::connect(&socket);
+
+    // cwd: the first window of a session created with `cwd` starts there.
+    let sub = dir.path().join("exec-cwd");
+    std::fs::create_dir(&sub).unwrap();
+    let cwd = sub.to_str().unwrap().to_string();
+    let resp = ctrl.call(
+        "new-session",
+        serde_json::json!({ "name": "cwd-test", "shell": "/bin/sh", "cwd": cwd }),
+    );
+    assert_eq!(resp["result"]["session"]["name"], "cwd-test");
+
+    ctrl.call(
+        "send-text",
+        serde_json::json!({ "session": "cwd-test", "window": "w0", "text": "pwd; exit $?\r" }),
+    );
+    let resp = ctrl.call(
+        "block-until-exit",
+        serde_json::json!({ "session": "cwd-test", "window": "w0", "timeout": "5000" }),
+    );
+    assert_eq!(resp["result"]["exit_code"], 0);
+    let resp =
+        ctrl.call("capture-pane", serde_json::json!({ "session": "cwd-test", "window": "w0" }));
+    let content = resp["result"]["content"].as_str().unwrap();
+    assert!(
+        content.contains(cwd.as_str()),
+        "pane should report the requested cwd {cwd}, got: {content:?}"
+    );
+
+    // shell: a window spawned with `shell` runs that program as the pane —
+    // `$0` reveals which one (bash prints "bash", sh prints "sh").
+    let resp = ctrl.call(
+        "new-window",
+        serde_json::json!({ "session": "cwd-test", "shell": "/bin/bash" }),
+    );
+    let wid = resp["result"]["window"]["id"].as_str().unwrap().to_string();
+    ctrl.call(
+        "send-text",
+        serde_json::json!({ "session": "cwd-test", "window": wid, "text": "echo $0; exit $?\r" }),
+    );
+    let resp = ctrl.call(
+        "block-until-exit",
+        serde_json::json!({ "session": "cwd-test", "window": wid, "timeout": "5000" }),
+    );
+    assert_eq!(resp["result"]["exit_code"], 0);
+    let resp =
+        ctrl.call("capture-pane", serde_json::json!({ "session": "cwd-test", "window": wid }));
+    let content = resp["result"]["content"].as_str().unwrap();
+    assert!(
+        content.contains("bash"),
+        "pane should be running bash, got: {content:?}"
+    );
+
+    // A bad cwd surfaces loudly: the pane fails to start (chdir error) rather
+    // than silently running somewhere else.
+    let resp = ctrl.call(
+        "new-window",
+        serde_json::json!({ "session": "cwd-test", "shell": "/bin/sh", "cwd": "/definitely/not/a/dir" }),
+    );
+    let wid = resp["result"]["window"]["id"].as_str().unwrap().to_string();
+    let resp = ctrl.call(
+        "block-until-exit",
+        serde_json::json!({ "session": "cwd-test", "window": wid, "timeout": "5000" }),
+    );
+    assert_ne!(
+        resp["result"]["exit_code"], 0,
+        "a bad cwd must fail the pane start"
+    );
+
+    let resp = ctrl.call("kill-session", serde_json::json!({ "session": "cwd-test" }));
+    assert_eq!(resp["result"]["killed"], "cwd-test");
+}
+
+#[test]
 fn verb_client_round_trip_over_a_real_socket() {
     let (_dir, socket) = start_daemon();
     let mut client = VerbClient::connect_to(&socket).unwrap();

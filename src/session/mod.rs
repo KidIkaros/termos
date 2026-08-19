@@ -15,6 +15,7 @@ pub mod debug;
 pub mod eventhub;
 pub mod events;
 pub mod manager;
+pub mod marker_scan;
 pub mod model;
 pub mod osc_scan;
 pub mod persistence;
