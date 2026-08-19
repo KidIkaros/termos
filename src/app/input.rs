@@ -256,6 +256,7 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         Prefix::Minimize => return handle_minimize_prefix(os, key),
         Prefix::Tape => return handle_tape_prefix(os, key),
         Prefix::Debug => return handle_debug_prefix(os, key),
+        Prefix::Float => return handle_float_prefix(os, key),
         Prefix::None => {}
     }
 
@@ -378,6 +379,7 @@ fn handle_sidebar_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
             Prefix::Minimize => handle_minimize_prefix(os, key),
             Prefix::Tape => handle_tape_prefix(os, key),
             Prefix::Debug => handle_debug_prefix(os, key),
+            Prefix::Float => handle_float_prefix(os, key),
             Prefix::None => unreachable!(),
         };
     }
@@ -582,6 +584,30 @@ fn handle_window_management(os: &mut Os, key: &KeyEvent) -> KeyResult {
         return KeyResult::Consumed;
     }
 
+    // With a floating pane focused, directional keys move it (the float
+    // prefix `Ctrl+B F` provides the full move/resize/cycle surface).
+    if os.focused_is_float() {
+        match key.code {
+            KeyCode::Char('h') | KeyCode::Left => {
+                os.float_move(-1, 0);
+                return KeyResult::Consumed;
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                os.float_move(1, 0);
+                return KeyResult::Consumed;
+            }
+            KeyCode::Char('k') => {
+                os.float_move(0, -1);
+                return KeyResult::Consumed;
+            }
+            KeyCode::Char('j') => {
+                os.float_move(0, 1);
+                return KeyResult::Consumed;
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         // Swap with neighbor: H/J/K/L (Go's binding) and ctrl+arrows.
         KeyCode::Char('H') => {
@@ -735,6 +761,11 @@ fn handle_leader_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         // Debug prefix.
         KeyCode::Char('D') => {
             os.prefix = Prefix::Debug;
+            KeyResult::Consumed
+        }
+        // Floating-pane prefix.
+        KeyCode::Char('F') => {
+            os.prefix = Prefix::Float;
             KeyResult::Consumed
         }
         // Layout picker.
@@ -1010,6 +1041,122 @@ fn handle_debug_prefix(os: &mut Os, key: &KeyEvent) -> KeyResult {
             os.prefix = Prefix::None;
             KeyResult::Consumed
         }
+    }
+}
+
+/// `Ctrl+B F` — the floating-pane prefix: `f` float/tile, `n` new floating
+/// shell, `x` close, `t` tile, `c` center, `h/j/k/l` move, `H/J/K/L` resize,
+/// `Tab`/`BackTab` cycle floats.
+fn handle_float_prefix(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // Float the focused window (or tile it back if already floating).
+        KeyCode::Char('f') => {
+            os.toggle_float();
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // New floating shell.
+        KeyCode::Char('n') => {
+            do_spawn_floating(os);
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // Close the focused floating window.
+        KeyCode::Char('x') => {
+            do_close_window(os);
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // Tile the focused float back into the BSP tree.
+        KeyCode::Char('t') => {
+            if let Some(f) = os.focused_window {
+                os.unfloat_window(f);
+            }
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // Center the focused float.
+        KeyCode::Char('c') => {
+            os.float_center();
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // Pin / always-on-top the focused float.
+        KeyCode::Char('p') => {
+            os.toggle_float_pin();
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // Toggle modal mode on the focused float (blocks other panes).
+        KeyCode::Char('o') => {
+            os.toggle_float_modal();
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // Cycle floats (keep the prefix so repeated Tab presses walk them).
+        KeyCode::Tab => {
+            os.float_cycle_focus(true);
+            KeyResult::Consumed
+        }
+        KeyCode::BackTab => {
+            os.float_cycle_focus(false);
+            KeyResult::Consumed
+        }
+        // Move (keep the prefix active for repeat presses).
+        KeyCode::Char('h') => {
+            os.float_move(-1, 0);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('l') => {
+            os.float_move(1, 0);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('k') => {
+            os.float_move(0, -1);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('j') => {
+            os.float_move(0, 1);
+            KeyResult::Consumed
+        }
+        // Resize (positive delta = outward).
+        KeyCode::Char('H') => {
+            os.float_resize(crate::layout::ResizeEdge::Left, 1);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('L') => {
+            os.float_resize(crate::layout::ResizeEdge::Right, 1);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('K') => {
+            os.float_resize(crate::layout::ResizeEdge::Top, 1);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('J') => {
+            os.float_resize(crate::layout::ResizeEdge::Bottom, 1);
+            KeyResult::Consumed
+        }
+        _ => {
+            os.prefix = Prefix::None;
+            KeyResult::Ignored
+        }
+    }
+}
+
+/// Spawn a floating shell: locally, or by asking the daemon (remote mode,
+/// floating the window when it arrives).
+fn do_spawn_floating(os: &mut Os) {
+    let shell = shell_path(os);
+    if os.remote_session.is_some() {
+        os.pending_float = true;
+        os.request_new_window(os.current_workspace, &shell);
+    } else {
+        let wake = Box::new(|| {});
+        let _ = os.spawn_floating_window(&shell, wake);
     }
 }
 
@@ -1655,6 +1802,27 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
                     return true;
                 }
             }
+            // A modal float blocks clicks on every other pane: only the
+            // modal pane's own body and borders are interactive.
+            if os.focused_is_modal() {
+                let is_modal_target = os
+                    .float_edge_at(column, row)
+                    .is_some_and(|(w, _)| Some(w) == os.focused_window)
+                    || os.float_at(column, row).is_some_and(|w| Some(w) == os.focused_window);
+                if !is_modal_target {
+                    os.notify("modal pane is active — Ctrl+B F o to release", "info");
+                    return true;
+                }
+            }
+            // Floating panes: a press on a float's border starts a move or
+            // resize drag; a press on its body focuses and raises it.
+            if let Some((wid, kind)) = os.float_edge_at(column, row) {
+                os.start_float_drag(wid, kind, column, row);
+                os.focus_window(wid);
+                os.raise_float(wid);
+                os.prefix = Prefix::None;
+                return true;
+            }
             // Compute the layout once for both border and window hit-testing.
             let layout = os.current_layout();
             // Check for border-drag resize first.
@@ -1665,6 +1833,9 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             }
             if let Some(idx) = os.window_at_with_layout(column, row, &layout) {
                 os.focus_window(idx);
+                if os.is_float(idx) {
+                    os.raise_float(idx);
+                }
                 os.prefix = Prefix::None;
                 // Click-to-type: in window-management mode a clean press arms
                 // terminal-mode entry; a drag turns it into a selection.
@@ -1701,6 +1872,11 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             true
         }
         MouseEventKind::Moved => {
+            // A float drag in progress keeps applying on motion.
+            if let Some(drag) = os.float_drag.take() {
+                os.apply_float_drag(drag, column, row);
+                return true;
+            }
             // Overlay motion routing takes precedence.
             if super::overlay_mouse::overlay_drag_active(os) {
                 super::overlay_mouse::overlay_mouse_motion(os, column, row);
@@ -1719,6 +1895,11 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             true
         }
         MouseEventKind::Drag(MouseButton::Left) => {
+            // A float drag in progress keeps applying on drag events.
+            if let Some(drag) = os.float_drag.take() {
+                os.apply_float_drag(drag, column, row);
+                return true;
+            }
             // Overlay drag routing takes precedence.
             if super::overlay_mouse::overlay_drag_active(os) {
                 super::overlay_mouse::overlay_mouse_motion(os, column, row);
@@ -1750,6 +1931,11 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             true
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            // End a float drag if active.
+            if os.float_drag.is_some() {
+                os.float_drag = None;
+                return true;
+            }
             // End overlay drag if active.
             if super::overlay_mouse::overlay_drag_active(os) {
                 super::overlay_mouse::overlay_mouse_release(os);
@@ -1794,8 +1980,12 @@ fn forward_wheel_to_app(os: &Os, index: usize, mouse: &MouseEvent, direction: i3
     if !emu.has_mouse_mode() || emu.is_alt_screen() {
         return false;
     }
-    let layout = os.current_layout();
-    let Some(rect) = layout.get(&(index as i32)) else {
+    let rect = if os.is_float(index) {
+        os.float_rect(index)
+    } else {
+        os.current_layout().get(&(index as i32)).copied()
+    };
+    let Some(rect) = rect else {
         return false;
     };
     let x = (mouse.column as i32 - rect.x).max(0) as u16 + 1;
@@ -1831,8 +2021,12 @@ fn forward_motion_to_app(
     if !all_motion && !(cell_motion && button.is_some()) {
         return false;
     }
-    let layout = os.current_layout();
-    let Some(rect) = layout.get(&(index as i32)) else {
+    let rect = if os.is_float(index) {
+        os.float_rect(index)
+    } else {
+        os.current_layout().get(&(index as i32)).copied()
+    };
+    let Some(rect) = rect else {
         return false;
     };
     let x = (column - rect.x).max(0) as u16 + 1;
@@ -1994,6 +2188,30 @@ mod tests {
         os.open_palette();
         assert!(os.palette_open);
         handle_key(&mut os, &key(KeyCode::Esc));
+        assert!(!os.palette_open);
+    }
+
+    #[test]
+    fn palette_lists_float_commands() {
+        let mut os = test_os();
+        os.open_palette();
+        os.palette_query = "float".to_string();
+        let items = os.palette_items();
+        assert!(items.contains(&super::super::Command::ToggleFloat));
+        assert!(items.contains(&super::super::Command::FloatNew));
+    }
+
+    #[test]
+    fn palette_activate_toggle_float_tiles_floating_window() {
+        let mut os = test_os();
+        let idx = os.spawn_floating_window("/bin/sh", Box::new(|| {})).unwrap();
+        assert!(os.is_float(idx));
+        os.open_palette();
+        os.palette_query = "Float / tile focused window".to_string();
+        os.palette_selected = 0;
+        os.activate_palette();
+        assert!(!os.is_float(idx));
+        assert!(os.workspace(1).tree.has_window(idx as i32));
         assert!(!os.palette_open);
     }
 
@@ -3258,6 +3476,174 @@ mod tests {
         });
         let result = handle_key(&mut os, &key(KeyCode::Esc));
         assert_eq!(result, KeyResult::Consumed);
+    }
+
+    // --- Floating panes ---
+
+    fn mouse_at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn leader_f_enters_float_prefix() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        handle_key(&mut os, &key(KeyCode::Char('F')));
+        assert_eq!(os.prefix, Prefix::Float);
+    }
+
+    #[test]
+    fn float_prefix_f_toggles_float() {
+        let mut os = os_with_window();
+        handle_key(&mut os, &leader());
+        handle_key(&mut os, &key(KeyCode::Char('F')));
+        handle_key(&mut os, &key(KeyCode::Char('f')));
+        assert!(os.is_float(0));
+        assert_eq!(os.prefix, Prefix::None);
+    }
+
+    #[test]
+    fn float_prefix_n_spawns_floating_shell() {
+        let mut os = test_os();
+        handle_key(&mut os, &leader());
+        handle_key(&mut os, &key(KeyCode::Char('F')));
+        handle_key(&mut os, &key(KeyCode::Char('n')));
+        assert!(os.is_float(0));
+        assert_eq!(os.focused_window, Some(0));
+    }
+
+    #[test]
+    fn float_prefix_moves_focused_float() {
+        let mut os = os_with_window();
+        os.float_window(0);
+        let r = os.float_rect(0).unwrap();
+        handle_key(&mut os, &leader());
+        handle_key(&mut os, &key(KeyCode::Char('F')));
+        handle_key(&mut os, &key(KeyCode::Char('l')));
+        let r2 = os.float_rect(0).unwrap();
+        assert_eq!(r2.x, r.x + 1);
+        assert_eq!(r2.y, r.y);
+        // The prefix stays active so repeated presses keep moving.
+        assert_eq!(os.prefix, Prefix::Float);
+    }
+
+    #[test]
+    fn wm_mode_arrows_move_focused_float() {
+        let mut os = os_with_window();
+        os.float_window(0);
+        let r = os.float_rect(0).unwrap();
+        let result = handle_key(&mut os, &key(KeyCode::Char('h')));
+        assert_eq!(result, KeyResult::Consumed);
+        let r2 = os.float_rect(0).unwrap();
+        assert_eq!(r2.x, r.x - 1);
+    }
+
+    #[test]
+    fn float_prefix_p_toggles_pin() {
+        let mut os = os_with_window();
+        os.float_window(0);
+        handle_key(&mut os, &leader());
+        handle_key(&mut os, &key(KeyCode::Char('F')));
+        handle_key(&mut os, &key(KeyCode::Char('p')));
+        let fi = os.float_for_window(0).unwrap();
+        assert!(os.floats[fi].pinned);
+        assert_eq!(os.prefix, Prefix::None);
+        handle_key(&mut os, &leader());
+        handle_key(&mut os, &key(KeyCode::Char('F')));
+        handle_key(&mut os, &key(KeyCode::Char('p')));
+        assert!(!os.floats[fi].pinned);
+    }
+
+    #[test]
+    fn float_prefix_o_toggles_modal() {
+        let mut os = os_with_window();
+        os.float_window(0);
+        handle_key(&mut os, &leader());
+        handle_key(&mut os, &key(KeyCode::Char('F')));
+        handle_key(&mut os, &key(KeyCode::Char('o')));
+        assert!(os.focused_is_modal());
+        assert_eq!(os.prefix, Prefix::None);
+        handle_key(&mut os, &leader());
+        handle_key(&mut os, &key(KeyCode::Char('F')));
+        handle_key(&mut os, &key(KeyCode::Char('o')));
+        assert!(!os.focused_is_modal());
+    }
+
+    #[test]
+    fn modal_click_on_other_pane_blocked() {
+        use crate::terminal::pty::WinSize;
+        use crate::terminal::window::Window;
+        let mut os = os_with_window();
+        // Add a second window so there is a tile to click after floating 0.
+        let win = Window::without_pty(
+            "w1".to_string(),
+            "w1".to_string(),
+            WinSize { cols: 10, rows: 3 },
+        );
+        os.windows.push(win);
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(1, 0, SplitType::Horizontal, 0.5, bounds, 0);
+        os.focused_window = Some(0);
+        os.float_window(0);
+        os.toggle_float_modal();
+        assert!(os.focused_is_modal());
+        // A click on the tile (float starts at x=16) must not move focus.
+        handle_mouse(&mut os, &mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 5));
+        assert_eq!(os.focused_window, Some(0));
+        assert!(os.click_to_type.is_none());
+    }
+
+    #[test]
+    fn modal_click_on_own_body_allowed() {
+        let mut os = os_with_window();
+        os.float_window(0);
+        os.toggle_float_modal();
+        assert!(os.focused_is_modal());
+        // A clean click on the modal float's own body flows through normally
+        // (arms click-to-type instead of being swallowed).
+        handle_mouse(&mut os, &mouse_at(MouseEventKind::Down(MouseButton::Left), 20, 10));
+        assert_eq!(os.focused_window, Some(0));
+        assert!(os.click_to_type.is_some());
+    }
+
+    #[test]
+    fn float_border_drag_resizes() {
+        let mut os = os_with_window();
+        os.float_window(0);
+        let r = os.float_rect(0).unwrap();
+        // Grab the right border and drag 5 cells right.
+        let (x, y) = ((r.x + r.w - 1) as u16, (r.y + 2) as u16);
+        handle_mouse(&mut os, &mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+        assert!(os.float_drag.is_some());
+        handle_mouse(&mut os, &mouse_at(MouseEventKind::Drag(MouseButton::Left), x + 5, y));
+        let r2 = os.float_rect(0).unwrap();
+        assert_eq!(r2.w, r.w + 5);
+        handle_mouse(&mut os, &mouse_at(MouseEventKind::Up(MouseButton::Left), x + 5, y));
+        assert!(os.float_drag.is_none());
+    }
+
+    #[test]
+    fn float_title_drag_moves() {
+        let mut os = os_with_window();
+        os.float_window(0);
+        let r = os.float_rect(0).unwrap();
+        // Grab the top border row (title) and drag right/down.
+        let (x, y) = ((r.x + 5) as u16, r.y as u16);
+        handle_mouse(&mut os, &mouse_at(MouseEventKind::Down(MouseButton::Left), x, y));
+        assert!(os.float_drag.is_some());
+        handle_mouse(&mut os, &mouse_at(MouseEventKind::Drag(MouseButton::Left), x + 3, y + 2));
+        let r2 = os.float_rect(0).unwrap();
+        assert_eq!(r2.x, r.x + 3);
+        assert_eq!(r2.y, r.y + 2);
+        handle_mouse(&mut os, &mouse_at(MouseEventKind::Up(MouseButton::Left), x + 3, y + 2));
+        assert!(os.float_drag.is_none());
     }
 }
 

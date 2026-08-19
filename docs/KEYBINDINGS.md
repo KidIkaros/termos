@@ -324,6 +324,41 @@ See [Tape Recording Guide](TAPE_RECORDING.md) for recording workflows and
 [Project Tapes](PROJECT_TAPES.md) for the per-directory `.termos.tape` autorun
 feature that `Ctrl+B` `T` `t` reviews.
 
+### Floating Panes Prefix (`Ctrl+B` `F`)
+
+Floating panes are terminal windows that sit above the tiled layout (like
+Zellij's floats or tmux 3.7+ floating panes). The window keeps running while
+floating, so hiding and re-showing it never interrupts its process. Floats
+live on the workspace they were created on and are hidden when you switch
+away. The command palette (`Ctrl+B` `P`, type `float`) also exposes "Float /
+tile focused window" and "New floating window".
+
+| Key Sequence | Action |
+|--------------|--------|
+| `Ctrl+B` `F` `f` | Float the focused window, or tile it back if already floating |
+| `Ctrl+B` `F` `n` | New floating shell (a fresh terminal, floating) |
+| `Ctrl+B` `F` `x` | Close the focused floating window |
+| `Ctrl+B` `F` `t` | Tile the focused float back into the BSP tree |
+| `Ctrl+B` `F` `c` | Center the focused float |
+| `Ctrl+B` `F` `p` | Pin / always-on-top the focused float (stays above other floats; shown as 📌 in the title) |
+| `Ctrl+B` `F` `o` | Toggle modal mode on the focused float (blocks interaction with all other panes while active; shown as ⛔ in the title) |
+| `Ctrl+B` `F` `Tab` / `Shift+Tab` | Cycle to the next / previous float |
+| `Ctrl+B` `F` `h`/`l`/`k`/`j` | Move the focused float left/right/up/down (repeatable) |
+| `Ctrl+B` `F` `H`/`L`/`K`/`J` | Resize the focused float (shrink width / grow width / grow height / shrink height) |
+| `Ctrl+B` `F` `q` or `Esc` | Cancel |
+
+Mouse:
+
+- **Click** a float to focus and raise it (click-to-type works as usual).
+- **Drag the top border row** (where the title sits) to move a float.
+- **Drag any other border edge** to resize it.
+- **Wheel** over a float scrolls its scrollback, and mouse-tracking
+  applications inside a float receive wheel events.
+
+Window Management Mode, with a float focused: `h`/`j`/`k`/`l` and `←`/`→`
+move the float; `Tab`/`n`/`p` (and `Ctrl+B` `n`/`p`) cycle focus through
+floats and tiles together.
+
 ### Layout Prefix (`Ctrl+B` `L`)
 
 Save and load window layout templates:

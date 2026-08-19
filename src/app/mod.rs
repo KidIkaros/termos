@@ -14,6 +14,7 @@ pub mod copymode_ext;
 pub mod dock;
 pub mod dock_session_buttons;
 pub mod effect;
+pub mod float;
 pub mod input;
 pub mod interaction;
 pub mod layout_templates;
@@ -63,6 +64,8 @@ pub enum Prefix {
     Tape,
     /// Leader, then `D` — debug prefix (logs, stats, animations, showkeys).
     Debug,
+    /// Leader, then `F` — floating-pane prefix (float, spawn, move, resize).
+    Float,
 }
 
 /// A command the command palette can run. Ported from the TUIOS command list,
@@ -92,6 +95,8 @@ pub enum Command {
     SwapUp,
     SwapDown,
     ZoomToggle,
+    ToggleFloat,
+    FloatNew,
     RenameWindow,
     CopyMode,
     ToggleSidebar,
@@ -131,6 +136,8 @@ impl Command {
             Command::SwapUp,
             Command::SwapDown,
             Command::ZoomToggle,
+            Command::ToggleFloat,
+            Command::FloatNew,
             Command::RenameWindow,
             Command::CopyMode,
             Command::ToggleSidebar,
@@ -179,6 +186,8 @@ impl Command {
             Command::SwapUp => "Swap up".into(),
             Command::SwapDown => "Swap down".into(),
             Command::ZoomToggle => "Toggle zoom".into(),
+            Command::ToggleFloat => "Float / tile focused window".into(),
+            Command::FloatNew => "New floating window".into(),
             Command::RenameWindow => "Rename window".into(),
             Command::CopyMode => "Copy mode".into(),
             Command::ToggleSidebar => "Toggle sidebar".into(),
@@ -201,7 +210,7 @@ impl Command {
         match self {
             Command::NewWindow | Command::CloseWindow | Command::SplitHorizontal
             | Command::SplitVertical | Command::ZoomToggle | Command::Fullscreen
-            | Command::RenameWindow => "Window",
+            | Command::RenameWindow | Command::ToggleFloat | Command::FloatNew => "Window",
             Command::NextWindow | Command::PrevWindow | Command::FocusLeft
             | Command::FocusRight | Command::FocusUp | Command::FocusDown
             | Command::SwapLeft | Command::SwapRight | Command::SwapUp
@@ -522,6 +531,13 @@ pub struct Os {
     /// A pending split direction to apply when the next remote window is
     /// announced (set by split keybindings in remote mode).
     pub pending_split: Option<SplitType>,
+    /// Floating panes: terminal windows rendered above the tiled layout.
+    pub floats: Vec<float::FloatPane>,
+    /// An in-progress mouse drag on a floating pane (move or resize).
+    pub float_drag: Option<float::FloatDragState>,
+    /// Whether the next remote window announced should float instead of tile
+    /// (set by the new-floating-shell key in remote mode).
+    pub pending_float: bool,
     /// Saved layout templates: name → serialized BSP tree.
     pub layouts: HashMap<String, SerializedBSPTree>,
     /// Lifecycle hooks, loaded from the `[hooks]` config section.
@@ -845,6 +861,9 @@ impl Os {
             pending_kill: None,
             remote_commands: None,
             pending_split: None,
+            floats: Vec::new(),
+            float_drag: None,
+            pending_float: false,
             layouts: HashMap::new(),
             hook_manager,
             pending_agent_alerts: HashMap::new(),
@@ -958,6 +977,32 @@ impl Os {
     /// by tape's MoveAndFollowWorkspace).
     pub fn move_window_to_workspace(&mut self, index: usize, number: i32) {
         if !(1..=9).contains(&number) {
+            return;
+        }
+        // A floating window just moves its float entry (and re-clamps to the
+        // target workspace's bounds).
+        if let Some(fi) = self.float_for_window(index) {
+            let from = self.floats[fi].workspace;
+            if number == from {
+                return;
+            }
+            self.floats[fi].workspace = number;
+            let bounds = self.workspace_bounds(number);
+            let r = float::clamp_rect(self.floats[fi].rect(), bounds);
+            self.floats[fi].x = r.x;
+            self.floats[fi].y = r.y;
+            self.floats[fi].w = r.w;
+            self.floats[fi].h = r.h;
+            // Refocus the source workspace.
+            let remaining = self.workspace(from).tree.get_all_window_ids();
+            self.workspace_mut(from).focused = remaining.first().map(|&i| i as usize);
+            if from == self.current_workspace {
+                self.focused_window = remaining.first().map(|&i| i as usize);
+            }
+            self.current_workspace = number;
+            self.workspace_mut(number).focused = Some(index);
+            self.focused_window = Some(index);
+            self.prefix = Prefix::None;
             return;
         }
         // Find the source workspace (the one whose tree owns the window).
@@ -1858,6 +1903,40 @@ impl Os {
                 },
             );
         }
+        // Floating panes composite above the tiles: report their rects with a
+        // higher z so in-pane images stay on top.
+        for f in self.floats.iter().filter(|f| f.workspace == ws) {
+            let Some(w) = self.windows.get(f.window) else {
+                continue;
+            };
+            let (scrollback_len, scroll_offset, is_alt) = match w.emulator.try_lock() {
+                Ok(emu) => (
+                    emu.scrollback_len() as i32,
+                    w.scrollback_offset() as i32,
+                    emu.is_alt_screen(),
+                ),
+                Err(_) => (0, w.scrollback_offset() as i32, false),
+            };
+            result.insert(
+                f.window as u32,
+                crate::graphics::placement::WindowPositionInfo {
+                    window_x: f.x,
+                    window_y: f.y,
+                    content_offset_x: 1,
+                    content_offset_y: 1,
+                    width: f.w,
+                    height: f.h,
+                    visible: true,
+                    scrollback_len,
+                    scroll_offset,
+                    is_being_manipulated: false,
+                    screen_width: self.width,
+                    screen_height: self.height,
+                    window_z: 10,
+                    is_alt_screen: is_alt,
+                },
+            );
+        }
         result
     }
 
@@ -2246,10 +2325,21 @@ impl Os {
         ws.tree.get_all_window_ids()
     }
 
-    /// True if the given window index is on the current workspace.
+    /// True if the given window index is on the current workspace (tiled or
+    /// floating).
     pub fn window_on_current_workspace(&self, index: usize) -> bool {
-        let ws = self.workspace(self.current_workspace);
-        ws.tree.get_all_window_ids().contains(&(index as i32))
+        let ws = self.current_workspace;
+        if self
+            .workspace(ws)
+            .tree
+            .get_all_window_ids()
+            .contains(&(index as i32))
+        {
+            return true;
+        }
+        self.float_for_window(index)
+            .map(|fi| self.floats[fi].workspace == ws)
+            .unwrap_or(false)
     }
 
     // -----------------------------------------------------------------------
@@ -2402,7 +2492,8 @@ impl Os {
         if index >= self.windows.len() {
             return;
         }
-        // The workspace that owns this window (current if unknown).
+        // The workspace that owns this window (current if unknown). A
+        // floating window lives on its float's workspace.
         let mut target_ws = self.current_workspace;
         for ws_num in 1..=9 {
             if self.workspace(ws_num).tree.has_window(index as i32) {
@@ -2410,8 +2501,25 @@ impl Os {
                 break;
             }
         }
+        if let Some(fi) = self.float_for_window(index) {
+            target_ws = self.floats[fi].workspace;
+        }
 
         self.windows.remove(index);
+
+        // Drop floats on the removed window and shift later windows' float
+        // entries down with their window indexes.
+        let mut i = 0;
+        while i < self.floats.len() {
+            if self.floats[i].window == index {
+                self.floats.remove(i);
+            } else if self.floats[i].window > index {
+                self.floats[i].window -= 1;
+                i += 1;
+            } else {
+                i += 1;
+            }
+        }
 
         // Rebuild every workspace tree with shifted IDs: windows after the
         // removed one move down by one index, and the removed window drops out.
@@ -2450,8 +2558,14 @@ impl Os {
         self.workspace_mut(target_ws).focused = remaining.first().map(|&i| i as usize);
         if target_ws == self.current_workspace {
             self.focused_window = remaining.first().map(|&i| i as usize);
+            // If the tree emptied but floats remain, focus the frontmost float.
             if self.focused_window.is_none() {
-                self.mode = Mode::WindowManagement;
+                if let Some(&fi) = self.floats_on_workspace(target_ws).last() {
+                    self.focused_window = Some(self.floats[fi].window);
+                    self.workspace_mut(target_ws).focused = self.focused_window;
+                } else {
+                    self.mode = Mode::WindowManagement;
+                }
             }
         }
     }
@@ -2474,6 +2588,35 @@ impl Os {
         self.windows.push(window);
 
         let ws = info.workspace.clamp(1, 9);
+        // A pending float (new-floating-shell in remote mode) skips the BSP
+        // tree entirely and becomes a floating pane.
+        if self.pending_float {
+            self.pending_float = false;
+            let bounds = self.workspace_bounds(ws);
+            let rect = float::default_float_rect(bounds);
+            let z = self.floats.iter().map(|f| f.z).max().unwrap_or(0) + 1;
+            self.floats.push(float::FloatPane {
+                window: index,
+                workspace: ws,
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+                z,
+                pinned: false,
+                modal: false,
+            });
+            if let Some(window) = self.windows.get_mut(index) {
+                window.resize(WinSize {
+                    cols: rect.w.max(1) as u16,
+                    rows: rect.h.max(1) as u16,
+                });
+            }
+            self.workspace_mut(ws).focused = Some(index);
+            self.focused_window = Some(index);
+            return index;
+        }
+
         let bounds = self.workspace_bounds(ws);
         let focused = self.workspace(ws).focused;
         let gap = self.gap;
@@ -2512,6 +2655,8 @@ impl Os {
     /// different daemon session).
     pub fn clear_all_windows(&mut self) {
         self.windows.clear();
+        self.floats.clear();
+        self.float_drag = None;
         self.focused_window = None;
         for i in 1..=9 {
             self.workspace_mut(i).tree = BSPTree::new();
@@ -2540,49 +2685,53 @@ impl Os {
     // -----------------------------------------------------------------------
 
     pub fn focus_next(&mut self) {
-        let ws = self.current_workspace;
-        let ids = self.workspace(ws).tree.get_all_window_ids();
-        if ids.is_empty() {
-            self.focused_window = None;
-            return;
-        }
-        let current = self.focused_window;
-        let next = match current {
-            Some(c) => {
-                let pos = ids.iter().position(|&id| id == c as i32).unwrap_or(0);
-                ids[(pos + 1) % ids.len()]
-            }
-            None => ids[0],
-        };
-        if self.focused_window != Some(next as usize) {
-            self.focused_window = Some(next as usize);
-            self.workspace_mut(ws).focused = Some(next as usize);
-            self.record_action("next_window", &[]);
-            let ctx = self.window_hook_ctx(next as usize);
-            self.fire_hook(hooks::Event::AfterFocusChange, ctx);
-        }
+        self.cycle_focus(true, "next_window");
     }
 
     pub fn focus_prev(&mut self) {
+        self.cycle_focus(false, "prev_window");
+    }
+
+    /// Cycle focus through the current workspace's windows: tiled windows in
+    /// BSP order first, then floating panes in z-order.
+    fn cycle_focus(&mut self, forward: bool, action: &str) {
+        // A modal float blocks focus movement to every other pane.
+        if self.focused_is_modal() {
+            return;
+        }
         let ws = self.current_workspace;
-        let ids = self.workspace(ws).tree.get_all_window_ids();
-        if ids.is_empty() {
+        let mut order: Vec<usize> = self
+            .workspace(ws)
+            .tree
+            .get_all_window_ids()
+            .iter()
+            .map(|&i| i as usize)
+            .collect();
+        for fi in self.floats_on_workspace(ws) {
+            order.push(self.floats[fi].window);
+        }
+        if order.is_empty() {
             self.focused_window = None;
             return;
         }
         let current = self.focused_window;
         let next = match current {
             Some(c) => {
-                let pos = ids.iter().position(|&id| id == c as i32).unwrap_or(0);
-                ids[(pos + ids.len() - 1) % ids.len()]
+                let pos = order.iter().position(|&id| id == c).unwrap_or(0);
+                if forward {
+                    (pos + 1) % order.len()
+                } else {
+                    (pos + order.len() - 1) % order.len()
+                }
             }
-            None => ids[0],
+            None => 0,
         };
-        if self.focused_window != Some(next as usize) {
-            self.focused_window = Some(next as usize);
-            self.workspace_mut(ws).focused = Some(next as usize);
-            self.record_action("prev_window", &[]);
-            let ctx = self.window_hook_ctx(next as usize);
+        let n = order[next];
+        if self.focused_window != Some(n) {
+            self.focused_window = Some(n);
+            self.workspace_mut(ws).focused = Some(n);
+            self.record_action(action, &[]);
+            let ctx = self.window_hook_ctx(n);
             self.fire_hook(hooks::Event::AfterFocusChange, ctx);
         }
     }
@@ -2596,10 +2745,16 @@ impl Os {
         Err("directional focus is not implemented in this port".into())
     }
 
-    /// Focus the window at the given index (if on the current workspace).
+    /// Focus the window at the given index (if on the current workspace,
+    /// tiled or floating).
     pub fn focus_window(&mut self, index: usize) {
         let ws = self.current_workspace;
-        if self.workspace(ws).tree.has_window(index as i32) && self.focused_window != Some(index) {
+        let on_ws = self.workspace(ws).tree.has_window(index as i32)
+            || self
+                .float_for_window(index)
+                .map(|fi| self.floats[fi].workspace == ws)
+                .unwrap_or(false);
+        if on_ws && self.focused_window != Some(index) {
             self.focused_window = Some(index);
             self.workspace_mut(ws).focused = Some(index);
             let ctx = self.window_hook_ctx(index);
@@ -2644,6 +2799,28 @@ impl Os {
         let Some(focused) = self.focused_window else {
             return;
         };
+        // A floating window moves with its float entry; the source workspace
+        // keeps its other windows (tiled or floating).
+        if let Some(fi) = self.float_for_window(focused) {
+            let from = self.floats[fi].workspace;
+            self.floats[fi].workspace = number;
+            let bounds = self.workspace_bounds(number);
+            let r = float::clamp_rect(self.floats[fi].rect(), bounds);
+            self.floats[fi].x = r.x;
+            self.floats[fi].y = r.y;
+            self.floats[fi].w = r.w;
+            self.floats[fi].h = r.h;
+            let remaining = self.workspace(from).tree.get_all_window_ids();
+            self.workspace_mut(from).focused = remaining.first().map(|&i| i as usize);
+            if from == self.current_workspace {
+                self.focused_window = remaining.first().map(|&i| i as usize);
+            }
+            self.current_workspace = number;
+            self.workspace_mut(number).focused = Some(focused);
+            self.focused_window = Some(focused);
+            self.prefix = Prefix::None;
+            return;
+        }
         let from = self.current_workspace;
 
         // Remove from the source tree.
@@ -2746,6 +2923,48 @@ impl Os {
         let Some(index) = self.focused_window else {
             return Err("no focused window".into());
         };
+        // Floating panes zoom to the workspace and back, remembering their
+        // float rect in the window's pre-zoom fields.
+        if let Some(fi) = self.float_for_window(index) {
+            let ws = self.floats[fi].workspace;
+            let bounds = self.workspace_bounds(ws);
+            let window = self
+                .windows
+                .get_mut(index)
+                .ok_or_else(|| "window not found".to_string())?;
+            if window.zoomed {
+                window.zoomed = false;
+                let r = float::clamp_rect(
+                    Rect {
+                        x: window.pre_zoom_x,
+                        y: window.pre_zoom_y,
+                        w: window.pre_zoom_width,
+                        h: window.pre_zoom_height,
+                    },
+                    bounds,
+                );
+                window.pre_zoom_x = 0;
+                window.pre_zoom_y = 0;
+                window.pre_zoom_width = 0;
+                window.pre_zoom_height = 0;
+                self.floats[fi].x = r.x;
+                self.floats[fi].y = r.y;
+                self.floats[fi].w = r.w;
+                self.floats[fi].h = r.h;
+            } else {
+                window.zoomed = true;
+                window.pre_zoom_x = self.floats[fi].x;
+                window.pre_zoom_y = self.floats[fi].y;
+                window.pre_zoom_width = self.floats[fi].w;
+                window.pre_zoom_height = self.floats[fi].h;
+                self.floats[fi].x = bounds.x;
+                self.floats[fi].y = bounds.y;
+                self.floats[fi].w = bounds.w;
+                self.floats[fi].h = bounds.h;
+            }
+            self.sync_float_sizes();
+            return Ok(());
+        }
         let Some(rect) = self.current_layout().get(&(index as i32)).copied() else {
             return Err("window has no layout rect".into());
         };
@@ -2775,8 +2994,9 @@ impl Os {
         Ok(())
     }
 
-    /// Resize all windows to their BSP layout rects. Windows whose size
-    /// actually changed after the initial layout fire the after-resize hook.
+    /// Resize all windows to their BSP layout rects (tiled) and float rects
+    /// (floating). Windows whose size actually changed fire the after-resize
+    /// hook.
     pub fn sync_window_sizes(&mut self) {
         let ws = self.current_workspace;
         let bounds = self.workspace_bounds(ws);
@@ -2793,6 +3013,7 @@ impl Os {
                 }
             }
         }
+        self.sync_float_sizes();
         for (index, rect) in resized {
             let mut ctx = self.window_hook_ctx(index);
             ctx.width = rect.w;
@@ -2806,6 +3027,499 @@ impl Os {
         let ws = self.current_workspace;
         let bounds = self.workspace_bounds(ws);
         self.workspace(ws).tree.apply_layout(bounds, self.gap)
+    }
+
+    // -----------------------------------------------------------------------
+    // Floating panes
+    // -----------------------------------------------------------------------
+
+    /// The indices (into `floats`) of the floats on a workspace, sorted
+    /// back-to-front: unpinned by z-order, then pinned by z-order (so pinned
+    /// floats always composite above and win hit-testing).
+    pub fn floats_on_workspace(&self, ws: i32) -> Vec<usize> {
+        let mut v: Vec<usize> = self
+            .floats
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.workspace == ws)
+            .map(|(i, _)| i)
+            .collect();
+        v.sort_by_key(|&i| (self.floats[i].pinned, self.floats[i].z));
+        v
+    }
+
+    /// The index (into `floats`) for a window, if it is floating.
+    pub fn float_for_window(&self, index: usize) -> Option<usize> {
+        self.floats.iter().position(|f| f.window == index)
+    }
+
+    /// Whether a window is currently floating.
+    pub fn is_float(&self, index: usize) -> bool {
+        self.float_for_window(index).is_some()
+    }
+
+    /// Whether the focused window is floating.
+    pub fn focused_is_float(&self) -> bool {
+        self.focused_window.map(|i| self.is_float(i)).unwrap_or(false)
+    }
+
+    /// The screen rect of a floating window, if any.
+    pub fn float_rect(&self, index: usize) -> Option<Rect> {
+        self.float_for_window(index).map(|fi| self.floats[fi].rect())
+    }
+
+    /// The topmost floating window containing a screen cell (current
+    /// workspace only). Pinned floats win over unpinned ones at the same
+    /// cell; within a pin group the highest z wins. Returns `None` while a
+    /// tiled window is zoomed (floats are hidden then).
+    pub fn float_at(&self, column: i32, row: i32) -> Option<usize> {
+        if self.floats_hidden_by_zoom() {
+            return None;
+        }
+        let ws = self.current_workspace;
+        let mut best: Option<(usize, bool, i32)> = None;
+        for f in &self.floats {
+            if f.workspace != ws || !f.contains(column, row) {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some((_, bp, bz)) => (f.pinned, f.z) > (bp, bz),
+            };
+            if better {
+                best = Some((f.window, f.pinned, f.z));
+            }
+        }
+        best.map(|(w, _, _)| w)
+    }
+
+    /// Whether floating panes are hidden because a tiled window on the
+    /// current workspace is zoomed (tmux parity: zoom shows only the zoomed
+    /// pane, so floats disappear until unzoom).
+    pub fn floats_hidden_by_zoom(&self) -> bool {
+        let ws = self.current_workspace;
+        self.workspace(ws)
+            .tree
+            .get_all_window_ids()
+            .iter()
+            .any(|&wid| {
+                self.windows
+                    .get(wid as usize)
+                    .map(|w| w.zoomed)
+                    .unwrap_or(false)
+            })
+    }
+
+    /// Whether the focused window is a modal floating pane.
+    pub fn focused_is_modal(&self) -> bool {
+        self.focused_window
+            .and_then(|i| self.float_for_window(i))
+            .map(|fi| self.floats[fi].modal)
+            .unwrap_or(false)
+    }
+
+    /// Toggle always-on-top on the focused floating pane. Pinning raises the
+    /// pane above every unpinned float; unpinning returns it to normal
+    /// z-order.
+    pub fn toggle_float_pin(&mut self) {
+        let Some(focused) = self.focused_window else {
+            return;
+        };
+        let Some(fi) = self.float_for_window(focused) else {
+            self.notify("no floating pane is focused", "info");
+            return;
+        };
+        let pinned = {
+            let top = self.floats.iter().map(|f| f.z).max().unwrap_or(0);
+            let f = &mut self.floats[fi];
+            f.pinned = !f.pinned;
+            if f.pinned {
+                f.z = top + 1;
+            }
+            f.pinned
+        };
+        self.record_action(if pinned { "float_pin" } else { "float_unpin" }, &[]);
+        self.notify(if pinned { "float pinned" } else { "float unpinned" }, "info");
+    }
+
+    /// Toggle modal mode on the focused floating pane. While modal, the pane
+    /// blocks focus movement and clicks on every other pane until modal is
+    /// toggled off or the pane is closed.
+    pub fn toggle_float_modal(&mut self) {
+        let Some(focused) = self.focused_window else {
+            return;
+        };
+        let Some(fi) = self.float_for_window(focused) else {
+            self.notify("no floating pane is focused", "info");
+            return;
+        };
+        let modal = {
+            let f = &mut self.floats[fi];
+            f.modal = !f.modal;
+            f.modal
+        };
+        self.raise_float(focused);
+        self.record_action(if modal { "float_modal" } else { "float_unmodal" }, &[]);
+        self.notify(
+            if modal {
+                "modal pane active — other panes are blocked until released"
+            } else {
+                "modal pane released"
+            },
+            "info",
+        );
+    }
+
+    /// Raise a floating window to the front of its workspace's z-order.
+    pub fn raise_float(&mut self, index: usize) {
+        let Some(fi) = self.float_for_window(index) else {
+            return;
+        };
+        let top = self.floats.iter().map(|f| f.z).max().unwrap_or(0);
+        if self.floats[fi].z < top {
+            self.floats[fi].z = top + 1;
+        }
+    }
+
+    /// Float the window at `index`: remove it from its workspace's BSP tree
+    /// and give it a centered float rect above the tiles. The window keeps
+    /// running; only its placement changes.
+    pub fn float_window(&mut self, index: usize) {
+        if index >= self.windows.len() || self.is_float(index) {
+            return;
+        }
+        let mut ws = self.current_workspace;
+        for n in 1..=9 {
+            if self.workspace(n).tree.has_window(index as i32) {
+                ws = n;
+                break;
+            }
+        }
+        if !self.workspace(ws).tree.has_window(index as i32) {
+            return;
+        }
+        let bounds = self.workspace_bounds(ws);
+        let rect = float::default_float_rect(bounds);
+        let z = self.floats.iter().map(|f| f.z).max().unwrap_or(0) + 1;
+        self.workspace_mut(ws).tree.remove_window(index as i32);
+        let remaining = self.workspace(ws).tree.get_all_window_ids();
+        self.workspace_mut(ws).focused = remaining.first().map(|&i| i as usize);
+        self.floats.push(float::FloatPane {
+            window: index,
+            workspace: ws,
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h,
+            z,
+            pinned: false,
+            modal: false,
+        });
+        if let Some(window) = self.windows.get_mut(index) {
+            window.resize(WinSize {
+                cols: rect.w.max(1) as u16,
+                rows: rect.h.max(1) as u16,
+            });
+        }
+        self.focused_window = Some(index);
+        self.workspace_mut(ws).focused = Some(index);
+        self.record_action("float_window", &[]);
+        self.log_action("float_window");
+    }
+
+    /// Tile a floating window back into its workspace's BSP tree.
+    pub fn unfloat_window(&mut self, index: usize) {
+        let Some(fi) = self.float_for_window(index) else {
+            return;
+        };
+        let ws = self.floats[fi].workspace;
+        self.floats.remove(fi);
+        let bounds = self.workspace_bounds(ws);
+        let focused = self.workspace(ws).focused.filter(|&f| f != index);
+        let gap = self.gap;
+        let tree = &mut self.workspace_mut(ws).tree;
+        tree.insert_window(
+            index as i32,
+            focused.map(|f| f as i32).unwrap_or(-1),
+            SplitType::None,
+            0.5,
+            bounds,
+            gap,
+        );
+        self.workspace_mut(ws).focused = Some(index);
+        self.focused_window = Some(index);
+        self.sync_window_sizes();
+        self.record_action("tile_window", &[]);
+        self.log_action("tile_window");
+    }
+
+    /// Float the focused window if it is tiled; tile it if it is floating.
+    pub fn toggle_float(&mut self) {
+        let Some(focused) = self.focused_window else {
+            return;
+        };
+        if self.is_float(focused) {
+            self.unfloat_window(focused);
+        } else {
+            self.float_window(focused);
+        }
+    }
+
+    /// Spawn a new shell window directly into a floating pane (no BSP insert).
+    pub fn spawn_floating_window(
+        &mut self,
+        shell: &str,
+        wake: Box<dyn Fn() + Send + 'static>,
+    ) -> Result<usize, String> {
+        let index = self.windows.len();
+        let id = format!("win-{index}");
+        let size = WinSize { cols: 40, rows: 12 };
+        let env = crate::util::guestenv::base_guest_env("local", &id, false, false);
+        let window = Window::spawn(id, "Terminal", size, shell, None, wake, &env)
+            .map_err(|e| e.to_string())?;
+        self.windows.push(window);
+
+        let ws = self.current_workspace;
+        let bounds = self.workspace_bounds(ws);
+        let rect = float::default_float_rect(bounds);
+        let z = self.floats.iter().map(|f| f.z).max().unwrap_or(0) + 1;
+        self.floats.push(float::FloatPane {
+            window: index,
+            workspace: ws,
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h,
+            z,
+            pinned: false,
+            modal: false,
+        });
+        if let Some(window) = self.windows.get_mut(index) {
+            window.resize(WinSize {
+                cols: rect.w.max(1) as u16,
+                rows: rect.h.max(1) as u16,
+            });
+        }
+        self.focused_window = Some(index);
+        self.workspace_mut(ws).focused = Some(index);
+        self.record_action("new_floating_window", &[]);
+        let ctx = self.window_hook_ctx(index);
+        self.fire_hook(hooks::Event::AfterNewWindow, ctx);
+        Ok(index)
+    }
+
+    /// Move the focused floating pane by a cell delta, clamped to its
+    /// workspace.
+    pub fn float_move(&mut self, dx: i32, dy: i32) {
+        let Some(focused) = self.focused_window else {
+            return;
+        };
+        let Some(fi) = self.float_for_window(focused) else {
+            return;
+        };
+        let ws = self.floats[fi].workspace;
+        let bounds = self.workspace_bounds(ws);
+        let f = &mut self.floats[fi];
+        f.x = (f.x + dx).clamp(bounds.x, (bounds.x + bounds.w - f.w).max(bounds.x));
+        f.y = (f.y + dy).clamp(bounds.y, (bounds.y + bounds.h - f.h).max(bounds.y));
+        self.log_action("float_move");
+    }
+
+    /// Resize the focused floating pane by dragging `edge` by `delta` cells
+    /// (positive = outward), clamped to the workspace.
+    pub fn float_resize(&mut self, edge: crate::layout::ResizeEdge, delta: i32) {
+        let Some(focused) = self.focused_window else {
+            return;
+        };
+        let Some(fi) = self.float_for_window(focused) else {
+            return;
+        };
+        let ws = self.floats[fi].workspace;
+        let bounds = self.workspace_bounds(ws);
+        let f = &mut self.floats[fi];
+        match edge {
+            crate::layout::ResizeEdge::Right => {
+                f.w = (f.w + delta)
+                    .clamp(float::FLOAT_MIN_W, (bounds.x + bounds.w - f.x).max(float::FLOAT_MIN_W));
+            }
+            crate::layout::ResizeEdge::Left => {
+                let new_w = (f.w - delta)
+                    .clamp(float::FLOAT_MIN_W, (f.x + f.w - bounds.x).max(float::FLOAT_MIN_W));
+                f.x = f.x + f.w - new_w;
+                f.w = new_w;
+            }
+            crate::layout::ResizeEdge::Bottom => {
+                f.h = (f.h + delta)
+                    .clamp(float::FLOAT_MIN_H, (bounds.y + bounds.h - f.y).max(float::FLOAT_MIN_H));
+            }
+            crate::layout::ResizeEdge::Top => {
+                let new_h = (f.h - delta)
+                    .clamp(float::FLOAT_MIN_H, (f.y + f.h - bounds.y).max(float::FLOAT_MIN_H));
+                f.y = f.y + f.h - new_h;
+                f.h = new_h;
+            }
+        }
+        self.sync_float_sizes();
+        self.log_action("float_resize");
+    }
+
+    /// Re-center the focused floating pane in its workspace.
+    pub fn float_center(&mut self) {
+        let Some(focused) = self.focused_window else {
+            return;
+        };
+        let Some(fi) = self.float_for_window(focused) else {
+            return;
+        };
+        let ws = self.floats[fi].workspace;
+        let bounds = self.workspace_bounds(ws);
+        let f = &mut self.floats[fi];
+        f.x = bounds.x + (bounds.w - f.w) / 2;
+        f.y = bounds.y + (bounds.h - f.h) / 2;
+        self.log_action("float_center");
+    }
+
+    /// Cycle focus through the floating panes on the current workspace
+    /// (wrapping), raising each pane as it is focused.
+    pub fn float_cycle_focus(&mut self, forward: bool) {
+        // A modal float blocks cycling; floats hidden by a tiled zoom are
+        // unreachable.
+        if self.focused_is_modal() || self.floats_hidden_by_zoom() {
+            return;
+        }
+        let ws = self.current_workspace;
+        let floats = self.floats_on_workspace(ws);
+        if floats.is_empty() {
+            return;
+        }
+        let current = self.focused_window.and_then(|i| self.float_for_window(i));
+        let pos = current
+            .and_then(|ci| floats.iter().position(|&f| f == ci))
+            .unwrap_or(0);
+        let next = if forward {
+            (pos + 1) % floats.len()
+        } else {
+            (pos + floats.len() - 1) % floats.len()
+        };
+        let idx = self.floats[floats[next]].window;
+        if self.focused_window != Some(idx) {
+            self.focused_window = Some(idx);
+            self.workspace_mut(ws).focused = Some(idx);
+            self.raise_float(idx);
+            self.record_action(if forward { "next_float" } else { "prev_float" }, &[]);
+            let ctx = self.window_hook_ctx(idx);
+            self.fire_hook(hooks::Event::AfterFocusChange, ctx);
+        }
+    }
+
+    /// Clamp every float rect to its workspace bounds and resize the backing
+    /// windows to match. Idempotent, so it is safe to call every frame.
+    pub fn sync_float_sizes(&mut self) {
+        let mut to_resize: Vec<(usize, u16, u16)> = Vec::new();
+        for i in 0..self.floats.len() {
+            let bounds = self.workspace_bounds(self.floats[i].workspace);
+            let r = float::clamp_rect(self.floats[i].rect(), bounds);
+            self.floats[i].x = r.x;
+            self.floats[i].y = r.y;
+            self.floats[i].w = r.w;
+            self.floats[i].h = r.h;
+            to_resize.push((self.floats[i].window, r.w.max(1) as u16, r.h.max(1) as u16));
+        }
+        for (window, cols, rows) in to_resize {
+            if let Some(win) = self.windows.get_mut(window) {
+                win.resize(WinSize { cols, rows });
+            }
+        }
+    }
+
+    /// Begin a mouse drag (move or resize) on a floating pane.
+    pub fn start_float_drag(&mut self, window: usize, kind: float::FloatDragKind, x: i32, y: i32) {
+        let Some(rect) = self.float_rect(window) else {
+            return;
+        };
+        self.float_drag = Some(float::FloatDragState {
+            window,
+            kind,
+            start_x: x,
+            start_y: y,
+            start_rect: rect,
+        });
+    }
+
+    /// Apply an in-progress float drag to the current cursor position. The
+    /// drag state is passed in (it was taken out of `float_drag`) and stored
+    /// back so the original start rect is preserved across motion events.
+    pub fn apply_float_drag(&mut self, drag: float::FloatDragState, x: i32, y: i32) {
+        let Some(fi) = self.float_for_window(drag.window) else {
+            return;
+        };
+        let ws = self.floats[fi].workspace;
+        let bounds = self.workspace_bounds(ws);
+        let dx = x - drag.start_x;
+        let dy = y - drag.start_y;
+        let mut r = drag.start_rect;
+        match drag.kind {
+            float::FloatDragKind::Move => {
+                r.x += dx;
+                r.y += dy;
+            }
+            float::FloatDragKind::Resize(edge) => match edge {
+                crate::layout::ResizeEdge::Right => {
+                    r.w = (r.w + dx).clamp(float::FLOAT_MIN_W, i32::MAX);
+                }
+                crate::layout::ResizeEdge::Left => {
+                    let new_w = (r.w - dx).clamp(float::FLOAT_MIN_W, i32::MAX);
+                    r.x = r.x + r.w - new_w;
+                    r.w = new_w;
+                }
+                crate::layout::ResizeEdge::Bottom => {
+                    r.h = (r.h + dy).clamp(float::FLOAT_MIN_H, i32::MAX);
+                }
+                crate::layout::ResizeEdge::Top => {
+                    let new_h = (r.h - dy).clamp(float::FLOAT_MIN_H, i32::MAX);
+                    r.y = r.y + r.h - new_h;
+                    r.h = new_h;
+                }
+            },
+        }
+        r = float::clamp_rect(r, bounds);
+        let f = &mut self.floats[fi];
+        f.x = r.x;
+        f.y = r.y;
+        f.w = r.w;
+        f.h = r.h;
+        if let Some(win) = self.windows.get_mut(drag.window) {
+            win.resize(WinSize {
+                cols: r.w.max(1) as u16,
+                rows: r.h.max(1) as u16,
+            });
+        }
+        self.float_drag = Some(drag);
+    }
+
+    /// The float border interaction a screen cell starts (topmost float
+    /// wins), if any.
+    pub fn float_edge_at(&self, column: i32, row: i32) -> Option<(usize, float::FloatDragKind)> {
+        if self.floats_hidden_by_zoom() {
+            return None;
+        }
+        let ws = self.current_workspace;
+        let mut best: Option<(usize, bool, i32, float::FloatDragKind)> = None;
+        for f in &self.floats {
+            if f.workspace != ws {
+                continue;
+            }
+            if let Some(kind) = float::float_edge_at(f, column, row) {
+                let better = match best {
+                    None => true,
+                    Some((_, bp, bz, _)) => (f.pinned, f.z) > (bp, bz),
+                };
+                if better {
+                    best = Some((f.window, f.pinned, f.z, kind));
+                }
+            }
+        }
+        best.map(|(w, _, _, k)| (w, k))
     }
 
     /// The focused window's emulator, if any.
@@ -2943,6 +3657,11 @@ impl Os {
             Command::ToggleTiling => {
                 // BSP tiling is always on in this port; the palette entry
                 // exists for parity with the Go command list.
+            }
+            Command::ToggleFloat => self.toggle_float(),
+            Command::FloatNew => {
+                let shell = self.default_shell();
+                let _ = self.spawn_floating_window(&shell, Box::new(|| {}));
             }
             Command::EqualizeSplits => {
                 let ws = self.current_workspace;
@@ -3580,11 +4299,14 @@ impl Os {
         let mut items = Vec::new();
         for ws in 1..=9 {
             let ids = self.workspace(ws).tree.get_all_window_ids();
-            if ids.is_empty() {
+            if ids.is_empty() && self.floats_on_workspace(ws).is_empty() {
                 continue;
             }
-            for wid in ids {
-                let idx = wid as usize;
+            let mut windows: Vec<usize> = ids.iter().map(|&i| i as usize).collect();
+            for fi in self.floats_on_workspace(ws) {
+                windows.push(self.floats[fi].window);
+            }
+            for idx in windows {
                 let Some(window) = self.windows.get(idx) else {
                     continue;
                 };
@@ -4348,8 +5070,11 @@ impl Os {
         column: i32,
         row: i32,
     ) -> Option<(usize, i32)> {
-        let layout = self.current_layout();
-        let rect = layout.get(&(window as i32))?;
+        let rect = if self.is_float(window) {
+            self.float_rect(window)
+        } else {
+            self.current_layout().get(&(window as i32)).copied()
+        }?;
         // The pane border consumes the outer ring; content starts one cell in.
         let rel_row = (row - rect.y - 1).max(0);
         let rel_col = (column - rect.x - 1).max(0);
@@ -4419,6 +5144,10 @@ impl Os {
         row: i32,
         layout: &HashMap<i32, Rect>,
     ) -> Option<usize> {
+        // Floating panes sit above the tiled layout: the topmost float wins.
+        if let Some(idx) = self.float_at(column, row) {
+            return Some(idx);
+        }
         let mut best: Option<(usize, i32)> = None;
         for (&window_id, &rect) in layout {
             if column >= rect.x
@@ -5836,6 +6565,258 @@ mod tests {
             assert!(os.workspace(i).tree.get_all_window_ids().is_empty());
         }
     }
+
+    // --- Floating panes ---
+
+    fn float_test_os() -> Os {
+        let mut os = test_os();
+        for i in 0..2 {
+            let w = Window::without_pty(
+                format!("w{i}"),
+                format!("win{i}"),
+                WinSize { cols: 10, rows: 3 },
+            );
+            os.windows.push(w);
+        }
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(1, 0, SplitType::Horizontal, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+        os
+    }
+
+    #[test]
+    fn float_window_removes_from_tree_and_keeps_running() {
+        let mut os = float_test_os();
+        os.float_window(0);
+        assert!(os.is_float(0));
+        assert!(!os.workspace(1).tree.has_window(0));
+        // The window is still alive, just not tiled.
+        assert_eq!(os.windows.len(), 2);
+        assert_eq!(os.focused_window, Some(0));
+        // Float rect is centered and inside the workspace.
+        let r = os.float_rect(0).unwrap();
+        assert!(r.w > 0 && r.h > 0);
+        assert!(r.x >= 0 && r.x + r.w <= 80);
+        assert!(r.y >= 0 && r.y + r.h <= 24);
+    }
+
+    #[test]
+    fn unfloat_window_reinserts_into_tree() {
+        let mut os = float_test_os();
+        os.float_window(0);
+        os.unfloat_window(0);
+        assert!(!os.is_float(0));
+        assert!(os.workspace(1).tree.has_window(0));
+    }
+
+    #[test]
+    fn toggle_float_floats_and_tiles() {
+        let mut os = float_test_os();
+        os.toggle_float();
+        assert!(os.is_float(0));
+        os.toggle_float();
+        assert!(!os.is_float(0));
+        assert!(os.workspace(1).tree.has_window(0));
+    }
+
+    #[test]
+    fn spawn_floating_window_skips_tree() {
+        let mut os = test_os();
+        let idx = os.spawn_floating_window("/bin/sh", Box::new(|| {})).unwrap();
+        assert_eq!(idx, 0);
+        assert!(os.is_float(0));
+        assert!(!os.workspace(1).tree.has_window(0));
+        assert_eq!(os.focused_window, Some(0));
+    }
+
+    #[test]
+    fn float_move_clamps_to_bounds() {
+        let mut os = float_test_os();
+        os.float_window(0);
+        os.focused_window = Some(0);
+        let r = os.float_rect(0).unwrap();
+        for _ in 0..100 {
+            os.float_move(-1, -1);
+        }
+        let r2 = os.float_rect(0).unwrap();
+        assert_eq!(r2.x, 0);
+        assert_eq!(r2.y, 0);
+        assert_eq!(r2.w, r.w);
+        assert_eq!(r2.h, r.h);
+    }
+
+    #[test]
+    fn float_resize_grows_and_shrinks() {
+        let mut os = float_test_os();
+        os.float_window(0);
+        os.focused_window = Some(0);
+        let r = os.float_rect(0).unwrap();
+        os.float_resize(crate::layout::ResizeEdge::Right, 5);
+        let r2 = os.float_rect(0).unwrap();
+        assert_eq!(r2.w, r.w + 5);
+        os.float_resize(crate::layout::ResizeEdge::Right, -100);
+        let r3 = os.float_rect(0).unwrap();
+        assert!(r3.w >= float::FLOAT_MIN_W);
+    }
+
+    #[test]
+    fn float_cycle_focus_wraps() {
+        let mut os = float_test_os();
+        os.float_window(0);
+        os.float_window(1);
+        os.focused_window = Some(0);
+        os.float_cycle_focus(true);
+        assert_eq!(os.focused_window, Some(1));
+        os.float_cycle_focus(true);
+        assert_eq!(os.focused_window, Some(0));
+        os.float_cycle_focus(false);
+        assert_eq!(os.focused_window, Some(1));
+    }
+
+    #[test]
+    fn remove_window_shifts_and_drops_floats() {
+        let mut os = float_test_os();
+        os.float_window(0);
+        os.float_window(1);
+        // Remove window 0 (a float): its float drops and window 1's float
+        // shifts down with the window index.
+        os.remove_window(0);
+        assert_eq!(os.windows.len(), 1);
+        assert_eq!(os.floats.len(), 1);
+        assert_eq!(os.floats[0].window, 0);
+    }
+
+    #[test]
+    fn focus_next_cycles_through_floats() {
+        let mut os = float_test_os();
+        os.float_window(0); // tree now holds only window 1
+        os.focused_window = Some(1);
+        os.focus_next();
+        assert_eq!(os.focused_window, Some(0)); // tile → float
+        os.focus_next();
+        assert_eq!(os.focused_window, Some(1)); // float → tile
+    }
+
+    #[test]
+    fn window_at_prefers_floats_over_tiles() {
+        let mut os = float_test_os();
+        os.float_window(0);
+        let r = os.float_rect(0).unwrap();
+        // A point inside the float resolves to the float, not the tile under
+        // it.
+        assert_eq!(os.window_at(r.x + 1, r.y + 1), Some(0));
+        // A point outside the float still hits the tile.
+        assert_eq!(os.window_at(1, 1), Some(1));
+    }
+
+    #[test]
+    fn pin_keeps_float_above_unpinned_on_raise() {
+        let mut os = float_test_os();
+        os.float_window(0);
+        os.float_window(1);
+        // Pin the lower float (window 0); raise the other one repeatedly.
+        os.focused_window = Some(0);
+        os.toggle_float_pin();
+        assert!(os.floats[os.float_for_window(0).unwrap()].pinned);
+        os.focused_window = Some(1);
+        for _ in 0..3 {
+            os.raise_float(1);
+        }
+        let order = os.floats_on_workspace(1);
+        // Frontmost (last) must be the pinned float despite lower z.
+        assert_eq!(os.floats[order[order.len() - 1]].window, 0);
+        assert_eq!(os.floats[order[0]].window, 1);
+    }
+
+    #[test]
+    fn float_at_prefers_pinned_over_higher_z() {
+        let mut os = float_test_os();
+        os.float_window(0);
+        os.float_window(1);
+        os.focused_window = Some(0);
+        os.toggle_float_pin();
+        os.focused_window = Some(1);
+        os.raise_float(1); // unpinned float now has higher z
+        let r = os.float_rect(0).unwrap();
+        // Overlapping cell: the pinned float wins hit-testing.
+        assert_eq!(os.window_at(r.x + 1, r.y + 1), Some(0));
+        // Unpin restores plain z-order (topmost = raised float).
+        os.focused_window = Some(0);
+        os.toggle_float_pin();
+        assert_eq!(os.window_at(r.x + 1, r.y + 1), Some(1));
+    }
+
+    #[test]
+    fn modal_blocks_focus_cycle_until_released() {
+        let mut os = float_test_os();
+        os.float_window(0);
+        os.focused_window = Some(0);
+        os.toggle_float_modal();
+        assert!(os.focused_is_modal());
+        // Cycle keys and float cycle are both blocked while modal.
+        os.focus_next();
+        assert_eq!(os.focused_window, Some(0));
+        os.focus_prev();
+        assert_eq!(os.focused_window, Some(0));
+        os.float_cycle_focus(true);
+        assert_eq!(os.focused_window, Some(0));
+        // Releasing restores focus movement.
+        os.toggle_float_modal();
+        assert!(!os.focused_is_modal());
+        os.focus_next();
+        assert_eq!(os.focused_window, Some(1));
+    }
+
+    #[test]
+    fn floats_hidden_while_tile_is_zoomed() {
+        let mut os = float_test_os();
+        os.float_window(0);
+        let r = os.float_rect(0).unwrap();
+        assert_eq!(os.window_at(r.x + 1, r.y + 1), Some(0));
+        // Zoom a tiled window: floats disappear from hit-testing.
+        os.focused_window = Some(1);
+        os.toggle_zoom_internal().unwrap();
+        assert!(os.floats_hidden_by_zoom());
+        assert_eq!(os.float_at(r.x + 1, r.y + 1), None);
+        assert_eq!(os.window_at(r.x + 1, r.y + 1), Some(1));
+        // Unzoom restores float hit-testing.
+        os.toggle_zoom_internal().unwrap();
+        assert!(!os.floats_hidden_by_zoom());
+        assert_eq!(os.window_at(r.x + 1, r.y + 1), Some(0));
+    }
+
+    #[test]
+    fn float_zoom_expands_and_restores() {
+        let mut os = float_test_os();
+        os.float_window(0);
+        os.focused_window = Some(0);
+        let r = os.float_rect(0).unwrap();
+        os.toggle_zoom_internal().unwrap();
+        let zoomed = os.float_rect(0).unwrap();
+        assert_eq!(zoomed.x, 0);
+        assert_eq!(zoomed.y, 0);
+        assert_eq!(zoomed.w, 80);
+        assert_eq!(zoomed.h, 24);
+        os.toggle_zoom_internal().unwrap();
+        let restored = os.float_rect(0).unwrap();
+        assert_eq!(restored, r);
+    }
+
+    #[test]
+    fn float_move_to_workspace_moves_float() {
+        let mut os = float_test_os();
+        os.float_window(0);
+        os.move_focused_to_workspace(3);
+        assert_eq!(os.current_workspace, 3);
+        assert!(os.is_float(0));
+        assert_eq!(os.float_for_window(0).map(|fi| os.floats[fi].workspace), Some(3));
+    }
 }
 
 #[cfg(test)]
@@ -6991,4 +7972,5 @@ mod browser_tests {
         assert!(os.tape_manager_cache.is_some());
         assert_eq!(os.tape_manager_mode, TapeManagerMode::List);
     }
+
 }

@@ -33,6 +33,35 @@ pub fn dispatch(os: &mut Os, action: &str) -> bool {
         "toggle_zoom" => {
             let _ = os.toggle_zoom_internal();
         }
+        // Floating panes.
+        "toggle_float" => os.toggle_float(),
+        "float_focused" => {
+            if let Some(f) = os.focused_window {
+                os.float_window(f);
+            }
+        }
+        "tile_focused" => {
+            if let Some(f) = os.focused_window {
+                os.unfloat_window(f);
+            }
+        }
+        "new_floating_shell" => {
+            let shell = os.default_shell();
+            let _ = os.spawn_floating_window(&shell, Box::new(|| {}));
+        }
+        "float_cycle_next" => os.float_cycle_focus(true),
+        "float_cycle_prev" => os.float_cycle_focus(false),
+        "float_move_left" => os.float_move(-1, 0),
+        "float_move_right" => os.float_move(1, 0),
+        "float_move_up" => os.float_move(0, -1),
+        "float_move_down" => os.float_move(0, 1),
+        "float_resize_left" => os.float_resize(crate::layout::ResizeEdge::Left, 1),
+        "float_resize_right" => os.float_resize(crate::layout::ResizeEdge::Right, 1),
+        "float_resize_up" => os.float_resize(crate::layout::ResizeEdge::Top, 1),
+        "float_resize_down" => os.float_resize(crate::layout::ResizeEdge::Bottom, 1),
+        "float_center" => os.float_center(),
+        "float_pin" => os.toggle_float_pin(),
+        "float_modal" => os.toggle_float_modal(),
         "equalize_splits" => {
             let ws = os.current_workspace;
             os.workspace_mut(ws).tree.equalize_ratios();
@@ -116,6 +145,23 @@ pub fn all_action_names() -> Vec<&'static str> {
         "split_horizontal",
         "split_vertical",
         "toggle_zoom",
+        "toggle_float",
+        "float_focused",
+        "tile_focused",
+        "new_floating_shell",
+        "float_cycle_next",
+        "float_cycle_prev",
+        "float_move_left",
+        "float_move_right",
+        "float_move_up",
+        "float_move_down",
+        "float_resize_left",
+        "float_resize_right",
+        "float_resize_up",
+        "float_resize_down",
+        "float_center",
+        "float_pin",
+        "float_modal",
         "equalize_splits",
         "rotate_split",
         "swap_left",

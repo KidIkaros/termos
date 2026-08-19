@@ -50,7 +50,6 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     // Composite each pane.
     let layout = os.current_layout();
     let bounds = os.workspace_bounds(os.current_workspace);
-    let focused = os.focused_window;
     let ws = os.current_workspace;
     let all_ids = os.workspace(ws).tree.get_all_window_ids();
 
@@ -98,27 +97,7 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         } else {
             rect_to_tui(*rect, content_area)
         };
-        let is_focused = focused == Some(window_id as usize);
-        let selection = os
-            .selection
-            .as_ref()
-            .filter(|s| s.window == window_id as usize);
-
-        // Paint the pane content, selection highlight, and scrollbar.
-        if let Ok(emu) = window.emulator.lock() {
-            paint_emulator(buf, &emu, tui_rect, os.theme.as_ref());
-            paint_selection(buf, &emu, tui_rect, selection);
-            paint_scrollbar(buf, &emu, tui_rect, os, is_focused);
-        }
-
-        // Draw the border.
-        let border_color = if is_focused {
-            focused_border_color(os)
-        } else {
-            unfocused_border_color(os)
-        };
-        let title = window.title.clone();
-        draw_pane_border(buf, tui_rect, &title, is_focused, border_color, os);
+        paint_pane(os, buf, window_id as usize, tui_rect);
     }
 
     // Render junction-aware border grid for shared borders.
@@ -141,6 +120,27 @@ pub fn render(os: &Os, buf: &mut Buffer) {
                 os.config.appearance.use_ascii_only,
                 os.gap,
             );
+        }
+    }
+
+    // Floating panes composite above the tiled layout and the border grid,
+    // sorted back-to-front by z-order (pinned floats on top). Floats are
+    // hidden entirely while a tiled window is zoomed.
+    if !os.floats_hidden_by_zoom() {
+        for fi in os.floats_on_workspace(ws) {
+            let f = &os.floats[fi];
+            let window_id = f.window;
+            let Some(window) = os.windows.get(window_id) else {
+                continue;
+            };
+            let frect = f.rect();
+            // A zoomed float fills the workspace.
+            let rect = if window.zoomed { &bounds } else { &frect };
+            if !crate::ui::perf::is_visible(rect, &content_bounds) {
+                continue;
+            }
+            let tui_rect = rect_to_tui(*rect, content_area);
+            paint_pane(os, buf, window_id, tui_rect);
         }
     }
 
@@ -488,6 +488,46 @@ pub fn render_list_overlay(
     }
 }
 
+/// Paint one pane's content, selection highlight, scrollbar, and border at
+/// the given screen rect. Shared by the tiled and floating render passes.
+fn paint_pane(os: &Os, buf: &mut Buffer, window_id: usize, tui_rect: TuiRect) {
+    let Some(window) = os.windows.get(window_id) else {
+        return;
+    };
+    let is_focused = os.focused_window == Some(window_id);
+    let selection = os
+        .selection
+        .as_ref()
+        .filter(|s| s.window == window_id);
+
+    // Paint the pane content, selection highlight, and scrollbar.
+    if let Ok(emu) = window.emulator.lock() {
+        paint_emulator(buf, &emu, tui_rect, os.theme.as_ref());
+        paint_selection(buf, &emu, tui_rect, selection);
+        paint_scrollbar(buf, &emu, tui_rect, os, is_focused);
+    }
+
+    // Draw the border.
+    let border_color = if is_focused {
+        focused_border_color(os)
+    } else {
+        unfocused_border_color(os)
+    };
+    let mut title = window.title.clone();
+    // Floating-pane badges: pin (always-on-top) and modal (blocks other
+    // panes) are shown in the title so the state is discoverable.
+    if let Some(fi) = os.float_for_window(window_id) {
+        let f = &os.floats[fi];
+        if f.modal {
+            title = format!("\u{26d4} {title}");
+        }
+        if f.pinned {
+            title = format!("\u{1f4cc} {title}");
+        }
+    }
+    draw_pane_border(buf, tui_rect, &title, is_focused, border_color, os);
+}
+
 fn rect_to_tui(rect: Rect, content_area: TuiRect) -> TuiRect {
     TuiRect {
         x: content_area.x + rect.x.max(0) as u16,
@@ -676,11 +716,15 @@ fn draw_pane_border(
     // copying styled interior spaces would wipe the pane content drawn first.
     let mut block_buf = Buffer::empty(inner);
     block.render(inner, &mut block_buf);
+    // The scratch buffer's area is the pane rect (which can be offset from
+    // the origin), and ratatui's `Buffer::cell` expects absolute coordinates.
     for y in 0..inner.height {
         for x in 0..inner.width {
-            let src = block_buf.cell((x, y)).unwrap();
+            let src = block_buf
+                .cell((inner.x.saturating_add(x), inner.y.saturating_add(y)))
+                .unwrap();
             if src.symbol() != " " {
-                buf[(inner.x + x, inner.y + y)] = src.clone();
+                buf[(inner.x.saturating_add(x), inner.y.saturating_add(y))] = src.clone();
             }
         }
     }
@@ -723,11 +767,14 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
         }
     };
 
+    // The dock count includes floating panes (which are not in the BSP
+    // tree and therefore not in `sorted_ids`).
+    let float_count = os.floats_on_workspace(os.current_workspace).len();
     let mut left_text = format!(
         " {} {}:{} ",
         mode_name,
         os.current_workspace,
-        sorted_ids.len()
+        sorted_ids.len() + float_count
     );
     if os.prefix != Prefix::None {
         left_text.push_str("⌨ ");
@@ -1747,6 +1794,77 @@ mod tests {
         // Check that the dock row (last row) has content.
         let dock_row = 23u16;
         let cell = &buf[(0, dock_row)];
+        assert!(!cell.symbol().is_empty());
+    }
+
+    #[test]
+    fn render_split_panes_with_offset_rects_does_not_panic() {
+        // Regression: `draw_pane_border` reads its scratch buffer back with
+        // absolute coordinates; panes offset from the origin (right/top
+        // halves, floating panes) used to hit a `None` unwrap.
+        use crate::terminal::pty::WinSize;
+        use crate::terminal::window::Window;
+        let mut os = test_os();
+        for i in 0..2 {
+            let w = Window::without_pty(
+                format!("w{i}"),
+                format!("win{i}"),
+                WinSize { cols: 10, rows: 3 },
+            );
+            os.windows.push(w);
+        }
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1).tree.insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(1, 0, SplitType::Vertical, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        render(&os, &mut buf);
+        // Both pane borders are painted (the right pane starts at x=40).
+        let cell = &buf[(79, 0)];
+        assert!(!cell.symbol().is_empty());
+    }
+
+    #[test]
+    fn render_float_above_tiles_does_not_panic() {
+        use crate::app::float::FloatPane;
+        use crate::terminal::pty::WinSize;
+        use crate::terminal::window::Window;
+        let mut os = test_os();
+        for i in 0..2 {
+            let w = Window::without_pty(
+                format!("w{i}"),
+                format!("win{i}"),
+                WinSize { cols: 10, rows: 3 },
+            );
+            os.windows.push(w);
+        }
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+        // A float offsets from the origin: {16, 5, 48, 14} on an 80x24 host.
+        os.floats.push(FloatPane {
+            window: 1,
+            workspace: 1,
+            x: 16,
+            y: 5,
+            w: 48,
+            h: 14,
+            z: 1,
+            pinned: false,
+            modal: false,
+        });
+
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        render(&os, &mut buf);
+        // The float's top-left border corner paints at its offset position.
+        let cell = &buf[(16, 5)];
         assert!(!cell.symbol().is_empty());
     }
 
