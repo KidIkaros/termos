@@ -38,6 +38,50 @@ pub struct UserConfig {
     /// Debug/diagnostic settings.
     #[serde(default)]
     pub debug: DebugConfig,
+    /// Status-line widgets: external commands whose stdout is rendered
+    /// in the dock bar.
+    #[serde(default)]
+    pub status_widgets: Vec<StatusWidgetConfig>,
+    /// Custom palette actions: map a name to a shell command.
+    #[serde(default)]
+    pub custom_actions: Vec<CustomActionConfig>,
+}
+
+/// A status-line widget (`[[status_widgets]]`): runs a shell command
+/// periodically and displays the first line of stdout in the dock.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusWidgetConfig {
+    /// Display label in the dock.
+    pub name: String,
+    /// Shell command to run (output = widget text).
+    pub command: String,
+    /// Refresh interval in milliseconds (0 = run once at startup).
+    #[serde(default)]
+    pub refresh_ms: u64,
+    /// Alignment: "left", "center", or "right" (default: "right").
+    #[serde(default = "default_widget_align")]
+    pub alignment: String,
+}
+
+fn default_widget_align() -> String {
+    "right".into()
+}
+
+/// A custom palette action (`[[custom_actions]]`): adds a command to
+/// the palette that runs a shell command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomActionConfig {
+    /// Action name shown in the palette.
+    pub name: String,
+    /// Shell command to execute.
+    pub command: String,
+    /// Palette category (default: "Custom").
+    #[serde(default = "default_action_category")]
+    pub category: String,
+}
+
+fn default_action_category() -> String {
+    "Custom".into()
 }
 
 /// Tape (project automation) settings (`[tape]`).
@@ -195,6 +239,7 @@ pub struct SidebarConfig {
 
 /// Appearance settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppearanceConfig {
     pub border_style: String,
     pub hide_window_buttons: bool,
@@ -460,6 +505,8 @@ impl UserConfig {
             notifications: NotificationsConfig::default(),
             tape: TapeConfig::default(),
             debug: DebugConfig::default(),
+            status_widgets: Vec::new(),
+            custom_actions: Vec::new(),
         };
         cfg.keybindings.fill_missing();
         cfg

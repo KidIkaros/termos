@@ -1085,12 +1085,63 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
         }
     }
 
+    // --- Status widgets: right-aligned, before session controls ---
+
+    let widget_cache = os.widget_cache.lock().unwrap();
+    if !widget_cache.is_empty() {
+        let mut wx: u16 = area.width;
+        // Render widgets right-to-left.
+        let mut widget_texts: Vec<(&str, &str)> = os.config.status_widgets.iter()
+            .filter_map(|w| widget_cache.get(&w.name).map(|v| (w.name.as_str(), v.as_str())))
+            .collect();
+        widget_texts.reverse(); // right-align order
+        for (i, (_name, text)) in widget_texts.iter().enumerate() {
+            if text.is_empty() {
+                continue;
+            }
+            let label = format!(" {text} ");
+            let label_w = label.chars().count() as u16;
+            // Separator before each widget (except the first).
+            let sep_w: u16 = if i > 0 { 1 } else { 0 };
+            let total = label_w + sep_w;
+            if wx < total {
+                break;
+            }
+            wx -= total;
+            // Draw separator.
+            if sep_w > 0 {
+                let cell = &mut buf[(area.x + wx, y)];
+                cell.set_char('│');
+                cell.set_style(TuiStyle::default().fg(muted).bg(bg));
+            }
+            // Draw widget text.
+            for (j, ch) in label.chars().enumerate() {
+                let cx = area.x + wx + sep_w + j as u16;
+                if cx < area.x + area.width {
+                    let cell = &mut buf[(cx, y)];
+                    cell.set_char(ch);
+                    cell.set_style(TuiStyle::default().fg(muted).bg(bg));
+                }
+            }
+        }
+    }
+
     // --- Right region: session controls ---
+    // Account for status widget width so widgets and buttons don't overlap.
+    let mut widget_total_width: u16 = 0;
+    for (i, w) in os.config.status_widgets.iter().enumerate() {
+        if let Some(text) = widget_cache.get(&w.name) {
+            if !text.is_empty() {
+                widget_total_width += text.len() as u16 + 2; // text + spaces
+                if i > 0 { widget_total_width += 1; } // separator
+            }
+        }
+    }
 
     let session_fit = super::dock_session_buttons::dock_session_controls_fit(dock_width);
     if session_fit {
         let buttons = super::dock_session_buttons::dock_session_buttons(ascii_only);
-        let mut rx = area.width;
+        let mut rx = area.width.saturating_sub(widget_total_width);
         for (action, icon) in buttons.iter().rev() {
             let label = format!(" {} ", icon);
             let btn_width = label.chars().count() as u16;

@@ -57,6 +57,8 @@ impl Os {
                 self.tick_animations();
                 self.tick_tooltip();
                 self.tick_script();
+                self.flush_widget_threads();
+                self.update_status_widgets();
                 self.tick_stats.record_frame(Duration::ZERO);
                 self.sync_window_sizes();
                 self.flush_graphics();

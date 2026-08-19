@@ -287,10 +287,13 @@ plugins) is its headline differentiator. A full WASM runtime is a
 multi-month project; start with the pragmatic path and document an extension
 protocol so a WASM layer can slot in later.
 
-- ⬜ Hook-driven external commands for status-line widgets and custom
-  actions (run a binary, feed its output into the UI).
-- ⬜ Document the extension protocol (`docs/EXTENSIONS.md`): hooks, verb
-  surface, rendering contract.
+- ✅ Hook-driven external commands for status-line widgets (`status_widgets`
+  config: name, command, refresh_ms, alignment; output cached and rendered
+  right-aligned in the dock) and custom palette actions (`custom_actions`
+  config: name, command, category; dispatched synchronously with TERMOS_*
+  env).
+- ✅ Document the extension protocol (`docs/EXTENSIONS.md`): hooks, verb
+  surface, rendering contract, WASM roadmap.
 - ⬜ Re-evaluate WASM plugins only if adoption justifies it.
 
 ## Phase 16 — Kitty animation protocol (Tier 3: niche)

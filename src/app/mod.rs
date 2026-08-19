@@ -70,7 +70,7 @@ pub enum Prefix {
 
 /// A command the command palette can run. Ported from the TUIOS command list,
 /// adapted to the local single-process architecture.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     NewWindow,
     CloseWindow,
@@ -119,6 +119,8 @@ pub enum Command {
     BulkClose,
     BulkStack,
     BulkBreak,
+    /// A user-defined custom action (shell command from config).
+    CustomAction(String),
 }
 
 impl Command {
@@ -226,6 +228,7 @@ impl Command {
             Command::BulkClose => "Close selected panes".into(),
             Command::BulkStack => "Stack selected panes".into(),
             Command::BulkBreak => "Break selected from stack".into(),
+            Command::CustomAction(name) => name.clone(),
         }
     }
 
@@ -247,7 +250,8 @@ impl Command {
             Command::Settings | Command::Theme | Command::ThemeDetect
             | Command::AccentPicker | Command::ToggleSidebar => "Settings",
             Command::StackPane | Command::CycleStack | Command::MultiSelect
-            | Command::BulkClose | Command::BulkStack | Command::BulkBreak => "Window",
+            | Command::BulkClose | Command::BulkStack | Command::BulkBreak
+            | Command::CustomAction(_) => "Custom",
             Command::CommandPalette | Command::SessionSwitcher | Command::LayoutSwitcher
             | Command::TapeManager | Command::Help => "Open",
             Command::Quit | Command::Detach => "Session",
@@ -651,6 +655,13 @@ pub struct Os {
     pub last_sound_played: Option<std::time::Instant>,
     /// Cached audio player command (None = not probed yet, Some(None) = none found).
     pub sound_player: Option<Option<&'static str>>,
+    /// Cached status widget output: widget name → rendered text.
+    /// Shared with the background refresh thread.
+    pub widget_cache: Arc<Mutex<HashMap<String, String>>>,
+    /// When each widget was last refreshed: widget name → Instant.
+    pub widget_last_run: HashMap<String, std::time::Instant>,
+    /// Background thread handles for widget refresh.
+    widget_threads: Vec<std::thread::JoinHandle<()>>,
 }
 
 /// A discovered `.tuios.tape` waiting on the trust review.
@@ -952,6 +963,9 @@ impl Os {
             graphics_caps: crate::graphics::capability::Capabilities::default(),
             last_sound_played: None,
             sound_player: None,
+            widget_cache: Arc::new(Mutex::new(HashMap::new())),
+            widget_last_run: HashMap::new(),
+            widget_threads: Vec::new(),
         }
     }
 
@@ -1811,6 +1825,67 @@ impl Os {
     }
 
     /// Drain pending APC and Sixel sequences from all windows and forward
+    /// Refresh status widgets whose refresh interval has elapsed.
+    /// Spawns a background thread per stale widget so the tick is not blocked.
+    pub fn update_status_widgets(&mut self) {
+        let now = std::time::Instant::now();
+        for widget in &self.config.status_widgets {
+            if widget.command.is_empty() {
+                continue;
+            }
+            let last = self.widget_last_run.get(&widget.name).copied()
+                .unwrap_or(now - std::time::Duration::from_secs(86400));
+            let interval = std::time::Duration::from_millis(widget.refresh_ms.max(1));
+            if now.duration_since(last) < interval {
+                continue;
+            }
+            let name = widget.name.clone();
+            let cmd = widget.command.clone();
+            let cache = Arc::clone(&self.widget_cache);
+            self.widget_threads.push(std::thread::spawn(move || {
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .output();
+                let text = match output {
+                    Ok(out) => String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string(),
+                    Err(_) => "err".into(),
+                };
+                cache.lock().unwrap().insert(name, text);
+            }));
+            self.widget_last_run.insert(widget.name.clone(), now);
+        }
+        // Reap finished threads.
+        self.widget_threads.retain(|t| !t.is_finished());
+    }
+
+    /// Block until all pending widget refresh threads have finished.
+    pub fn flush_widget_threads(&mut self) {
+        for t in self.widget_threads.drain(..) {
+            let _ = t.join();
+        }
+    }
+
+    /// Execute a custom action by name (from the palette).
+    pub fn run_custom_action(&self, name: &str) {
+        let Some(action) = self.config.custom_actions.iter()
+            .find(|a| a.name == name) else {
+                return;
+            };
+        let ctx = self.window_hook_ctx(self.focused_window.unwrap_or(0));
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(&action.command);
+        for (key, value) in ctx.env_pairs() {
+            cmd.env(key, value);
+        }
+        let _ = cmd.status();
+    }
+
     /// them to the host terminal. Called once per render tick, before
     /// drawing, so images appear in the right pane.
     pub fn flush_graphics(&mut self) {
@@ -3870,6 +3945,12 @@ impl Os {
             .into_iter()
             .filter_map(|c| fuzzy_rank(&c.label(), &self.palette_query).map(|r| (r, c)))
             .collect();
+        // Append custom actions from config.
+        for action in &self.config.custom_actions {
+            if let Some(r) = fuzzy_rank(&action.name, &self.palette_query) {
+                items.push((r, Command::CustomAction(action.name.clone())));
+            }
+        }
         items.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.label().cmp(&b.1.label())));
         items.into_iter().map(|(_, c)| c).collect()
     }
@@ -3886,7 +3967,7 @@ impl Os {
     /// Run the selected command and close the palette.
     pub fn activate_palette(&mut self) {
         let items = self.palette_items();
-        let cmd = items.get(self.palette_selected).copied();
+        let cmd = items.get(self.palette_selected).cloned();
         self.close_palette();
         if let Some(cmd) = cmd {
             self.run_command(cmd);
@@ -3984,6 +4065,7 @@ impl Os {
             Command::BulkClose => self.bulk_close_selected(),
             Command::BulkStack => self.bulk_stack_selected(),
             Command::BulkBreak => self.bulk_break_selected(),
+            Command::CustomAction(name) => self.run_custom_action(&name),
         }
     }
 
@@ -8678,6 +8760,99 @@ mod stack_and_bulk_tests {
         assert!(!os.multi_select_mode);
         os.run_command(Command::MultiSelect);
         assert!(os.multi_select_mode);
+    }
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::*;
+    use crate::config::userconfig::{CustomActionConfig, StatusWidgetConfig};
+
+    fn os() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.width = 80;
+        os.height = 25;
+        os
+    }
+
+    #[test]
+    fn status_widget_refresh_caches_output() {
+        let mut os = os();
+        os.config.status_widgets.push(StatusWidgetConfig {
+            name: "test_widget".into(),
+            command: "echo WIDGET_OK".into(),
+            refresh_ms: 0,
+            alignment: "right".into(),
+        });
+        os.update_status_widgets();
+        os.flush_widget_threads();
+        assert_eq!(os.widget_cache.lock().unwrap().get("test_widget").unwrap(), "WIDGET_OK");
+    }
+
+    #[test]
+    fn status_widget_respects_refresh_interval() {
+        let mut os = os();
+        os.config.status_widgets.push(StatusWidgetConfig {
+            name: "slow".into(),
+            command: "echo FIRST".into(),
+            refresh_ms: 60_000, // 1 minute — too long to trigger.
+            alignment: "right".into(),
+        });
+        os.update_status_widgets(); // Runs (first time).
+        os.flush_widget_threads();
+        assert_eq!(os.widget_cache.lock().unwrap().get("slow").unwrap(), "FIRST");
+        // Overwrite with a new command to detect whether it re-runs.
+        os.config.status_widgets[0].command = "echo SECOND".into();
+        os.update_status_widgets(); // Should skip (too soon).
+        os.flush_widget_threads();
+        assert_eq!(os.widget_cache.lock().unwrap().get("slow").unwrap(), "FIRST");
+    }
+
+    #[test]
+    fn custom_action_dispatches() {
+        let mut os = os();
+        let dir = std::env::temp_dir().join(format!("termos-ext-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("action_fired");
+        let _ = std::fs::remove_file(&marker);
+        os.config.custom_actions.push(CustomActionConfig {
+            name: "Test action".into(),
+            command: format!("touch {}", marker.display()),
+            category: "Custom".into(),
+        });
+        os.run_custom_action("Test action");
+        assert!(marker.exists(), "custom action did not fire");
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn custom_action_appears_in_palette() {
+        let mut os = os();
+        os.config.custom_actions.push(CustomActionConfig {
+            name: "My Widget".into(),
+            command: "echo hi".into(),
+            category: "Custom".into(),
+        });
+        os.open_palette();
+        os.palette_query = "widget".into();
+        let items = os.palette_items();
+        assert!(items.iter().any(|c| matches!(c, Command::CustomAction(n) if n == "My Widget")));
+    }
+
+    #[test]
+    fn config_backward_compat_no_widgets() {
+        // Default config has empty status_widgets and custom_actions.
+        let cfg = UserConfig::default_config();
+        assert!(cfg.status_widgets.is_empty());
+        assert!(cfg.custom_actions.is_empty());
+        // Deserializing with the new fields present works.
+        let cfg: UserConfig = toml::from_str(
+            &toml::to_string(&UserConfig::default_config()).unwrap()
+                .replace("status_widgets = []", "[[status_widgets]]\nname = \"w\"\ncommand = \"echo x\"")
+                .replace("custom_actions = []", "[[custom_actions]]\nname = \"a\"\ncommand = \"echo y\""),
+        ).unwrap();
+        assert_eq!(cfg.status_widgets.len(), 1);
+        assert_eq!(cfg.custom_actions.len(), 1);
     }
 }
 
