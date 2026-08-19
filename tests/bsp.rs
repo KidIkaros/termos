@@ -135,3 +135,106 @@ fn resize_split_moves_divider() {
     assert_eq!(layout[&1].w, 30);
     assert_eq!(layout[&2].x, 30);
 }
+
+// -----------------------------------------------------------------------
+// Stacked pane tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn push_to_stack_wraps_two_windows() {
+    let mut tree = BSPTree::new();
+    tree.insert_window(1, -1, SplitType::None, 0.5, bounds(), 0);
+    tree.insert_window(2, 1, SplitType::Vertical, 0.5, bounds(), 0);
+    // Window 1 is left, window 2 is right.
+    let before = tree.apply_layout(bounds(), 0);
+    assert_eq!(before[&1].w, 60);
+    assert_eq!(before[&2].x, 60);
+
+    // Stack 1 (active) with 2 (inactive).
+    tree.push_to_stack(1, 2);
+    assert_eq!(tree.stack_count(1), 2);
+    assert_eq!(tree.stack_count(2), 2);
+    let windows = tree.stack_windows(1);
+    assert!(windows.contains(&1));
+    assert!(windows.contains(&2));
+
+    // Layout: only the active pane gets real space; the other is a 1-cell
+    // title bar.
+    let after = tree.apply_layout(bounds(), 0);
+    // Both windows should still be in the layout.
+    assert!(after.contains_key(&1));
+    assert!(after.contains_key(&2));
+}
+
+#[test]
+fn pop_from_stack_restores_as_split() {
+    let mut tree = BSPTree::new();
+    tree.insert_window(1, -1, SplitType::None, 0.5, bounds(), 0);
+    tree.insert_window(2, 1, SplitType::Vertical, 0.5, bounds(), 0);
+    tree.push_to_stack(1, 2);
+    assert_eq!(tree.stack_count(1), 2);
+
+    // Pop window 2 out of the stack.
+    let popped = tree.pop_from_stack(2);
+    assert!(popped);
+    assert_eq!(tree.stack_count(1), 1);
+    assert_eq!(tree.stack_count(2), 1);
+    // Both windows still exist in the layout.
+    let layout = tree.apply_layout(bounds(), 0);
+    assert!(layout.contains_key(&1));
+    assert!(layout.contains_key(&2));
+}
+
+#[test]
+fn cycle_stack_focus_swaps_active() {
+    let mut tree = BSPTree::new();
+    tree.insert_window(1, -1, SplitType::None, 0.5, bounds(), 0);
+    tree.insert_window(2, 1, SplitType::Vertical, 0.5, bounds(), 0);
+    tree.push_to_stack(1, 2);
+    // 1 is active (left), 2 is title bar (right).
+    assert_eq!(tree.stack_depth(1), 0);
+    assert_eq!(tree.stack_depth(2), 1);
+
+    // Cycle forward: 2 becomes active.
+    let new_active = tree.cycle_stack_focus(1, true);
+    assert_eq!(new_active, 2);
+    assert_eq!(tree.stack_depth(2), 0);
+    assert_eq!(tree.stack_depth(1), 1);
+
+    // Cycle back: 1 becomes active again.
+    let new_active = tree.cycle_stack_focus(2, false);
+    assert_eq!(new_active, 1);
+}
+
+#[test]
+fn non_stacked_window_stack_count_is_one() {
+    let mut tree = BSPTree::new();
+    tree.insert_window(1, -1, SplitType::None, 0.5, bounds(), 0);
+    assert_eq!(tree.stack_count(1), 1);
+    assert_eq!(tree.find_stack_root(1), None);
+}
+
+#[test]
+fn push_to_stack_noop_on_same_window() {
+    let mut tree = BSPTree::new();
+    tree.insert_window(1, -1, SplitType::None, 0.5, bounds(), 0);
+    tree.push_to_stack(1, 1); // noop
+    assert_eq!(tree.stack_count(1), 1);
+}
+
+#[test]
+fn three_window_layout_after_stack() {
+    let mut tree = BSPTree::new();
+    tree.insert_window(1, -1, SplitType::None, 0.5, bounds(), 0);
+    tree.insert_window(2, 1, SplitType::Vertical, 0.5, bounds(), 0);
+    tree.insert_window(3, 1, SplitType::Vertical, 0.5, bounds(), 0);
+    // Stack 2 (active) with 1 (inactive).
+    tree.push_to_stack(2, 1);
+    assert_eq!(tree.stack_count(2), 2);
+    assert_eq!(tree.stack_count(1), 2);
+    // Window 3 is unaffected.
+    assert_eq!(tree.stack_count(3), 1);
+
+    let layout = tree.apply_layout(bounds(), 0);
+    assert_eq!(layout.len(), 3);
+}

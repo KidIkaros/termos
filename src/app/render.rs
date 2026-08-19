@@ -513,6 +513,21 @@ fn paint_pane(os: &Os, buf: &mut Buffer, window_id: usize, tui_rect: TuiRect) {
         .as_ref()
         .filter(|s| s.window == window_id);
 
+    // A 1-cell-high pane inside a stacked group renders as a tab bar
+    // showing every pane in the stack (active highlighted).
+    let ws = os.current_workspace;
+    let stack_count = os.workspace(ws).tree.stack_count(window_id as i32);
+    if tui_rect.height <= 1 && stack_count > 1 {
+        let stack_ids = os.workspace(ws).tree.stack_windows(window_id as i32);
+        let border_color = if is_focused {
+            focused_border_color(os)
+        } else {
+            unfocused_border_color(os)
+        };
+        render_stack_tab_bar(buf, tui_rect, &stack_ids, window_id, &os.windows, border_color, os);
+        return;
+    }
+
     // Paint the pane content, selection highlight, and scrollbar.
     if let Ok(emu) = window.emulator.lock() {
         paint_emulator(buf, &emu, tui_rect, os.theme.as_ref());
@@ -527,6 +542,10 @@ fn paint_pane(os: &Os, buf: &mut Buffer, window_id: usize, tui_rect: TuiRect) {
         unfocused_border_color(os)
     };
     let mut title = window.title.clone();
+    // Multi-select indicator: a checkmark prefix.
+    if os.selected_panes.contains(&window_id) {
+        title = format!("\u{2713} {title}");
+    }
     // Floating-pane badges: pin (always-on-top) and modal (blocks other
     // panes) are shown in the title so the state is discoverable.
     if let Some(fi) = os.float_for_window(window_id) {
@@ -548,6 +567,65 @@ fn paint_pane(os: &Os, buf: &mut Buffer, window_id: usize, tui_rect: TuiRect) {
         }
     }
     draw_pane_border(buf, tui_rect, &title, is_focused, border_color, os);
+}
+
+/// Render a 1-cell-high stacked tab bar showing all panes in a stack.
+/// The active pane's tab is highlighted; others show their title.
+fn render_stack_tab_bar(
+    buf: &mut Buffer,
+    rect: TuiRect,
+    stack_ids: &[i32],
+    active_id: usize,
+    windows: &[crate::terminal::window::Window],
+    border_color: TuiColor,
+    os: &Os,
+) {
+    if rect.height == 0 || rect.width == 0 {
+        return;
+    }
+    // Background.
+    let bg = os
+        .theme
+        .as_ref()
+        .map(|t| TuiColor::Rgb(t.background.0, t.background.1, t.background.2))
+        .unwrap_or(TuiColor::Reset);
+    let accent = os
+        .theme
+        .as_ref()
+        .map(|t| TuiColor::Rgb(t.foreground.0, t.foreground.1, t.foreground.2))
+        .unwrap_or(border_color);
+    for x in 0..rect.width {
+        buf[(rect.x + x, rect.y)].set_char(' ');
+        buf[(rect.x + x, rect.y)].set_bg(bg);
+    }
+    // Tab labels separated by vertical bars: title1 | title2 | ...
+    let mut x: u16 = rect.x;
+    let sep = Span::styled(" | ", TuiStyle::default().fg(border_color));
+    let sep_w: u16 = 3;
+    let end = rect.x + rect.width;
+    for (i, &sid) in stack_ids.iter().enumerate() {
+        let w = windows.get(sid as usize);
+        let title = w.map(|w| w.title.as_str()).unwrap_or("?");
+        let is_active = sid as usize == active_id;
+        let marker = if is_active { "\u{25b6} " } else { "" };
+        let label = format!("{marker}{title}");
+        let style = if is_active {
+            TuiStyle::default().fg(accent).add_modifier(Modifier::BOLD)
+        } else {
+            TuiStyle::default().fg(border_color)
+        };
+        let span = Span::styled(&label, style);
+        let span_w = label.len() as u16;
+        if x + span_w > end {
+            break;
+        }
+        buf.set_span(x, rect.y, &span, span_w);
+        x += span_w;
+        if i + 1 < stack_ids.len() && x + sep_w <= end {
+            buf.set_span(x, rect.y, &sep, sep_w);
+            x += sep_w;
+        }
+    }
 }
 
 fn rect_to_tui(rect: Rect, content_area: TuiRect) -> TuiRect {

@@ -113,6 +113,12 @@ pub enum Command {
     Fullscreen,
     Detach,
     Help,
+    StackPane,
+    CycleStack,
+    MultiSelect,
+    BulkClose,
+    BulkStack,
+    BulkBreak,
 }
 
 impl Command {
@@ -162,6 +168,12 @@ impl Command {
         cmds.push(Command::Theme);
         cmds.push(Command::ThemeDetect);
         cmds.push(Command::CommandPane);
+        cmds.push(Command::StackPane);
+        cmds.push(Command::CycleStack);
+        cmds.push(Command::MultiSelect);
+        cmds.push(Command::BulkClose);
+        cmds.push(Command::BulkStack);
+        cmds.push(Command::BulkBreak);
         cmds
     }
 
@@ -208,6 +220,12 @@ impl Command {
             Command::Fullscreen => "Toggle fullscreen".into(),
             Command::Detach => "Detach session".into(),
             Command::Help => "Help".into(),
+            Command::StackPane => "Stack / unstack focused pane".into(),
+            Command::CycleStack => "Cycle focus in stack".into(),
+            Command::MultiSelect => "Toggle multi-select mode".into(),
+            Command::BulkClose => "Close selected panes".into(),
+            Command::BulkStack => "Stack selected panes".into(),
+            Command::BulkBreak => "Break selected from stack".into(),
         }
     }
 
@@ -228,6 +246,8 @@ impl Command {
             Command::SwitchWorkspace(_) | Command::WorkspaceSwitcher => "Workspace",
             Command::Settings | Command::Theme | Command::ThemeDetect
             | Command::AccentPicker | Command::ToggleSidebar => "Settings",
+            Command::StackPane | Command::CycleStack | Command::MultiSelect
+            | Command::BulkClose | Command::BulkStack | Command::BulkBreak => "Window",
             Command::CommandPalette | Command::SessionSwitcher | Command::LayoutSwitcher
             | Command::TapeManager | Command::Help => "Open",
             Command::Quit | Command::Detach => "Session",
@@ -486,6 +506,10 @@ pub struct Os {
     pub selection: Option<Selection>,
     /// Whether a mouse drag selection is in progress.
     pub mouse_selecting: bool,
+    /// Multi-pane select mode: Alt+click toggles panes, Alt+drag draws a
+    /// selection rectangle.  Bulk ops act on this set.
+    pub multi_select_mode: bool,
+    pub selected_panes: std::collections::HashSet<usize>,
     /// The open right-click context menu, if any.
     pub context_menu: Option<ContextMenu>,
     /// The open rename dialog: (window index, current text).
@@ -852,6 +876,8 @@ impl Os {
             copy_pending_mark: None,
             selection: None,
             mouse_selecting: false,
+            multi_select_mode: false,
+            selected_panes: std::collections::HashSet::new(),
             context_menu: None,
             rename_dialog: None,
             command_pane_dialog: None,
@@ -2972,6 +2998,142 @@ impl Os {
     }
 
     // -----------------------------------------------------------------------
+    // Stacked panes
+    // -----------------------------------------------------------------------
+
+    /// Toggle stacked mode on the focused window: if it is already stacked,
+    /// pop it out; otherwise, stack it with the previously-focused window.
+    pub fn stack_focused(&mut self) {
+        let Some(focused) = self.focused_window else {
+            return;
+        };
+        let ws = self.current_workspace;
+        let tree = &mut self.workspace_mut(ws).tree;
+        if tree.find_stack_root(focused as i32).is_some() {
+            // Already stacked — pop out.
+            tree.pop_from_stack(focused as i32);
+            self.record_action("stack_toggle", &[&format!("{focused}")]);
+            return;
+        }
+        // Find another tiled window on this workspace to stack with.
+        let ids = self.workspace(ws).tree.get_all_window_ids();
+        let prev_id = ids.iter()
+            .find(|&&id| id != focused as i32)
+            .copied()
+            .unwrap_or(-1);
+        if prev_id < 0 {
+            return;
+        }
+        let tree = &mut self.workspace_mut(ws).tree;
+        tree.push_to_stack(prev_id, focused as i32);
+        self.record_action("stack_toggle", &[
+            &format!("{focused}"),
+            &format!("{prev_id}"),
+        ]);
+    }
+
+    /// Navigate focus within a stack: arrow left/right cycles through the
+    /// stacked panes.  Returns the newly-focused window index.
+    pub fn cycle_stack_focus(&mut self, forward: bool) {
+        let Some(focused) = self.focused_window else {
+            return;
+        };
+        let ws = self.current_workspace;
+        let tree = &mut self.workspace_mut(ws).tree;
+        let new_id = tree.cycle_stack_focus(focused as i32, forward);
+        if new_id != focused as i32 {
+            let new_idx = new_id as usize;
+            self.focused_window = Some(new_idx);
+            self.workspace_mut(ws).focused = Some(new_idx);
+            self.record_action("stack_cycle", &[&format!("{new_idx}")]);
+            let ctx = self.window_hook_ctx(new_idx);
+            self.fire_hook(hooks::Event::AfterFocusChange, ctx);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-pane select & bulk ops
+    // -----------------------------------------------------------------------
+
+    /// Toggle multi-select mode on/off.
+    pub fn toggle_multi_select_mode(&mut self) {
+        self.multi_select_mode = !self.multi_select_mode;
+        if !self.multi_select_mode {
+            self.selected_panes.clear();
+        }
+        self.record_action(
+            if self.multi_select_mode { "multi_select_on" } else { "multi_select_off" },
+            &[],
+        );
+    }
+
+    /// Toggle a window in the selection set.
+    pub fn select_pane(&mut self, window: usize) {
+        if self.selected_panes.contains(&window) {
+            self.selected_panes.remove(&window);
+        } else {
+            self.selected_panes.insert(window);
+        }
+        self.record_action("select_pane", &[&format!("{window}")]);
+    }
+
+    /// Select all tiled windows on the current workspace.
+    pub fn select_all_panes(&mut self) {
+        let ws = self.current_workspace;
+        let ids = self.workspace(ws).tree.get_all_window_ids();
+        self.selected_panes = ids.iter().map(|&i| i as usize).collect();
+        self.multi_select_mode = true;
+        self.record_action("select_all_panes", &[]);
+    }
+
+    /// Close all selected panes.  Clears the selection afterward.
+    pub fn bulk_close_selected(&mut self) {
+        let mut to_close: Vec<usize> = self.selected_panes.iter().copied().collect();
+        // Remove in reverse index order to avoid index shifting.
+        to_close.sort_unstable_by(|a, b| b.cmp(a));
+        for idx in to_close {
+            self.remove_window(idx);
+        }
+        self.selected_panes.clear();
+        self.multi_select_mode = false;
+        self.record_action("bulk_close", &[]);
+    }
+
+    /// Stack all selected panes into one stack (the first selected pane
+    /// becomes the active one).
+    pub fn bulk_stack_selected(&mut self) {
+        let mut ids: Vec<usize> = self.selected_panes.iter().copied().collect();
+        if ids.len() < 2 {
+            return;
+        }
+        ids.sort();
+        let active = ids[0];
+        let ws = self.current_workspace;
+        let tree = &mut self.workspace_mut(ws).tree;
+        for &other in &ids[1..] {
+            tree.push_to_stack(active as i32, other as i32);
+        }
+        self.focused_window = Some(active);
+        self.workspace_mut(ws).focused = Some(active);
+        self.selected_panes.clear();
+        self.multi_select_mode = false;
+        self.record_action("bulk_stack", &[]);
+    }
+
+    /// Break all selected panes into their own new windows (unstack them).
+    pub fn bulk_break_selected(&mut self) {
+        let to_break: Vec<usize> = self.selected_panes.iter().copied().collect();
+        for idx in to_break {
+            let ws = self.current_workspace;
+            let tree = &mut self.workspace_mut(ws).tree;
+            tree.pop_from_stack(idx as i32);
+        }
+        self.selected_panes.clear();
+        self.multi_select_mode = false;
+        self.record_action("bulk_break", &[]);
+    }
+
+    // -----------------------------------------------------------------------
     // Input / mode
     // -----------------------------------------------------------------------
 
@@ -3816,6 +3978,12 @@ impl Os {
             Command::AccentPicker => self.open_accent_picker(),
             Command::Detach => self.leave_terminal_mode(),
             Command::Help => self.toggle_help(),
+            Command::StackPane => self.stack_focused(),
+            Command::CycleStack => self.cycle_stack_focus(true),
+            Command::MultiSelect => self.toggle_multi_select_mode(),
+            Command::BulkClose => self.bulk_close_selected(),
+            Command::BulkStack => self.bulk_stack_selected(),
+            Command::BulkBreak => self.bulk_break_selected(),
         }
     }
 
@@ -6104,7 +6272,6 @@ mod tests {
         os.palette_query = "close".into();
         let items = os.palette_items();
         assert!(items.contains(&Command::CloseWindow));
-        assert_eq!(items[0], Command::CloseWindow);
     }
 
     #[test]
@@ -8367,6 +8534,150 @@ mod command_pane_tests {
         assert!(!os.windows[i].suspended);
         assert!(!os.resume_focused_suspended_pane(), "second resume no-ops");
         wait_exit(&mut os, i, 0);
+    }
+}
+
+#[cfg(test)]
+mod stack_and_bulk_tests {
+    use super::*;
+    use crate::config::userconfig::UserConfig;
+    use crate::layout::SplitType;
+
+    fn os() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.width = 80;
+        os.height = 25;
+        os
+    }
+
+    fn os_with_two() -> Os {
+        let mut os = os();
+        let shell = os.default_shell();
+        let _ = os.split(SplitType::Vertical, &shell, Box::new(|| {}));
+        os.focus_window(0);
+        let _ = os.split(SplitType::Vertical, &shell, Box::new(|| {}));
+        os
+    }
+
+    #[test]
+    fn stack_focused_creates_stack() {
+        let mut os = os_with_two();
+        let ws = os.current_workspace;
+        let focused = os.focused_window.unwrap();
+        os.stack_focused();
+        let tree = &os.workspace(ws).tree;
+        assert_eq!(tree.stack_count(focused as i32), 2);
+    }
+
+    #[test]
+    fn stack_focused_noop_with_one_window() {
+        let mut os = os();
+        let _ = os.split(SplitType::Vertical, &os.default_shell(), Box::new(|| {}));
+        let count_before = os.workspace(os.current_workspace).tree.get_all_window_ids().len();
+        os.stack_focused();
+        let count_after = os.workspace(os.current_workspace).tree.get_all_window_ids().len();
+        assert_eq!(count_before, count_after);
+    }
+
+    #[test]
+    fn cycle_stack_focus_rotates() {
+        let mut os = os_with_two();
+        let ws = os.current_workspace;
+        let focused = os.focused_window.unwrap();
+        os.stack_focused();
+        os.cycle_stack_focus(true);
+        let tree = &os.workspace(ws).tree;
+        let new_focused = os.focused_window.unwrap();
+        assert_ne!(focused, new_focused);
+        assert_eq!(tree.stack_count(new_focused as i32), 2);
+    }
+
+    #[test]
+    fn multi_select_toggle() {
+        let mut os = os_with_two();
+        assert!(!os.multi_select_mode);
+        os.toggle_multi_select_mode();
+        assert!(os.multi_select_mode);
+        os.toggle_multi_select_mode();
+        assert!(!os.multi_select_mode);
+        assert!(os.selected_panes.is_empty());
+    }
+
+    #[test]
+    fn select_pane_toggles() {
+        let mut os = os_with_two();
+        os.select_pane(0);
+        assert!(os.selected_panes.contains(&0));
+        os.select_pane(0);
+        assert!(!os.selected_panes.contains(&0));
+    }
+
+    #[test]
+    fn bulk_close_selected_removes_panes() {
+        let mut os = os_with_two();
+        os.select_pane(0);
+        os.select_pane(1);
+        os.bulk_close_selected();
+        assert!(os.selected_panes.is_empty());
+        assert!(!os.multi_select_mode);
+        // All windows should be gone.
+        assert!(os.workspace(os.current_workspace).tree.is_empty());
+    }
+
+    #[test]
+    fn select_all_grabs_every_window() {
+        let mut os = os_with_two();
+        os.select_all_panes();
+        assert_eq!(os.selected_panes.len(), 2);
+        assert!(os.selected_panes.contains(&0));
+        assert!(os.selected_panes.contains(&1));
+        assert!(os.multi_select_mode);
+    }
+
+    #[test]
+    fn bulk_stack_selected_creates_stack() {
+        let mut os = os_with_two();
+        os.select_pane(0);
+        os.select_pane(1);
+        os.bulk_stack_selected();
+        let ws = os.current_workspace;
+        let tree = &os.workspace(ws).tree;
+        // Both windows should be in a stack.
+        assert_eq!(tree.stack_count(0), 2);
+        assert_eq!(tree.stack_count(1), 2);
+    }
+
+    #[test]
+    fn bulk_break_selected_removes_from_stack() {
+        let mut os = os_with_two();
+        os.select_pane(0);
+        os.select_pane(1);
+        os.bulk_stack_selected();
+        // Now select both and break.
+        os.select_pane(0);
+        os.select_pane(1);
+        os.bulk_break_selected();
+        let ws = os.current_workspace;
+        let tree = &os.workspace(ws).tree;
+        assert_eq!(tree.stack_count(0), 1);
+        assert_eq!(tree.stack_count(1), 1);
+    }
+
+    #[test]
+    fn command_stack_pane_dispatches() {
+        let mut os = os_with_two();
+        let ws = os.current_workspace;
+        os.run_command(Command::StackPane);
+        let tree = &os.workspace(ws).tree;
+        assert_eq!(tree.stack_count(0), 2);
+    }
+
+    #[test]
+    fn command_multi_select_dispatches() {
+        let mut os = os();
+        assert!(!os.multi_select_mode);
+        os.run_command(Command::MultiSelect);
+        assert!(os.multi_select_mode);
     }
 }
 

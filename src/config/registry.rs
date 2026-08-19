@@ -47,6 +47,12 @@ pub const ACTION_RESIZE_LEFT: &str = "resize_left";
 pub const ACTION_RESIZE_RIGHT: &str = "resize_right";
 pub const ACTION_RESIZE_UP: &str = "resize_up";
 pub const ACTION_RESIZE_DOWN: &str = "resize_down";
+pub const ACTION_STACK_PANE: &str = "stack_pane";
+pub const ACTION_CYCLE_STACK: &str = "cycle_stack";
+pub const ACTION_MULTI_SELECT: &str = "multi_select";
+pub const ACTION_BULK_CLOSE: &str = "bulk_close";
+pub const ACTION_BULK_STACK: &str = "bulk_stack";
+pub const ACTION_BULK_BREAK: &str = "bulk_break";
 
 /// The keybind registry: maps chord strings to action names.
 pub struct KeybindRegistry {

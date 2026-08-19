@@ -466,6 +466,210 @@ impl BSPTree {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Stacked pane operations
+    // -----------------------------------------------------------------------
+
+    /// Wrap two windows in a new `SplitType::Stacked` internal node.
+    /// The active window gets the content area; the other becomes a 1-cell
+    /// title bar.  Both windows must be leaves and must not already be in
+    /// a stacked group.
+    ///
+    /// `active_id` keeps its content; `inactive_id` becomes the title bar.
+    pub fn push_to_stack(&mut self, active_id: i32, inactive_id: i32) {
+        if active_id == inactive_id {
+            return;
+        }
+        let Some(&a_node) = self.window_to_node.get(&active_id) else {
+            return;
+        };
+        let Some(&i_node) = self.window_to_node.get(&inactive_id) else {
+            return;
+        };
+        // Don't double-stack.
+        if self.find_stack_root(active_id).is_some() || self.find_stack_root(inactive_id).is_some() {
+            return;
+        }
+        // Save old parents before we modify anything.
+        let a_parent = self.nodes[a_node].parent;
+        let i_parent = self.nodes[i_node].parent;
+        // If both windows are siblings under the same parent, simply
+        // convert that parent's split type to Stacked.
+        if let (Some(ap), Some(ip)) = (a_parent, i_parent) {
+            if ap == ip {
+                // Ensure active is on the left (content) side.
+                if self.nodes[ap].right == Some(a_node) {
+                    let tmp = self.nodes[ap].left;
+                    self.nodes[ap].left = self.nodes[ap].right;
+                    self.nodes[ap].right = tmp;
+                }
+                self.nodes[ap].split_type = SplitType::Stacked;
+                self.nodes[ap].stacked_active_left = true;
+                return;
+            }
+        }
+        // Non-sibling case: create a new stacked internal node that
+        // replaces the active window's parent slot.
+        let stacked = self.alloc(TileNode {
+            id: 0,
+            parent: a_parent,
+            left: Some(a_node),
+            right: Some(i_node),
+            window_id: -1,
+            split_type: SplitType::Stacked,
+            split_ratio: 0.5,
+            stacked_active_left: true,
+        });
+        self.nodes[a_node].parent = Some(stacked);
+        self.nodes[i_node].parent = Some(stacked);
+        // Re-parent under the active node's old parent.
+        if let Some(gp) = a_parent {
+            if self.nodes[gp].left == Some(a_node) {
+                self.nodes[gp].left = Some(stacked);
+            } else {
+                self.nodes[gp].right = Some(stacked);
+            }
+        } else {
+            self.root = Some(stacked);
+        }
+        // Splice the inactive node's old parent out of the tree.
+        if let Some(ip) = i_parent {
+            let sibling = self.sibling_of_node_in_parent(i_node, ip);
+            if let Some(igp) = self.nodes[ip].parent {
+                if let Some(sib) = sibling {
+                    self.nodes[sib].parent = Some(igp);
+                    if self.nodes[igp].left == Some(ip) {
+                        self.nodes[igp].left = Some(sib);
+                    } else {
+                        self.nodes[igp].right = Some(sib);
+                    }
+                } else {
+                    // Parent had only the inactive node — collapse.
+                    if self.nodes[igp].left == Some(ip) {
+                        self.nodes[igp].left = None;
+                    } else {
+                        self.nodes[igp].right = None;
+                    }
+                }
+            } else {
+                // ip was the root and had no grandparent.
+                if let Some(sib) = sibling {
+                    self.root = Some(sib);
+                    self.nodes[sib].parent = None;
+                } else {
+                    self.root = Some(stacked);
+                }
+            }
+        }
+    }
+
+    /// Like `sibling` but given the parent explicitly.
+    fn sibling_of_node_in_parent(&self, node: usize, parent: usize) -> Option<usize> {
+        if self.nodes[parent].left == Some(node) {
+            self.nodes[parent].right
+        } else {
+            self.nodes[parent].left
+        }
+    }
+
+    /// Remove a window from its stack, restoring it as a standalone leaf
+    /// in the stack's layout slot.  Returns `true` if the window was in a
+    /// stack and has been removed.
+    pub fn pop_from_stack(&mut self, window_id: i32) -> bool {
+        let Some(stack_root) = self.find_stack_root(window_id) else {
+            return false;
+        };
+        // Simple case: just convert the stacked node back to a normal
+        // Horizontal split.  Both children stay in place and the tree
+        // structure is unchanged.
+        self.nodes[stack_root].split_type = SplitType::Horizontal;
+        self.nodes[stack_root].stacked_active_left = true;
+        true
+    }
+
+    /// Find the stacked parent of a window, if it is in a stack.
+    pub fn find_stack_root(&self, window_id: i32) -> Option<usize> {
+        let &wnode = self.window_to_node.get(&window_id)?;
+        let mut cur = wnode;
+        while let Some(p) = self.nodes[cur].parent {
+            if self.nodes[p].split_type == SplitType::Stacked {
+                return Some(p);
+            }
+            cur = p;
+        }
+        None
+    }
+
+    /// Count how many windows share the same stack as the given window.
+    /// Returns 1 for non-stacked windows.
+    pub fn stack_count(&self, window_id: i32) -> usize {
+        let Some(stack_root) = self.find_stack_root(window_id) else {
+            return 1;
+        };
+        self.count_leaves(stack_root)
+    }
+
+    /// Return all window IDs in the same stack as `window_id` (leaf order).
+    pub fn stack_windows(&self, window_id: i32) -> Vec<i32> {
+        let Some(stack_root) = self.find_stack_root(window_id) else {
+            return vec![window_id];
+        };
+        let mut ids = Vec::new();
+        self.collect_window_ids(stack_root, &mut ids);
+        ids
+    }
+
+    /// Which position (0-indexed, active = 0) the window occupies in its stack.
+    pub fn stack_depth(&self, window_id: i32) -> usize {
+        let windows = self.stack_windows(window_id);
+        windows.iter().position(|&id| id == window_id).unwrap_or(0)
+    }
+
+    /// Cycle which pane is active (content area) in a stack.
+    /// `forward = true` moves to the next pane; `false` to the previous.
+    /// Returns the newly-active window ID, or the input if not stacked.
+    pub fn cycle_stack_focus(&mut self, window_id: i32, forward: bool) -> i32 {
+        let Some(stack_root) = self.find_stack_root(window_id) else {
+            return window_id;
+        };
+        let mut windows = Vec::new();
+        self.collect_window_ids(stack_root, &mut windows);
+        let pos = windows.iter().position(|&id| id == window_id).unwrap_or(0);
+        let next = if forward {
+            (pos + 1) % windows.len()
+        } else {
+            (pos + windows.len() - 1) % windows.len()
+        };
+        let new_active = windows[next];
+        // Swap: new_active goes left (content), old goes right (title).
+        let left = self.nodes[stack_root].left;
+        let right = self.nodes[stack_root].right;
+        let left_win = left.map(|l| self.nodes[l].window_id);
+        if left_win == Some(new_active) {
+            // Already on the left — nothing to swap.
+            return new_active;
+        }
+        self.nodes[stack_root].left = right;
+        self.nodes[stack_root].right = left;
+        self.nodes[stack_root].stacked_active_left = true;
+        new_active
+    }
+
+    fn count_leaves(&self, node: usize) -> usize {
+        let n = &self.nodes[node];
+        if n.is_leaf() {
+            return 1;
+        }
+        let mut count = 0;
+        if let Some(l) = n.left {
+            count += self.count_leaves(l);
+        }
+        if let Some(r) = n.right {
+            count += self.count_leaves(r);
+        }
+        count
+    }
+
     /// Calculate positions for all windows in the tree.
     pub fn apply_layout(&self, bounds: Rect, gap: i32) -> HashMap<i32, Rect> {
         let mut result = HashMap::new();

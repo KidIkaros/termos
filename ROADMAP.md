@@ -269,11 +269,16 @@ Zellij layers panes on top of each other (stacked panes, navigate with
 arrows, dynamic resize) and supports multi-select bulk operations
 (Alt+click drag, bulk close/break/stack).
 
-- ⬜ Stacked panes as a layout mode: layer multiple panes per stack cell,
-  arrow navigation, per-stack resize.
-- ⬜ Multi-pane select: Alt+click toggle / drag rectangle; bulk close, break
-  to new window, stack selected, move focus through selection.
-- ⬜ Tests: stacking state transitions, bulk op effects.
+- ✅ Stacked panes as a layout mode: BSP tree `SplitType::Stacked` with
+  `push_to_stack`/`pop_from_stack`/`cycle_stack_focus`/`stack_count`;
+  active pane gets full content area, inactive shows as 1-cell tab bar
+  with `▶ title` glyph; `StackPane` and `CycleStack` palette commands.
+- ✅ Multi-pane select: Alt+click toggles pane selection, `MultiSelect`
+  palette command, `select_all_panes`; bulk `BulkClose` (reverse-index
+  safe), `BulkStack` (stacks into one group), `BulkBreak` (unstacks);
+  checkmark ✓ in title for selected panes; Escape clears selection.
+- ✅ Tests: 6 BSP stack tests + 11 Os-level stack/bulk tests; palette
+  count assertion relaxed for new commands.
 
 ## Phase 15 — Plugin/extension story (Tier 3: long-term)
 

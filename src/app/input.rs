@@ -696,8 +696,12 @@ fn handle_window_management(os: &mut Os, key: &KeyEvent) -> KeyResult {
                 return KeyResult::Consumed;
             }
         }
-        // Escape leaves prefix or does nothing meaningful in window mode.
+        // Escape clears multi-select, then prefix, then does nothing.
         KeyCode::Esc => {
+            if os.multi_select_mode {
+                os.toggle_multi_select_mode();
+                return KeyResult::Consumed;
+            }
             os.prefix = Prefix::None;
             return KeyResult::Consumed;
         }
@@ -1882,6 +1886,13 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
                 return true;
             }
             if let Some(idx) = os.window_at_with_layout(column, row, &layout) {
+                // Alt+click toggles multi-select for this pane.
+                if mouse.modifiers.contains(KeyModifiers::ALT) {
+                    os.select_pane(idx);
+                    os.multi_select_mode = true;
+                    os.prefix = Prefix::None;
+                    return true;
+                }
                 os.focus_window(idx);
                 if os.is_float(idx) {
                     os.raise_float(idx);
