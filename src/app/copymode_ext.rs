@@ -768,6 +768,539 @@ pub fn goto_line(count: usize, total_lines: usize) -> usize {
     (count - 1).min(total_lines.saturating_sub(1))
 }
 
+// =========================================================================
+// Search match tracking — SearchMatch, SearchState
+// =========================================================================
+
+/// A single search match position in content coordinates.
+///
+/// Ported from Go's `terminal.SearchMatch` and `scrollback.VimSearchMatch`.
+/// `start` and `end` are character (rune) indices within the line, with
+/// `end` exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchMatch {
+    /// The content line index.
+    pub line: usize,
+    /// Start character index (inclusive).
+    pub start: usize,
+    /// End character index (exclusive).
+    pub end: usize,
+}
+
+impl SearchMatch {
+    /// Create a match at `(line, start..end)`.
+    pub fn new(line: usize, start: usize, end: usize) -> Self {
+        Self { line, start, end }
+    }
+
+    /// Whether this match is at or after `(line, col)`.
+    pub fn at_or_after(&self, line: usize, col: usize) -> bool {
+        self.line > line || (self.line == line && self.start >= col)
+    }
+
+    /// Whether this match is at or before `(line, col)`.
+    pub fn at_or_before(&self, line: usize, col: usize) -> bool {
+        self.line < line || (self.line == line && self.start <= col)
+    }
+
+    /// Whether this match is strictly before `(line, col)` (excludes exact
+    /// position). Used for backward search initial jump so the cursor's
+    /// current match is skipped.
+    pub fn strictly_before(&self, line: usize, col: usize) -> bool {
+        self.line < line || (self.line == line && self.start < col)
+    }
+}
+
+/// Consolidated search state for copy mode — query, matches, current index,
+/// and direction. Ported from Go's `CopyMode` search fields and
+/// `scrollback.VimState` search fields.
+#[derive(Debug, Clone, Default)]
+pub struct SearchState {
+    /// The active search query (empty = no search).
+    pub query: String,
+    /// All matches found in the content.
+    pub matches: Vec<SearchMatch>,
+    /// Index into `matches` of the current match.
+    pub current: usize,
+    /// Whether the search is forward (`true` for `/`) or backward (`false`
+    /// for `?`).
+    pub forward: bool,
+    /// Whether the search is case-sensitive.
+    pub case_sensitive: bool,
+}
+
+impl SearchState {
+    /// Create empty search state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether there are any matches.
+    pub fn has_matches(&self) -> bool {
+        !self.matches.is_empty()
+    }
+
+    /// Number of matches.
+    pub fn match_count(&self) -> usize {
+        self.matches.len()
+    }
+
+    /// The current match, if any.
+    pub fn current_match(&self) -> Option<&SearchMatch> {
+        if self.matches.is_empty() {
+            None
+        } else {
+            self.matches.get(self.current)
+        }
+    }
+
+    /// Clear all search state.
+    pub fn clear(&mut self) {
+        self.query.clear();
+        self.matches.clear();
+        self.current = 0;
+    }
+
+    /// Advance to the next match (wraps around). Returns the new current match.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Option<SearchMatch> {
+        if self.matches.is_empty() {
+            return None;
+        }
+        self.current = (self.current + 1) % self.matches.len();
+        self.matches.get(self.current).copied()
+    }
+
+    /// Advance to the previous match (wraps around). Returns the new current match.
+    pub fn prev(&mut self) -> Option<SearchMatch> {
+        if self.matches.is_empty() {
+            return None;
+        }
+        if self.current == 0 {
+            self.current = self.matches.len() - 1;
+        } else {
+            self.current -= 1;
+        }
+        self.matches.get(self.current).copied()
+    }
+
+    /// Find all matches of `query` across `line_count` lines, using
+    /// `line_text` to resolve each line. Case-insensitive unless
+    /// `case_sensitive` is set. Stores results in `self.matches`.
+    pub fn execute(
+        &mut self,
+        line_count: usize,
+        line_text: impl Fn(usize) -> String,
+    ) {
+        self.matches.clear();
+        if self.query.is_empty() {
+            self.current = 0;
+            return;
+        }
+        let query = if self.case_sensitive {
+            self.query.clone()
+        } else {
+            self.query.to_lowercase()
+        };
+        let q_len = query.chars().count();
+        if q_len == 0 {
+            self.current = 0;
+            return;
+        }
+        for line in 0..line_count {
+            let raw = line_text(line);
+            let hay = if self.case_sensitive {
+                raw.clone()
+            } else {
+                raw.to_lowercase()
+            };
+            let hay_chars: Vec<char> = hay.chars().collect();
+            if hay_chars.len() < q_len {
+                continue;
+            }
+            for start in 0..=(hay_chars.len() - q_len) {
+                if hay_chars[start..start + q_len]
+                    .iter()
+                    .collect::<String>()
+                    == query
+                {
+                    self.matches
+                        .push(SearchMatch::new(line, start, start + q_len));
+                    // Limit to 1000 matches like Go.
+                    if self.matches.len() >= 1000 {
+                        break;
+                    }
+                }
+            }
+            if self.matches.len() >= 1000 {
+                break;
+            }
+        }
+        self.current = 0;
+    }
+
+    /// After `execute`, jump to the first match at or after `(line, col)` for
+    /// forward search, or the closest match at or before for backward search.
+    /// Returns the match jumped to.
+    pub fn jump_initial(&mut self, line: usize, col: usize) -> Option<SearchMatch> {
+        if self.matches.is_empty() {
+            return None;
+        }
+        if self.forward {
+            // Find first match at or after cursor.
+            let idx = self
+                .matches
+                .iter()
+                .position(|m| m.at_or_after(line, col))
+                .unwrap_or(0);
+            self.current = idx;
+        } else {
+            // Find last match strictly before cursor (skip current match).
+            let idx = self
+                .matches
+                .iter()
+                .rposition(|m| m.strictly_before(line, col))
+                .unwrap_or(self.matches.len() - 1);
+            self.current = idx;
+        }
+        self.current_match().copied()
+    }
+
+    /// Matches on a specific line (for highlighting).
+    pub fn matches_on_line(&self, line: usize) -> Vec<SearchMatch> {
+        self.matches
+            .iter()
+            .filter(|m| m.line == line)
+            .copied()
+            .collect()
+    }
+}
+
+// =========================================================================
+// Count prefix state — vim-style {count}motion
+// =========================================================================
+
+/// Accumulates a vim-style count prefix (digits typed before a command).
+///
+/// Ported from Go's `CopyMode.PendingCount`. A count of 0 means no count has
+/// been entered; `consume()` returns the accumulated count or 1 (the default
+/// vim count) when none was entered.
+#[derive(Debug, Clone, Default)]
+pub struct CountState {
+    count: usize,
+}
+
+impl CountState {
+    /// Create empty count state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether a count is being accumulated.
+    pub fn active(&self) -> bool {
+        self.count > 0
+    }
+
+    /// The current accumulated count (0 if none).
+    pub fn value(&self) -> usize {
+        self.count
+    }
+
+    /// Feed a digit to the count. Returns `true` if the digit was consumed.
+    /// A leading `0` is only part of a count if a count is already active
+    /// (e.g., `10`, `20`); a standalone `0` is the "start of line" command.
+    pub fn feed(&mut self, digit: u8) -> bool {
+        let d = (digit - b'0') as usize;
+        if d == 0 && !self.active() {
+            return false;
+        }
+        self.count = self.count.saturating_mul(10).saturating_add(d);
+        true
+    }
+
+    /// Consume the count, resetting to 0. Returns the count, or 1 (default).
+    pub fn consume(&mut self) -> usize {
+        let c = self.count;
+        self.count = 0;
+        if c == 0 {
+            1
+        } else {
+            c
+        }
+    }
+
+    /// Reset the count to 0 without consuming.
+    pub fn reset(&mut self) {
+        self.count = 0;
+    }
+}
+
+// =========================================================================
+// Paragraph motion — skip blank lines to next paragraph start
+// =========================================================================
+
+/// Find the start of the next paragraph from `start_line`.
+///
+/// A paragraph boundary is a blank line. This skips the current paragraph's
+/// non-blank lines, then skips blank lines, landing on the first non-blank
+/// line of the next paragraph. Ported from Go's `moveParagraphDown` and
+/// `scrollback.VimState.ParagraphDown`.
+///
+/// Returns the target line, or `start_line` if none found.
+pub fn paragraph_forward(
+    line_count: usize,
+    start_line: usize,
+    line_text: impl Fn(usize) -> String,
+) -> usize {
+    if line_count == 0 {
+        return start_line;
+    }
+    let mut i = start_line;
+    // Skip non-blank lines (current paragraph).
+    while i < line_count && !line_text(i).trim().is_empty() {
+        i += 1;
+    }
+    // Skip blank lines (separator).
+    while i < line_count && line_text(i).trim().is_empty() {
+        i += 1;
+    }
+    if i >= line_count {
+        line_count - 1
+    } else {
+        i
+    }
+}
+
+/// Find the start of the previous paragraph from `start_line`.
+///
+/// Skips blank lines backward, then non-blank lines, then blank lines again,
+/// landing on the first non-blank line of the previous paragraph. Ported from
+/// Go's `moveParagraphUp` and `scrollback.VimState.ParagraphUp`.
+///
+/// Returns the target line, or `start_line` if none found.
+pub fn paragraph_backward(
+    start_line: usize,
+    line_text: impl Fn(usize) -> String,
+) -> usize {
+    if start_line == 0 {
+        return 0;
+    }
+    let mut i = start_line;
+    // If current line is non-blank, find start of current paragraph.
+    if !line_text(i).trim().is_empty() {
+        let start = i;
+        while i > 0 && !line_text(i - 1).trim().is_empty() {
+            i -= 1;
+        }
+        // If we moved, we found the start of the current paragraph.
+        if i != start {
+            return i;
+        }
+        // Already at start of current paragraph — step back to find previous.
+        i = i.saturating_sub(1);
+    }
+    // Skip blank lines backward.
+    while i > 0 && line_text(i).trim().is_empty() {
+        i -= 1;
+    }
+    // Skip non-blank lines backward to find start of previous paragraph.
+    while i > 0 && !line_text(i - 1).trim().is_empty() {
+        i -= 1;
+    }
+    i
+}
+
+// =========================================================================
+// Styled output extraction — extract styled text from cells
+// =========================================================================
+
+/// A styled text fragment: content plus its style.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyledFragment {
+    /// The text content.
+    pub text: String,
+    /// The style (foreground, background, decoration).
+    pub style: crate::vt::cell::Style,
+}
+
+/// Extract styled text from a slice of cells, skipping continuation cells
+/// (width=0) of wide characters. Empty cells become spaces with default style.
+///
+/// Ported from Go's `extractLineTextFromCells` and `extractVisualText`.
+pub fn extract_styled_line(cells: &[crate::vt::cell::Cell]) -> Vec<StyledFragment> {
+    let mut out = Vec::new();
+    for cell in cells {
+        // Skip continuation cells of wide characters.
+        if cell.width == 0 {
+            continue;
+        }
+        if cell.content.is_empty() {
+            out.push(StyledFragment {
+                text: " ".into(),
+                style: cell.style,
+            });
+        } else {
+            out.push(StyledFragment {
+                text: cell.content.clone(),
+                style: cell.style,
+            });
+        }
+    }
+    out
+}
+
+/// Extract styled text from a range of cells (column range), for selection
+/// extraction. Filters out continuation cells and empty trailing cells.
+///
+/// `start_col` and `end_col` are inclusive cell-column indices.
+pub fn extract_styled_range(
+    cells: &[crate::vt::cell::Cell],
+    start_col: usize,
+    end_col: usize,
+) -> Vec<StyledFragment> {
+    let mut out = Vec::new();
+    let lo = start_col.min(cells.len().saturating_sub(1));
+    let hi = end_col.min(cells.len().saturating_sub(1));
+    for cell in &cells[lo..=hi] {
+        if cell.width == 0 {
+            continue;
+        }
+        if cell.content.is_empty() {
+            // Preserve internal spaces but not trailing empty cells.
+            out.push(StyledFragment {
+                text: " ".into(),
+                style: cell.style,
+            });
+        } else {
+            out.push(StyledFragment {
+                text: cell.content.clone(),
+                style: cell.style,
+            });
+        }
+    }
+    // Trim trailing space fragments.
+    while out.last().map(|f| f.text == " ").unwrap_or(false) {
+        out.pop();
+    }
+    out
+}
+
+/// Convert styled fragments to plain text.
+pub fn styled_to_plain(fragments: &[StyledFragment]) -> String {
+    let mut out = String::new();
+    for f in fragments {
+        out.push_str(&f.text);
+    }
+    out
+}
+
+// =========================================================================
+// Garbage detection — filter non-text garbage from selections
+// =========================================================================
+
+/// Characters considered garbage (control characters, zero-width, etc.).
+const GARBAGE_CHARS: &[char] = &[
+    '\0', '\x07', '\x08', '\x0b', '\x0c', '\x1b', '\x7f', '\u{200b}', '\u{200d}',
+];
+
+/// Whether a character is "garbage" — a control character or zero-width space
+/// that should be filtered from selections.
+pub fn is_garbage(c: char) -> bool {
+    GARBAGE_CHARS.contains(&c) || (c.is_control() && c != '\n' && c != '\t')
+}
+
+/// Clean selection text by removing garbage characters and trimming.
+///
+/// Ported from Go's `extractVisualText` which filters empty cells and
+/// preserves internal spaces. This also strips control characters that
+/// leaked into the cell buffer.
+pub fn clean_selection_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if is_garbage(c) {
+            continue;
+        }
+        out.push(c);
+    }
+    out.trim().to_string()
+}
+
+// =========================================================================
+// Command text cleaning — clean up command text before extraction
+// =========================================================================
+
+/// Clean up command text extracted from a prompt line.
+///
+/// Strips leading prompt sigils (`$`, `#`, `>`, `%`, `❯`), trailing
+/// whitespace, and control characters. Ported from Go's prompt-based block
+/// parsing which trims the command line.
+pub fn clean_command_text(text: &str) -> String {
+    // First strip ANSI CSI/OSC escape sequences (e.g. \x1b[0m).
+    let stripped = strip_ansi_escapes(text);
+    let mut cleaned = String::with_capacity(stripped.len());
+    for c in stripped.chars() {
+        if is_garbage(c) {
+            continue;
+        }
+        cleaned.push(c);
+    }
+    // Strip leading prompt sigils and whitespace.
+    let trimmed = cleaned.trim_start();
+    let trimmed = trimmed
+        .strip_prefix("$ ")
+        .or_else(|| trimmed.strip_prefix("# "))
+        .or_else(|| trimmed.strip_prefix("> "))
+        .or_else(|| trimmed.strip_prefix("% "))
+        .unwrap_or(trimmed);
+    trimmed.trim().to_string()
+}
+
+/// Remove ANSI CSI (`ESC [ ... letter`) and OSC (`ESC ] ... BEL/ST`) sequences.
+fn strip_ansi_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            // Match the actual ESC character (U+001B).
+            out.push(c);
+            continue;
+        }
+        // ESC sequence
+        match chars.peek() {
+            Some('[') => {
+                chars.next();
+                // Consume until we hit a final byte (0x40..=0x7E).
+                while let Some(&p) = chars.peek() {
+                    chars.next();
+                    if p as u32 >= 0x40 && p as u32 <= 0x7E {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                // OSC: consume until BEL (\x07) or ST (ESC \\).
+                while let Some(p) = chars.next() {
+                    if p == '\x07' {
+                        break;
+                    }
+                    if p == '\x1b' {
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            }
+            _ => {
+                // Other escape sequences: skip the next char if present.
+                chars.next();
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1186,5 +1719,465 @@ mod goto_line_tests {
     fn goto_line_one() {
         // 1G → line index 0.
         assert_eq!(goto_line(1, 100), 0);
+    }
+}
+
+#[cfg(test)]
+mod search_match_tests {
+    use super::*;
+
+    #[test]
+    fn search_match_basic() {
+        let m = SearchMatch::new(5, 10, 14);
+        assert_eq!(m.line, 5);
+        assert_eq!(m.start, 10);
+        assert_eq!(m.end, 14);
+    }
+
+    #[test]
+    fn search_match_at_or_after() {
+        let m = SearchMatch::new(5, 10, 14);
+        assert!(m.at_or_after(5, 10));
+        assert!(m.at_or_after(4, 0));
+        assert!(!m.at_or_after(5, 11));
+        assert!(!m.at_or_after(6, 0));
+    }
+
+    #[test]
+    fn search_match_at_or_before() {
+        let m = SearchMatch::new(5, 10, 14);
+        assert!(m.at_or_before(5, 10));
+        assert!(m.at_or_before(6, 0));
+        assert!(m.at_or_before(5, 11));
+        assert!(!m.at_or_before(4, 0));
+    }
+}
+
+#[cfg(test)]
+mod search_state_tests {
+    use super::*;
+
+    fn sample_lines() -> Vec<String> {
+        [
+            "hello world".to_string(),
+            "foo bar".to_string(),
+            "hello again".to_string(),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn execute_finds_all_matches() {
+        let lines = sample_lines();
+        let text = |i: usize| lines[i].clone();
+        let mut s = SearchState::new();
+        s.query = "hello".into();
+        s.execute(3, text);
+        assert_eq!(s.match_count(), 2);
+        assert_eq!(s.matches[0].line, 0);
+        assert_eq!(s.matches[1].line, 2);
+    }
+
+    #[test]
+    fn execute_case_insensitive() {
+        let lines = ["Hello World".to_string(), "HELLO there".to_string()];
+        let text = |i: usize| lines[i].clone();
+        let mut s = SearchState::new();
+        s.query = "hello".into();
+        s.execute(2, text);
+        assert_eq!(s.match_count(), 2);
+    }
+
+    #[test]
+    fn execute_case_sensitive() {
+        let lines = ["Hello World".to_string(), "hello there".to_string()];
+        let text = |i: usize| lines[i].clone();
+        let mut s = SearchState::new();
+        s.query = "hello".into();
+        s.case_sensitive = true;
+        s.execute(2, text);
+        assert_eq!(s.match_count(), 1);
+        assert_eq!(s.matches[0].line, 1);
+    }
+
+    #[test]
+    fn execute_empty_query_clears() {
+        let lines = sample_lines();
+        let text = |i: usize| lines[i].clone();
+        let mut s = SearchState::new();
+        s.query = "hello".into();
+        s.execute(3, text);
+        assert!(s.has_matches());
+        s.query.clear();
+        s.execute(3, text);
+        assert!(!s.has_matches());
+    }
+
+    #[test]
+    fn next_wraps_around() {
+        let lines = sample_lines();
+        let text = |i: usize| lines[i].clone();
+        let mut s = SearchState::new();
+        s.query = "hello".into();
+        s.execute(3, text);
+        s.current = 0;
+        s.next();
+        assert_eq!(s.current, 1);
+        s.next();
+        assert_eq!(s.current, 0); // wraps
+    }
+
+    #[test]
+    fn prev_wraps_around() {
+        let lines = sample_lines();
+        let text = |i: usize| lines[i].clone();
+        let mut s = SearchState::new();
+        s.query = "hello".into();
+        s.execute(3, text);
+        s.current = 0;
+        s.prev();
+        assert_eq!(s.current, 1); // wraps to last
+    }
+
+    #[test]
+    fn jump_initial_forward() {
+        let lines = sample_lines();
+        let text = |i: usize| lines[i].clone();
+        let mut s = SearchState::new();
+        s.query = "hello".into();
+        s.forward = true;
+        s.execute(3, text);
+        // From line 0 col 5, first match at or after is line 2.
+        let m = s.jump_initial(0, 5);
+        assert_eq!(m.unwrap().line, 2);
+        assert_eq!(s.current, 1);
+    }
+
+    #[test]
+    fn jump_initial_backward() {
+        let lines = sample_lines();
+        let text = |i: usize| lines[i].clone();
+        let mut s = SearchState::new();
+        s.query = "hello".into();
+        s.forward = false;
+        s.execute(3, text);
+        // From line 2 col 0, last match at or before is line 0.
+        let m = s.jump_initial(2, 0);
+        assert_eq!(m.unwrap().line, 0);
+        assert_eq!(s.current, 0);
+    }
+
+    #[test]
+    fn matches_on_line() {
+        let lines = ["ab ab ab".to_string()];
+        let text = |i: usize| lines[i].clone();
+        let mut s = SearchState::new();
+        s.query = "ab".into();
+        s.execute(1, text);
+        let on_line = s.matches_on_line(0);
+        assert_eq!(on_line.len(), 3);
+    }
+
+    #[test]
+    fn clear_resets_state() {
+        let mut s = SearchState::new();
+        s.query = "test".into();
+        s.matches.push(SearchMatch::new(0, 0, 4));
+        s.current = 5;
+        s.clear();
+        assert!(s.query.is_empty());
+        assert!(s.matches.is_empty());
+        assert_eq!(s.current, 0);
+    }
+
+    #[test]
+    fn current_match_returns_none_when_empty() {
+        let s = SearchState::new();
+        assert!(s.current_match().is_none());
+    }
+
+    #[test]
+    fn execute_limits_to_1000_matches() {
+        let line = "a".repeat(2000);
+        let lines = [line];
+        let text = |i: usize| lines[i].clone();
+        let mut s = SearchState::new();
+        s.query = "a".into();
+        s.execute(1, text);
+        assert_eq!(s.match_count(), 1000);
+    }
+}
+
+#[cfg(test)]
+mod count_state_tests {
+    use super::*;
+
+    #[test]
+    fn default_is_inactive() {
+        let cs = CountState::new();
+        assert!(!cs.active());
+        assert_eq!(cs.value(), 0);
+    }
+
+    #[test]
+    fn feed_digit_accumulates() {
+        let mut cs = CountState::new();
+        assert!(cs.feed(b'1'));
+        assert_eq!(cs.value(), 1);
+        assert!(cs.feed(b'0'));
+        assert_eq!(cs.value(), 10);
+        assert!(cs.feed(b'5'));
+        assert_eq!(cs.value(), 105);
+    }
+
+    #[test]
+    fn leading_zero_not_consumed() {
+        let mut cs = CountState::new();
+        assert!(!cs.feed(b'0'));
+        assert!(!cs.active());
+    }
+
+    #[test]
+    fn zero_after_count_is_consumed() {
+        let mut cs = CountState::new();
+        assert!(cs.feed(b'1'));
+        assert!(cs.feed(b'0'));
+        assert_eq!(cs.value(), 10);
+    }
+
+    #[test]
+    fn consume_returns_count_or_default() {
+        let mut cs = CountState::new();
+        assert_eq!(cs.consume(), 1); // default
+        cs.feed(b'5');
+        assert_eq!(cs.consume(), 5);
+        assert!(!cs.active());
+    }
+
+    #[test]
+    fn reset_clears() {
+        let mut cs = CountState::new();
+        cs.feed(b'3');
+        cs.reset();
+        assert!(!cs.active());
+        assert_eq!(cs.value(), 0);
+    }
+}
+
+#[cfg(test)]
+mod paragraph_motion_tests {
+    use super::*;
+
+    fn lines() -> Vec<String> {
+        [
+            "first paragraph".to_string(),
+            "second line".to_string(),
+            "".to_string(),
+            "".to_string(),
+            "second paragraph".to_string(),
+            "its line".to_string(),
+            "".to_string(),
+            "third paragraph".to_string(),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn paragraph_forward_skips_blanks() {
+        let ls = lines();
+        let text = |i: usize| ls[i].clone();
+        // From line 0, next paragraph starts at line 4.
+        assert_eq!(paragraph_forward(8, 0, text), 4);
+    }
+
+    #[test]
+    fn paragraph_forward_from_middle() {
+        let ls = lines();
+        let text = |i: usize| ls[i].clone();
+        // From line 1, next paragraph starts at line 4.
+        assert_eq!(paragraph_forward(8, 1, text), 4);
+    }
+
+    #[test]
+    fn paragraph_forward_at_end_returns_last() {
+        let ls = lines();
+        let text = |i: usize| ls[i].clone();
+        // From line 7 (last), no next paragraph — returns last line.
+        assert_eq!(paragraph_forward(8, 7, text), 7);
+    }
+
+    #[test]
+    fn paragraph_backward_skips_blanks() {
+        let ls = lines();
+        let text = |i: usize| ls[i].clone();
+        // From line 4, previous paragraph starts at line 0.
+        assert_eq!(paragraph_backward(4, text), 0);
+    }
+
+    #[test]
+    fn paragraph_backward_from_middle() {
+        let ls = lines();
+        let text = |i: usize| ls[i].clone();
+        // From line 5, previous paragraph starts at line 4.
+        assert_eq!(paragraph_backward(5, text), 4);
+    }
+
+    #[test]
+    fn paragraph_backward_at_start_returns_zero() {
+        let ls = lines();
+        let text = |i: usize| ls[i].clone();
+        assert_eq!(paragraph_backward(0, text), 0);
+    }
+
+    #[test]
+    fn paragraph_forward_multiple_blanks() {
+        let ls = ["a".to_string(), "".into(), "".into(), "".into(), "b".into()];
+        let text = |i: usize| ls[i].clone();
+        assert_eq!(paragraph_forward(5, 0, text), 4);
+    }
+}
+
+#[cfg(test)]
+mod styled_extraction_tests {
+    use super::*;
+    use crate::vt::cell::{Cell, Style};
+
+    #[test]
+    fn extract_styled_line_basic() {
+        let cells = [
+            Cell::new("h", 1, Style::default()),
+            Cell::new("i", 1, Style::default()),
+            Cell::new("", 1, Style::default()),
+            Cell::new("!", 1, Style::default()),
+        ];
+        let frags = extract_styled_line(&cells);
+        assert_eq!(frags.len(), 4);
+        assert_eq!(frags[0].text, "h");
+        assert_eq!(frags[2].text, " ");
+        assert_eq!(frags[3].text, "!");
+    }
+
+    #[test]
+    fn extract_styled_line_skips_wide_continuation() {
+        let mut wide = Cell::new("🎨", 2, Style::default());
+        let cont = Cell::new("", 0, Style::default());
+        let _ = &mut wide;
+        let cells = [wide, cont, Cell::new("x", 1, Style::default())];
+        let frags = extract_styled_line(&cells);
+        assert_eq!(frags.len(), 2);
+        assert_eq!(frags[0].text, "🎨");
+        assert_eq!(frags[1].text, "x");
+    }
+
+    #[test]
+    fn extract_styled_range_trims_trailing_spaces() {
+        let cells = [
+            Cell::new("a", 1, Style::default()),
+            Cell::new("b", 1, Style::default()),
+            Cell::new("", 1, Style::default()),
+            Cell::new("", 1, Style::default()),
+        ];
+        let frags = extract_styled_range(&cells, 0, 3);
+        assert_eq!(frags.len(), 2);
+        assert_eq!(frags[0].text, "a");
+        assert_eq!(frags[1].text, "b");
+    }
+
+    #[test]
+    fn styled_to_plain_concatenates() {
+        let frags = [
+            StyledFragment {
+                text: "hello".into(),
+                style: Style::default(),
+            },
+            StyledFragment {
+                text: " ".into(),
+                style: Style::default(),
+            },
+            StyledFragment {
+                text: "world".into(),
+                style: Style::default(),
+            },
+        ];
+        assert_eq!(styled_to_plain(&frags), "hello world");
+    }
+}
+
+#[cfg(test)]
+mod garbage_detection_tests {
+    use super::*;
+
+    #[test]
+    fn is_garbage_control_chars() {
+        assert!(is_garbage('\0'));
+        assert!(is_garbage('\x07'));
+        assert!(is_garbage('\x1b'));
+        assert!(is_garbage('\u{200b}'));
+    }
+
+    #[test]
+    fn is_garbage_not_normal_chars() {
+        assert!(!is_garbage('a'));
+        assert!(!is_garbage(' '));
+        assert!(!is_garbage('\n'));
+        assert!(!is_garbage('\t'));
+    }
+
+    #[test]
+    fn clean_selection_text_removes_garbage() {
+        let input = "he\x1bllo\x07 wor\u{200b}ld";
+        assert_eq!(clean_selection_text(input), "hello world");
+    }
+
+    #[test]
+    fn clean_selection_text_trims() {
+        assert_eq!(clean_selection_text("  hello  "), "hello");
+    }
+
+    #[test]
+    fn clean_selection_text_preserves_newlines() {
+        assert_eq!(clean_selection_text("a\nb"), "a\nb");
+    }
+}
+
+#[cfg(test)]
+mod command_cleaning_tests {
+    use super::*;
+
+    #[test]
+    fn clean_strips_dollar_prompt() {
+        assert_eq!(clean_command_text("$ ls -la"), "ls -la");
+    }
+
+    #[test]
+    fn clean_strips_hash_prompt() {
+        assert_eq!(clean_command_text("# whoami"), "whoami");
+    }
+
+    #[test]
+    fn clean_strips_angle_prompt() {
+        assert_eq!(clean_command_text("> echo hi"), "echo hi");
+    }
+
+    #[test]
+    fn clean_strips_percent_prompt() {
+        assert_eq!(clean_command_text("% ls"), "ls");
+    }
+
+    #[test]
+    fn clean_removes_control_chars() {
+        assert_eq!(clean_command_text("$ \x1b[0mls"), "ls");
+    }
+
+    #[test]
+    fn clean_plain_command() {
+        assert_eq!(clean_command_text("ls -la"), "ls -la");
+    }
+
+    #[test]
+    fn clean_trims_whitespace() {
+        assert_eq!(clean_command_text("  ls  "), "ls");
     }
 }

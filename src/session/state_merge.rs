@@ -10,7 +10,7 @@
 //! here make the daemon's value win on the fields it owns.
 
 /// The agent state of one window, daemon-owned.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WindowState {
     pub id: String,
     pub title: String,

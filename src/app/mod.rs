@@ -14,6 +14,7 @@ pub mod input;
 pub mod interaction;
 pub mod layout_templates;
 pub mod msg;
+pub mod overlay_hit;
 pub mod render;
 pub mod sidebar;
 pub mod update;
@@ -260,6 +261,17 @@ impl Selection {
     }
 }
 
+/// Pending mark operation in copy mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkOp {
+    /// `m{letter}` — set a mark at the cursor position.
+    Set,
+    /// `'{letter}` — jump to the mark's line, first non-blank column.
+    JumpLine,
+    /// `` `{letter} `` — jump to the mark's exact line and column.
+    JumpCol,
+}
+
 /// One row in a switcher overlay.
 #[derive(Debug, Clone)]
 pub struct SwitcherEntry {
@@ -425,6 +437,20 @@ pub struct Os {
     pub copy_search_forward: bool,
     /// Whether we're typing a search query (`/` or `?` was pressed).
     pub copy_search_typing: bool,
+    /// Consolidated search state with match list for highlighting.
+    pub copy_search_state: copymode_ext::SearchState,
+    /// Count prefix state for vim-style {count}motion.
+    pub copy_count: copymode_ext::CountState,
+    /// Mark store for vim-style marks (m{letter} / '{letter}).
+    pub copy_marks: copymode_ext::MarkStore,
+    /// Register store for vim-style named registers ("{letter}y).
+    pub copy_registers: copymode_ext::RegisterStore,
+    /// Pending register prefix: when `Some(letter)`, the next yank goes to
+    /// that register instead of the unnamed one.
+    pub copy_pending_register: Option<char>,
+    /// Pending mark operation: when `Some`, the next key sets a mark (`m` was
+    /// pressed) or jumps to one (`'` or `` ` `` was pressed).
+    pub copy_pending_mark: Option<MarkOp>,
     /// The active selection (keyboard visual or mouse drag), if any.
     pub selection: Option<Selection>,
     /// Whether a mouse drag selection is in progress.
@@ -733,6 +759,12 @@ impl Os {
             copy_search_query: String::new(),
             copy_search_forward: true,
             copy_search_typing: false,
+            copy_search_state: copymode_ext::SearchState::new(),
+            copy_count: copymode_ext::CountState::new(),
+            copy_marks: copymode_ext::MarkStore::new(),
+            copy_registers: copymode_ext::RegisterStore::new(),
+            copy_pending_register: None,
+            copy_pending_mark: None,
             selection: None,
             mouse_selecting: false,
             context_menu: None,
@@ -2911,6 +2943,10 @@ impl Os {
         self.copy_char_search = None;
         self.copy_search_typing = false;
         self.copy_search_query.clear();
+        self.copy_search_state.clear();
+        self.copy_count.reset();
+        self.copy_pending_register = None;
+        self.copy_pending_mark = None;
         self.selection = None;
         self.mouse_selecting = false;
         if let Some(i) = self.focused_window {
@@ -3817,6 +3853,226 @@ impl Os {
             }
             line += delta;
         }
+    }
+
+    /// Move to the start of the next sentence (`)` motion).
+    pub fn copy_sentence_next(&mut self) {
+        let count = {
+            let Some(i) = self.focused_window else {
+                return;
+            };
+            let Some(w) = self.windows.get(i) else {
+                return;
+            };
+            let Ok(emu) = w.emulator.lock() else {
+                return;
+            };
+            emu.content_line_count()
+        };
+        let start_line = self.copy_cursor_line;
+        let start_col = self.copy_cursor_col as usize;
+        let text = |line: usize| self.copy_line_text(line);
+        let (line, col) =
+            copymode_ext::next_sentence(count, start_line, start_col, text);
+        if line != start_line || col != start_col {
+            self.copy_cursor_line = line;
+            self.copy_cursor_col = col as i32;
+            self.scroll_to_cursor(line);
+            self.sync_selection_cursor();
+        }
+    }
+
+    /// Move to the start of the previous sentence (`(` motion).
+    pub fn copy_sentence_prev(&mut self) {
+        let start_line = self.copy_cursor_line;
+        let start_col = self.copy_cursor_col as usize;
+        let text = |line: usize| self.copy_line_text(line);
+        let (line, col) =
+            copymode_ext::prev_sentence(start_line, start_col, text);
+        if line != start_line || col != start_col {
+            self.copy_cursor_line = line;
+            self.copy_cursor_col = col as i32;
+            self.scroll_to_cursor(line);
+            self.sync_selection_cursor();
+        }
+    }
+
+    /// Move to the start of the next paragraph (`}` motion, paragraph-aware).
+    /// Unlike `copy_blank_line` which stops on the blank line, this skips
+    /// past blank lines to the first non-blank line of the next paragraph.
+    pub fn copy_paragraph_next(&mut self) {
+        let count = {
+            let Some(i) = self.focused_window else {
+                return;
+            };
+            let Some(w) = self.windows.get(i) else {
+                return;
+            };
+            let Ok(emu) = w.emulator.lock() else {
+                return;
+            };
+            emu.content_line_count()
+        };
+        let start = self.copy_cursor_line;
+        let text = |line: usize| self.copy_line_text(line);
+        let target = copymode_ext::paragraph_forward(count, start, text);
+        if target != start {
+            self.copy_cursor_line = target;
+            self.copy_cursor_col = 0;
+            self.scroll_to_cursor(target);
+            self.sync_selection_cursor();
+        }
+    }
+
+    /// Move to the start of the previous paragraph (`{` motion, paragraph-aware).
+    pub fn copy_paragraph_prev(&mut self) {
+        let start = self.copy_cursor_line;
+        let text = |line: usize| self.copy_line_text(line);
+        let target = copymode_ext::paragraph_backward(start, text);
+        if target != start {
+            self.copy_cursor_line = target;
+            self.copy_cursor_col = 0;
+            self.scroll_to_cursor(target);
+            self.sync_selection_cursor();
+        }
+    }
+
+    /// Set a vim-style mark at the current cursor position (`m{letter}`).
+    pub fn copy_set_mark(&mut self, letter: char) {
+        self.copy_marks
+            .set(letter, self.copy_cursor_line, self.copy_cursor_col as usize);
+    }
+
+    /// Jump the cursor to a vim-style mark (`'{letter}` or `` `{letter} ``).
+    /// `exact_col` true for backtick (exact column), false for apostrophe
+    /// (first non-blank column of the mark's line).
+    pub fn copy_goto_mark(&mut self, letter: char, exact_col: bool) {
+        if let Some(mark) = self.copy_marks.get(letter) {
+            self.copy_cursor_line = mark.line;
+            if exact_col {
+                self.copy_cursor_col = mark.col as i32;
+            } else {
+                let text = self.copy_line_text(mark.line);
+                let col = text
+                    .char_indices()
+                    .skip_while(|(_, c)| c.is_whitespace())
+                    .map(|(i, _)| i as i32)
+                    .next()
+                    .unwrap_or(0);
+                self.copy_cursor_col = col;
+            }
+            self.scroll_to_cursor(mark.line);
+            self.sync_selection_cursor();
+        }
+    }
+
+    /// Yank the current selection into a named register (or the unnamed
+    /// register if `register` is `None`). Also copies to the clipboard and
+    /// emits OSC 52.
+    pub fn yank_selection_to_register(&mut self, register: Option<char>) {
+        let Some(sel) = self.selection.clone() else {
+            return;
+        };
+        let Some(w) = self.windows.get(sel.window) else {
+            return;
+        };
+        let text = {
+            let Ok(emu) = w.emulator.lock() else {
+                return;
+            };
+            emu.selection_text(
+                sel.anchor_line,
+                sel.anchor_col,
+                sel.cursor_line,
+                sel.cursor_col,
+            )
+        };
+        let cleaned = copymode_ext::clean_selection_text(&text);
+        let kind = if self.copy_visual_line {
+            copymode_ext::RegisterKind::Line
+        } else {
+            copymode_ext::RegisterKind::Char
+        };
+        self.copy_registers.yank(register, &cleaned, kind);
+        self.selection = None;
+        self.copy_visual = false;
+        self.mouse_selecting = false;
+        self.clipboard = cleaned.clone();
+        if !cleaned.is_empty() {
+            Self::emit_osc52(&cleaned);
+        }
+        let count = cleaned.chars().count();
+        self.notify(format!("yanked {count} char(s)"), "info");
+    }
+
+    /// Execute the search using the consolidated search state, storing all
+    /// matches for highlighting and navigation.
+    pub fn copy_execute_search_state(&mut self) {
+        if self.copy_search_query.is_empty() {
+            self.copy_search_typing = false;
+            self.copy_search_state.clear();
+            return;
+        }
+        let count = {
+            let Some(i) = self.focused_window else {
+                return;
+            };
+            let Some(w) = self.windows.get(i) else {
+                return;
+            };
+            let Ok(emu) = w.emulator.lock() else {
+                return;
+            };
+            emu.content_line_count()
+        };
+        self.copy_search_state.query = self.copy_search_query.clone();
+        self.copy_search_state.forward = self.copy_search_forward;
+        let start_line = self.copy_cursor_line;
+        let start_col = self.copy_cursor_col as usize;
+        let lines: Vec<String> = {
+            let mut lines = Vec::with_capacity(count);
+            for i in 0..count {
+                lines.push(self.copy_line_text(i));
+            }
+            lines
+        };
+        self.copy_search_state
+            .execute(count, |line: usize| lines.get(line).cloned().unwrap_or_default());
+        self.copy_search_typing = false;
+        if let Some(m) = self.copy_search_state.jump_initial(start_line, start_col) {
+            self.copy_cursor_line = m.line;
+            self.copy_cursor_col = m.start as i32;
+            self.scroll_to_cursor(m.line);
+            self.sync_selection_cursor();
+        }
+    }
+
+    /// Jump to the next match in the consolidated search state.
+    pub fn copy_search_state_next(&mut self) {
+        let m = self.copy_search_state.next();
+        if let Some(m) = m {
+            self.copy_cursor_line = m.line;
+            self.copy_cursor_col = m.start as i32;
+            self.scroll_to_cursor(m.line);
+            self.sync_selection_cursor();
+        }
+    }
+
+    /// Jump to the previous match in the consolidated search state.
+    pub fn copy_search_state_prev(&mut self) {
+        let m = self.copy_search_state.prev();
+        if let Some(m) = m {
+            self.copy_cursor_line = m.line;
+            self.copy_cursor_col = m.start as i32;
+            self.scroll_to_cursor(m.line);
+            self.sync_selection_cursor();
+        }
+    }
+
+    /// Clear search highlighting (vim's `:noh` / Ctrl+L).
+    pub fn copy_clear_search(&mut self) {
+        self.copy_search_state.clear();
+        self.copy_search_query.clear();
     }
 
     /// The content position (line, column) under a screen cell coordinate for

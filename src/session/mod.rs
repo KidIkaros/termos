@@ -4,11 +4,14 @@
 
 pub mod agent_detect;
 pub mod agent_hold;
+pub mod agent_osc;
 pub mod agent_screen;
 pub mod agent_source;
 pub mod agent_state;
+pub mod autostart;
 pub mod client;
 pub mod daemon;
+pub mod debug;
 pub mod eventhub;
 pub mod events;
 pub mod manager;
@@ -18,6 +21,7 @@ pub mod persistence;
 pub mod protocol;
 pub mod remote;
 pub mod resurrection;
+pub mod session_state;
 pub mod startlock;
 pub mod state_merge;
 pub mod tree;

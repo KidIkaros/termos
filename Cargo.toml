@@ -38,8 +38,11 @@ dirs = "5.0"
 log = "0.4"
 env_logger = "0.11"
 
-# Base64 encoding for OSC52
+# Base64 encoding for OSC52 and kitty graphics payloads
 base64 = "0.22"
+
+# Zlib compression for kitty graphics inline transmissions (o=z)
+flate2 = "1"
 
 # UUIDs for window/session IDs
 uuid = { version = "1", features = ["v4"] }
