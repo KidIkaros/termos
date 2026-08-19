@@ -249,24 +249,7 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         let lines: Vec<String> = os.event_log.iter().rev().take(20).cloned().collect();
         render_overlay(buf, content_area, &lines, "Event log");
     } else if os.theme_picker_open {
-        let lines: Vec<String> = os
-            .theme_list
-            .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                if i == os.theme_picker_selected {
-                    format!("> {}", name)
-                } else {
-                    format!("  {}", name)
-                }
-            })
-            .collect();
-        render_overlay(
-            buf,
-            content_area,
-            &lines,
-            "Theme  (j/k: select, Enter: apply, Esc: cancel)",
-        );
+        render_theme_picker_overlay(os, buf, content_area);
     } else if os.accent_picker_open {
         let lines: Vec<String> = os
             .accent_list
@@ -676,11 +659,8 @@ fn focused_border_color(os: &Os) -> TuiColor {
             return TuiColor::Rgb(rgb.0, rgb.1, rgb.2);
         }
     }
-    if let Some(theme) = &os.theme {
-        TuiColor::Rgb(theme.ansi[4].0, theme.ansi[4].1, theme.ansi[4].2)
-    } else {
-        TuiColor::Blue
-    }
+    use crate::config::theme::ThemeColors;
+    os.theme.border_focused_terminal()
 }
 
 fn unfocused_border_color(os: &Os) -> TuiColor {
@@ -689,11 +669,8 @@ fn unfocused_border_color(os: &Os) -> TuiColor {
             return TuiColor::Rgb(rgb.0, rgb.1, rgb.2);
         }
     }
-    if let Some(theme) = &os.theme {
-        TuiColor::Rgb(theme.ansi[8].0, theme.ansi[8].1, theme.ansi[8].2)
-    } else {
-        TuiColor::DarkGray
-    }
+    use crate::config::theme::ThemeColors;
+    os.theme.border_unfocused()
 }
 
 fn draw_pane_border(
@@ -733,26 +710,11 @@ fn draw_pane_border(
 }
 
 fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
-    let bg = os
-        .theme
-        .as_ref()
-        .map(|t| TuiColor::Rgb(t.ansi[0].0, t.ansi[0].1, t.ansi[0].2))
-        .unwrap_or(TuiColor::DarkGray);
-    let fg = os
-        .theme
-        .as_ref()
-        .map(|t| TuiColor::Rgb(t.foreground.0, t.foreground.1, t.foreground.2))
-        .unwrap_or(TuiColor::White);
-    let accent = os
-        .theme
-        .as_ref()
-        .map(|t| TuiColor::Rgb(t.ansi[4].0, t.ansi[4].1, t.ansi[4].2))
-        .unwrap_or(TuiColor::Cyan);
-    let muted = os
-        .theme
-        .as_ref()
-        .map(|t| TuiColor::Rgb(t.ansi[8].0, t.ansi[8].1, t.ansi[8].2))
-        .unwrap_or(TuiColor::DarkGray);
+    use crate::config::theme::ThemeColors;
+    let bg = os.theme.dock_bg();
+    let fg = os.theme.dock_fg();
+    let accent = os.theme.dock_accent();
+    let muted = os.theme.dock_dimmed();
 
     // Fill the dock background.
     for x in 0..area.width {
@@ -1381,6 +1343,73 @@ fn render_tooltip(buf: &mut Buffer, area: TuiRect, text: &str, x: i32, y: i32) {
         let ch = chars.next().unwrap_or(' ');
         let cell = &mut buf[(x + 1 + j, y + 1)];
         cell.set_char(ch);
+    }
+}
+
+/// Render the theme picker overlay with color swatches.
+fn render_theme_picker_overlay(os: &Os, buf: &mut Buffer, area: TuiRect) {
+    use crate::config::theme::ThemeColors;
+
+    // Calculate overlay dimensions: extra width for swatch column.
+    let max_name = os.theme_list.iter().map(|n| n.len()).max().unwrap_or(0);
+    let swatch_width = 10; // 8 color blocks + 2 spaces
+    let content_width = (max_name + swatch_width + 4) as u16;
+    let width = content_width.min(area.width);
+    let height = (os.theme_list.len() as u16 + 4).min(area.height);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let rect = TuiRect::new(x, y, width, height);
+
+    // Draw the border + title.
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(TuiStyle::default().fg(os.theme.overlay_border()))
+        .title(Span::styled(
+            "Theme  (j/k: select, Enter: apply, Esc: cancel)",
+            TuiStyle::default().fg(os.theme.overlay_title()),
+        ));
+    let mut block_buf = Buffer::empty(rect);
+    block.render(rect, &mut block_buf);
+    for yy in 0..rect.height {
+        for xx in 0..rect.width {
+            buf[(rect.x + xx, rect.y + yy)] = block_buf[(rect.x + xx, rect.y + yy)].clone();
+        }
+    }
+
+    // Draw theme names + swatches.
+    for (i, name) in os.theme_list.iter().enumerate() {
+        let line_y = rect.y + 2 + i as u16;
+        if line_y >= rect.y + rect.height - 1 {
+            break;
+        }
+        let prefix = if i == os.theme_picker_selected { "> " } else { "  " };
+        let prefix_chars: Vec<char> = prefix.chars().collect();
+        for (j, ch) in prefix_chars.iter().enumerate() {
+            let px = rect.x + 2 + j as u16;
+            if px < rect.x + rect.width - 2 {
+                buf[(px, line_y)].set_char(*ch);
+            }
+        }
+        let name_chars: Vec<char> = name.chars().collect();
+        for (j, ch) in name_chars.iter().enumerate() {
+            let nx = rect.x + 4 + j as u16;
+            if nx < rect.x + rect.width - 2 {
+                buf[(nx, line_y)].set_char(*ch);
+            }
+        }
+        // Draw swatch: 8 colored block characters.
+        let swatch = crate::config::theme::Theme::built_in(name)
+            .map(|t| t.swatch())
+            .unwrap_or([crate::config::theme::Rgb::new(0, 0, 0); 8]);
+        for (j, color) in swatch.iter().enumerate() {
+            let sx = rect.x + 4 + max_name as u16 + 2 + j as u16;
+            if sx < rect.x + rect.width - 2 {
+                let cell = &mut buf[(sx, line_y)];
+                cell.set_char('\u{2588}'); // full block
+                cell.set_style(TuiStyle::default().fg(TuiColor::Rgb(color.0, color.1, color.2)));
+            }
+        }
     }
 }
 
