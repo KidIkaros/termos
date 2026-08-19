@@ -334,15 +334,19 @@ fn handle_command_pane_dialog_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
             os.cancel_command_pane_dialog();
         }
         KeyCode::Enter => {
-            os.commit_command_pane_dialog();
+            os.commit_command_pane_dialog_inner();
         }
         KeyCode::Backspace => {
-            if let Some(text) = os.command_pane_dialog.as_mut() {
+            if let Some((ref mut text, _)) = os.command_pane_dialog {
                 text.pop();
             }
         }
+        KeyCode::Tab => {
+            os.toggle_command_pane_suspended();
+            return KeyResult::Consumed;
+        }
         KeyCode::Char(c) => {
-            if let Some(text) = os.command_pane_dialog.as_mut() {
+            if let Some((ref mut text, _)) = os.command_pane_dialog {
                 text.push(c);
             }
         }

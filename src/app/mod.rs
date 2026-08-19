@@ -491,7 +491,8 @@ pub struct Os {
     /// The open rename dialog: (window index, current text).
     pub rename_dialog: Option<(usize, String)>,
     /// Text-input dialog for the "New command pane" palette command.
-    pub command_pane_dialog: Option<String>,
+    /// The bool tracks the `start_suspended` toggle (toggled with `s`).
+    pub command_pane_dialog: Option<(String, bool)>,
     /// The last yanked text (internal clipboard).
     pub clipboard: String,
     /// Mouse border-drag resize state: (window_id, edge, start_pos).
@@ -4227,21 +4228,28 @@ impl Os {
 
     /// Open the "New command pane" text-input dialog.
     pub fn open_command_pane_dialog(&mut self) {
-        self.command_pane_dialog = Some(String::new());
+        self.command_pane_dialog = Some((String::new(), false));
     }
 
     /// Commit the command-pane dialog text: spawn the command as a command
-    /// pane (running, not suspended).
-    pub fn commit_command_pane_dialog(&mut self) {
-        if let Some(text) = self.command_pane_dialog.take() {
+    /// pane. The suspended flag comes from the dialog's current toggle state.
+    pub fn commit_command_pane_dialog_inner(&mut self) {
+        if let Some((text, suspended)) = self.command_pane_dialog.take() {
             let text = text.trim().to_string();
             if text.is_empty() {
                 return;
             }
-            match self.spawn_command_window(&text, false) {
+            match self.spawn_command_window(&text, suspended) {
                 Ok(_) => self.log_action(&format!("command_pane {text}")),
                 Err(e) => self.notify(format!("command pane: {e}"), "error"),
             }
+        }
+    }
+
+    /// Toggle the suspended flag in the command-pane dialog.
+    pub fn toggle_command_pane_suspended(&mut self) {
+        if let Some((_, ref mut suspended)) = self.command_pane_dialog {
+            *suspended = !*suspended;
         }
     }
 

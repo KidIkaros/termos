@@ -161,12 +161,17 @@ pub fn render(os: &Os, buf: &mut Buffer) {
             "Enter apply · Esc cancel".to_string(),
         ];
         render_overlay(buf, content_area, &lines, "Rename window");
-    } else if let Some(text) = &os.command_pane_dialog {
+    } else if let Some((text, suspended)) = &os.command_pane_dialog {
+        let status = if *suspended {
+            "\u{23f8} ON"
+        } else {
+            "OFF"
+        };
         let lines = vec![
             "Run a command in a new pane; Enter re-runs it when it finishes.".to_string(),
             format!("  {text}_"),
-            String::new(),
-            "Enter run · Esc cancel".to_string(),
+            format!("  start_suspended: {status}"),
+            "Enter run · Tab toggle suspended · Esc cancel".to_string(),
         ];
         render_overlay(buf, content_area, &lines, "Command pane");
     } else if let Some(menu) = &os.context_menu {
