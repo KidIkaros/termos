@@ -9,6 +9,7 @@
 pub mod actions;
 pub mod agent_alert;
 pub mod border_grid;
+pub mod clipboard;
 pub mod copymode_ext;
 pub mod dock;
 pub mod dock_session_buttons;
@@ -1135,6 +1136,34 @@ impl Os {
                     prev_agent_state: from.clone(),
                     ..Default::default()
                 },
+            );
+        }
+    }
+
+    /// Drain pending desktop notifications from all window emulators and fire
+    /// system notifications (OSC 9/777/99).
+    pub fn tick_notifications(&mut self) {
+        let mut pending = Vec::new();
+        for w in self.windows.iter_mut() {
+            let notif = {
+                let Ok(mut emu) = w.emulator.lock() else {
+                    continue;
+                };
+                emu.take_pending_notification()
+            };
+            if let Some((title, body)) = notif {
+                pending.push((title, body));
+            }
+        }
+        for (title, body) in pending {
+            fire_desktop_notification(&title, &body);
+            self.notify(
+                if title.is_empty() {
+                    body
+                } else {
+                    format!("{title}: {body}")
+                },
+                "info",
             );
         }
     }
@@ -5065,6 +5094,43 @@ fn local_minutes_since_midnight() -> i32 {
         nix::libc::localtime_r(&now, &mut tm);
     }
     tm.tm_hour as i32 * 60 + tm.tm_min as i32
+}
+
+/// Fire a desktop notification using the platform's notification tool.
+///
+/// On Linux: `notify-send`. On macOS: `osascript`. On Windows: `msg` (if
+/// available). Falls back to no-op if no tool is found.
+fn fire_desktop_notification(title: &str, body: &str) {
+    let title = if title.is_empty() { "TermOS" } else { title };
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("notify-send")
+            .arg(title)
+            .arg(body)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            body.replace('\\', "\\\\").replace('"', "\\\""),
+            title.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (title, body); // no-op on unsupported platforms
+    }
 }
 
 #[cfg(test)]

@@ -52,6 +52,7 @@ impl Os {
             Msg::Tick => {
                 self.tick_agent_progress();
                 self.tick_agent_alerts();
+                self.tick_notifications();
                 self.tick_animations();
                 self.tick_tooltip();
                 self.tick_script();
