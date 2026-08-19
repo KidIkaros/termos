@@ -1137,6 +1137,24 @@ fn render_tape_manager(os: &Os, buf: &mut Buffer, area: TuiRect) {
             render_overlay(buf, area, &lines, "Tape manager — name recording");
             return;
         }
+        super::TapeManagerMode::Recording => {
+            lines.push("Recording… (Ctrl+B T s to stop)".into());
+            lines.push(String::new());
+            lines.push(format!("Commands: {}", os.recorder.as_ref().map(|r| r.command_count()).unwrap_or(0)));
+            render_overlay(buf, area, &lines, "Tape manager — recording");
+            return;
+        }
+        super::TapeManagerMode::Playing => {
+            lines.push("Playing tape…".into());
+            lines.push(String::new());
+            if let Some(p) = &os.script_player {
+                lines.push(format!("Step: {}/{}", p.current_index(), p.total_commands()));
+            }
+            lines.push(String::new());
+            lines.push("Esc: stop".into());
+            render_overlay(buf, area, &lines, "Tape manager — playing");
+            return;
+        }
         super::TapeManagerMode::List => {}
     }
 

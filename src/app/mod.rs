@@ -682,6 +682,10 @@ pub enum TapeManagerMode {
     /// List of tape files (default).
     #[default]
     List,
+    /// Recording a new tape.
+    Recording,
+    /// Playing back a tape.
+    Playing,
     /// Confirm deletion of the selected tape.
     ConfirmDelete,
     /// Enter a name for a new tape recording.

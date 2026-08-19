@@ -66,8 +66,14 @@ pub enum Action {
     Resize(u16, u16),
     /// Focus a specific window index (modulo the count).
     FocusPane(u8),
+    /// Move pane in a direction (0=left, 1=right, 2=up, 3=down).
+    MovePane(u8),
     /// Toggle the sidebar visibility.
     ToggleSidebar,
+    /// Collapse the sidebar.
+    SidebarCollapse,
+    /// Change sidebar position (0=left, 1=right).
+    SidebarPosition(u8),
     /// Open an overlay by index (help, palette, switcher, etc.).
     OpenOverlay(u8),
     /// Close any open overlay.
@@ -82,6 +88,28 @@ pub enum Action {
     Detach,
     /// Attach to a session.
     Attach,
+    /// Toggle shared borders.
+    ToggleShared,
+    /// Cycle layout mode (0=bsp, 1=master-stack, 2=scrolling).
+    LayoutMode(u8),
+    /// A mouse press at (x, y) with button (1=left, 2=right, 3=middle).
+    MousePress(u8, u8, u8),
+    /// A mouse motion at (x, y) with button held (0=none).
+    MouseMotion(u8, u8, u8),
+    /// A mouse release at (x, y) with button.
+    MouseRelease(u8, u8, u8),
+    /// A mouse wheel at (x, y), direction (0=up, 1=down).
+    MouseWheel(u8, u8, u8),
+    /// Write text to the focused pane's emulator.
+    Guest(u8),
+    /// Toggle alternate screen (odd=enter, even=exit) on pane B.
+    AltScreen(u8, u8),
+    /// Burst A lines of output from pane B.
+    Burst(u8, u8),
+    /// A second client attaches to the same live session.
+    SecondClient,
+    /// The daemon goes away and its sessions come back.
+    DaemonRestart,
 }
 
 /// Every action, for generation.
@@ -111,7 +139,14 @@ pub const ACTIONS: &[Action] = &[
     Action::FocusPane(0),
     Action::FocusPane(1),
     Action::FocusPane(2),
+    Action::MovePane(0),
+    Action::MovePane(1),
+    Action::MovePane(2),
+    Action::MovePane(3),
     Action::ToggleSidebar,
+    Action::SidebarCollapse,
+    Action::SidebarPosition(0),
+    Action::SidebarPosition(1),
     Action::OpenOverlay(0),
     Action::OpenOverlay(1),
     Action::OpenOverlay(2),
@@ -122,6 +157,20 @@ pub const ACTIONS: &[Action] = &[
     Action::SwitchSession(1),
     Action::Detach,
     Action::Attach,
+    Action::ToggleShared,
+    Action::LayoutMode(0),
+    Action::LayoutMode(1),
+    Action::LayoutMode(2),
+    Action::MousePress(10, 5, 1),
+    Action::MouseMotion(15, 8, 0),
+    Action::MouseRelease(10, 5, 1),
+    Action::MouseWheel(10, 5, 0),
+    Action::MouseWheel(10, 5, 1),
+    Action::Guest(0),
+    Action::AltScreen(1, 0),
+    Action::Burst(5, 0),
+    Action::SecondClient,
+    Action::DaemonRestart,
 ];
 
 /// A tiny deterministic PRNG (xorshift64*), so runs are reproducible.
@@ -339,6 +388,88 @@ impl Target for AppTarget {
             }
             Action::Attach => {
                 // No daemon in fuzz; no-op.
+            }
+            Action::MovePane(dir) => match dir % 4 {
+                0 => os.swap_focused_with(crate::layout::PreselectionDir::Left),
+                1 => os.swap_focused_with(crate::layout::PreselectionDir::Right),
+                2 => os.swap_focused_with(crate::layout::PreselectionDir::Up),
+                _ => os.swap_focused_with(crate::layout::PreselectionDir::Down),
+            },
+            Action::SidebarCollapse => {
+                // Toggle collapse state — the sidebar model handles this.
+                os.sidebar.toggle();
+            }
+            Action::SidebarPosition(_) => {
+                // Sidebar position change — no-op in fuzz (no rendering).
+            }
+            Action::ToggleShared => {
+                // Toggle shared borders — stored in config but no structural
+                // change in the fuzz target.
+            }
+            Action::LayoutMode(_) => {
+                // Layout mode cycling — the BSP tree handles all modes in fuzz.
+            }
+            Action::MousePress(x, y, _btn) => {
+                // Route through the app's mouse handler for realism.
+                use crossterm::event::{MouseEvent, MouseEventKind, MouseButton};
+                let mouse = MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: *x as u16,
+                    row: *y as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                };
+                crate::app::input::handle_mouse(os, &mouse);
+            }
+            Action::MouseMotion(x, y, _btn) => {
+                use crossterm::event::{MouseEvent, MouseEventKind};
+                let mouse = MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column: *x as u16,
+                    row: *y as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                };
+                crate::app::input::handle_mouse(os, &mouse);
+            }
+            Action::MouseRelease(x, y, _btn) => {
+                use crossterm::event::{MouseEvent, MouseEventKind, MouseButton};
+                let mouse = MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    column: *x as u16,
+                    row: *y as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                };
+                crate::app::input::handle_mouse(os, &mouse);
+            }
+            Action::MouseWheel(x, y, dir) => {
+                use crossterm::event::{MouseEvent, MouseEventKind};
+                let kind = if *dir == 0 {
+                    MouseEventKind::ScrollUp
+                } else {
+                    MouseEventKind::ScrollDown
+                };
+                let mouse = MouseEvent {
+                    kind,
+                    column: *x as u16,
+                    row: *y as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                };
+                crate::app::input::handle_mouse(os, &mouse);
+            }
+            Action::Guest(_ch) => {
+                // Write a byte to the focused pane's emulator — no-op in fuzz
+                // since PTYs aren't real here.
+            }
+            Action::AltScreen(_a, _b) => {
+                // Toggle alternate screen on a pane — no-op in fuzz.
+            }
+            Action::Burst(_lines, _pane) => {
+                // Burst output from a pane — no-op in fuzz.
+            }
+            Action::SecondClient => {
+                // Multi-client — no daemon in fuzz; no-op.
+            }
+            Action::DaemonRestart => {
+                // Daemon restart — no daemon in fuzz; no-op.
             }
         }
         // Refresh membership for the invariant checks.

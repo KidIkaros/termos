@@ -1034,6 +1034,8 @@ fn handle_tape_manager(os: &mut Os, key: &KeyEvent) -> KeyResult {
     match os.tape_manager_mode {
         TapeManagerMode::ConfirmDelete => return handle_tape_manager_confirm_delete(os, key),
         TapeManagerMode::Naming => return handle_tape_manager_naming(os, key),
+        TapeManagerMode::Recording => return handle_tape_manager_recording(os, key),
+        TapeManagerMode::Playing => return handle_tape_manager_playing(os, key),
         TapeManagerMode::List => {}
     }
 
@@ -1120,6 +1122,33 @@ fn handle_tape_manager_naming(os: &mut Os, key: &KeyEvent) -> KeyResult {
             if !key.modifiers.contains(KeyModifiers::CONTROL) {
                 os.tape_manager_name_buffer.push(c);
             }
+            KeyResult::Consumed
+        }
+        _ => KeyResult::Consumed,
+    }
+}
+
+/// Handle keys while the tape manager is in recording mode.
+fn handle_tape_manager_recording(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Esc => {
+            // Stop recording and return to list mode.
+            os.stop_recording();
+            os.tape_manager_mode = TapeManagerMode::List;
+            KeyResult::Consumed
+        }
+        _ => KeyResult::Consumed,
+    }
+}
+
+/// Handle keys while the tape manager is in playing mode.
+fn handle_tape_manager_playing(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Esc => {
+            // Stop playback and return to list mode.
+            os.script_mode = false;
+            os.script_player = None;
+            os.tape_manager_mode = TapeManagerMode::List;
             KeyResult::Consumed
         }
         _ => KeyResult::Consumed,
@@ -2921,6 +2950,101 @@ mod tests {
         let result = handle_key(&mut os, &key(KeyCode::Char('x')));
         assert_eq!(result, KeyResult::Consumed);
         assert_eq!(os.tape_manager_query, "x");
+    }
+
+    #[test]
+    fn tape_manager_d_enters_confirm_delete() {
+        let mut os = test_os();
+        os.tape_manager_open = true;
+        os.tape_manager_mode = TapeManagerMode::List;
+        let result = handle_key(&mut os, &key(KeyCode::Char('d')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.tape_manager_mode, TapeManagerMode::ConfirmDelete);
+    }
+
+    #[test]
+    fn tape_manager_y_confirms_delete() {
+        let mut os = test_os();
+        os.tape_manager_open = true;
+        os.tape_manager_mode = TapeManagerMode::ConfirmDelete;
+        let result = handle_key(&mut os, &key(KeyCode::Char('y')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.tape_manager_mode, TapeManagerMode::List);
+    }
+
+    #[test]
+    fn tape_manager_n_cancels_delete() {
+        let mut os = test_os();
+        os.tape_manager_open = true;
+        os.tape_manager_mode = TapeManagerMode::ConfirmDelete;
+        let result = handle_key(&mut os, &key(KeyCode::Char('n')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.tape_manager_mode, TapeManagerMode::List);
+    }
+
+    #[test]
+    fn tape_manager_esc_cancels_delete() {
+        let mut os = test_os();
+        os.tape_manager_open = true;
+        os.tape_manager_mode = TapeManagerMode::ConfirmDelete;
+        let result = handle_key(&mut os, &key(KeyCode::Esc));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.tape_manager_mode, TapeManagerMode::List);
+    }
+
+    #[test]
+    fn tape_manager_r_enters_naming() {
+        let mut os = test_os();
+        os.tape_manager_open = true;
+        os.tape_manager_mode = TapeManagerMode::List;
+        let result = handle_key(&mut os, &key(KeyCode::Char('r')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.tape_manager_mode, TapeManagerMode::Naming);
+    }
+
+    #[test]
+    fn tape_manager_naming_enter_starts_recording() {
+        let mut os = test_os();
+        os.tape_manager_open = true;
+        os.tape_manager_mode = TapeManagerMode::Naming;
+        os.tape_manager_name_buffer = "test".into();
+        let result = handle_key(&mut os, &key(KeyCode::Enter));
+        assert_eq!(result, KeyResult::Consumed);
+        assert!(!os.tape_manager_open);
+    }
+
+    #[test]
+    fn tape_manager_naming_esc_cancels() {
+        let mut os = test_os();
+        os.tape_manager_open = true;
+        os.tape_manager_mode = TapeManagerMode::Naming;
+        os.tape_manager_name_buffer = "test".into();
+        let result = handle_key(&mut os, &key(KeyCode::Esc));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.tape_manager_mode, TapeManagerMode::List);
+        assert!(os.tape_manager_name_buffer.is_empty());
+    }
+
+    #[test]
+    fn tape_manager_naming_backspace() {
+        let mut os = test_os();
+        os.tape_manager_open = true;
+        os.tape_manager_mode = TapeManagerMode::Naming;
+        os.tape_manager_name_buffer = "abc".into();
+        let result = handle_key(&mut os, &key(KeyCode::Backspace));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.tape_manager_name_buffer, "ab");
+    }
+
+    #[test]
+    fn tape_manager_naming_char_appends() {
+        let mut os = test_os();
+        os.tape_manager_open = true;
+        os.tape_manager_mode = TapeManagerMode::Naming;
+        os.tape_manager_name_buffer = "ab".into();
+        let result = handle_key(&mut os, &key(KeyCode::Char('c')));
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.tape_manager_name_buffer, "abc");
     }
 
     #[test]
