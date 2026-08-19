@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::response::Html;
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
@@ -27,6 +27,21 @@ use crate::config::UserConfig;
 
 /// The static HTML page with xterm.js that connects to the WebSocket.
 const INDEX_HTML: &str = include_str!("web/index.html");
+
+/// A minimal token-gate page shown when the server requires a token and the
+/// request does not carry one. The form GETs back to `/` with `?token=...`,
+/// which the index handler validates before serving the terminal page.
+const LOGIN_HTML: &str = "<!DOCTYPE html>\
+<html><head><meta charset=\"utf-8\"><title>TermOS — access token</title></head>\
+<body style=\"font-family:sans-serif;background:#111;color:#eee;display:flex;align-items:center;\
+justify-content:center;height:100vh;margin:0\">\
+<form method=\"get\" action=\"/\">\
+<h2 style=\"margin-top:0\">TermOS</h2>\
+<p style=\"color:#aaa\">This server requires an access token.</p>\
+<input type=\"password\" name=\"token\" placeholder=\"access token\" autofocus\
+style=\"padding:8px;width:16em;font-size:14px\">\
+<button type=\"submit\" style=\"padding:8px 14px;margin-left:6px\">Connect</button>\
+</form></body></html>";
 
 /// Web server state shared across connections.
 #[derive(Clone)]
@@ -48,6 +63,11 @@ pub struct WebServerState {
     pub touch_mode: crate::web::TouchMode,
     /// Read-only mode: guest input is dropped.
     pub read_only: bool,
+    /// Access token, when auth is on. Clients must present it as `?token=`.
+    pub token: Option<String>,
+    /// Whether clients must authenticate (computed from the bind host and
+    /// the configured token; loopback binds without a token stay open).
+    pub auth_required: bool,
 }
 
 /// Run the web server on the given address.
@@ -55,24 +75,63 @@ pub struct WebServerState {
 /// `touch_mode` decides how a client's touch screen is detected, `limiter`
 /// caps concurrent connections (0 = unlimited), and `read_only` stops guest
 /// input from reaching the shells.
+/// Web server options.
+#[derive(Debug, Clone, Default)]
+pub struct WebServerOptions {
+    /// Bind address, e.g. "127.0.0.1:8080".
+    pub addr: String,
+    /// Base user config cloned for each guest session.
+    pub config: UserConfig,
+    /// Touch detection preference for the mobile key bar.
+    pub touch_mode: crate::web::TouchMode,
+    /// Max concurrent WebSocket connections (0 = unlimited).
+    pub max_connections: u64,
+    /// Read-only observer mode: guest input is dropped.
+    pub read_only: bool,
+    /// Whether to serve over TLS (auto-TLS or explicit cert/key).
+    pub tls_enabled: bool,
+    /// Access token; required from non-loopback binds and always when set.
+    pub token: Option<String>,
+    /// Explicit TLS certificate PEM path.
+    pub cert: Option<String>,
+    /// Explicit TLS private key PEM path.
+    pub key: Option<String>,
+}
+
+/// Run the web server on the given address.
+///
+/// `touch_mode` decides how a client's touch screen is detected, `limiter`
+/// caps concurrent connections (0 = unlimited), and `read_only` stops guest
+/// input from reaching the shells. `token` enables auth (and is mandatory
+/// for non-loopback binds); `cert`/`key` are explicit PEM files, while
+/// `auto_tls` generates a self-signed certificate for the bind host.
 pub async fn run_web_server(
-    addr: &str,
-    config: UserConfig,
-    touch_mode: crate::web::TouchMode,
-    max_connections: u64,
-    read_only: bool,
-    tls_enabled: bool,
+    opts: WebServerOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let WebServerOptions {
+        addr,
+        config,
+        touch_mode,
+        max_connections,
+        read_only,
+        tls_enabled,
+        token,
+        cert,
+        key,
+    } = opts;
     // Refuse non-TLS on non-loopback addresses to prevent credential exposure.
     let host = addr.split(':').next().unwrap_or("127.0.0.1");
     crate::web::check_transport_security(host, tls_enabled)?;
 
     let addr: SocketAddr = addr.parse()?;
+    let auth_required = crate::web::requires_token(host, token.as_deref());
     let state = WebServerState {
         config: Arc::new(config),
         limiter: Arc::new(crate::web::ConnectionLimiter::new(max_connections)),
         touch_mode,
         read_only,
+        token,
+        auth_required,
     };
 
     let app = Router::new()
@@ -81,20 +140,126 @@ pub async fn run_web_server(
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    log::info!("web server listening on {addr}");
+    log::info!("web server listening on {addr}{}", if tls_enabled { " (TLS)" } else { "" });
+    if tls_enabled {
+        #[cfg(feature = "tls")]
+        {
+            return serve_tls(listener, app, host, cert, key).await;
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            return Err("TLS requested but this build lacks the `tls` feature".into());
+        }
+    }
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+/// Serve the state-injected axum app over TLS, either from explicit cert/key
+/// PEM files or from a self-signed certificate generated for the bind host
+/// (auto-TLS).
+///
+/// axum's `Router` is a tower `Service`, but hyper's connection builder wants
+/// a hyper `Service`, so each TLS stream is bridged with `service_fn` that
+/// forwards requests through `Router::into_service` via `oneshot`.
+#[cfg(feature = "tls")]
+async fn serve_tls(
+    listener: tokio::net::TcpListener,
+    app: Router<()>,
+    host: &str,
+    cert: Option<String>,
+    key: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use hyper::body::Incoming;
+    use hyper::service::service_fn;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::server::conn::auto::Builder as HttpBuilder;
+    use std::convert::Infallible;
+    use tower::ServiceExt;
+
+    let tls_config = match (cert, key) {
+        (Some(cert), Some(key)) => crate::network::tls::load_tls_config(&cert, &key)?,
+        _ => {
+            let dir = dirs::data_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("termos")
+                .join("tls");
+            crate::network::tls::auto_tls_config(&dir, &[host.to_string()], 365)?
+        }
+    };
+    let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
+    let builder = HttpBuilder::new(TokioExecutor::new());
+
+    // The router as a tower service with a fixed body type (hyper's Incoming).
+    let tower_service = app.into_service::<Incoming>();
+
+    loop {
+        let (stream, peer) = match listener.accept().await {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("web: accept error: {e}");
+                continue;
+            }
+        };
+        let acceptor = acceptor.clone();
+        let tower_service = tower_service.clone();
+        let builder = builder.clone();
+        tokio::spawn(async move {
+            match acceptor.accept(stream).await {
+                Ok(tls_stream) => {
+                    let io = TokioIo::new(tls_stream);
+                    let tower_service = tower_service.clone();
+                    let hyper_service = service_fn(move |request: axum::http::Request<Incoming>| {
+                        let tower_service = tower_service.clone();
+                        async move {
+                            let response = tower_service.oneshot(request).await.unwrap();
+                            Ok::<_, Infallible>(response)
+                        }
+                    });
+                    if let Err(e) =
+                        builder.serve_connection_with_upgrades(io, hyper_service).await
+                    {
+                        log::debug!("web: connection from {peer} closed: {e}");
+                    }
+                }
+                Err(e) => log::warn!("web: TLS handshake with {peer} failed: {e}"),
+            }
+        });
+    }
+}
+
+/// Pull the `?token=` value out of a request's query string.
+fn query_token(uri: &axum::http::Uri) -> Option<String> {
+    uri.query().and_then(|q| {
+        q.split('&')
+            .find_map(|pair| pair.strip_prefix("token="))
+            .map(|v| v.to_string())
+    })
+}
+
+/// Whether a request passes the auth gate: open servers always pass, and
+/// gated servers require a valid `?token=`.
+pub(crate) fn auth_passes(state: &WebServerState, uri: &axum::http::Uri) -> bool {
+    !state.auth_required
+        || crate::web::token_is_valid(state.token.as_deref(), query_token(uri).as_deref())
+}
+
+async fn index(State(state): State<WebServerState>, uri: axum::http::Uri) -> Response {
+    if !auth_passes(&state, &uri) {
+        return (axum::http::StatusCode::UNAUTHORIZED, Html(LOGIN_HTML)).into_response();
+    }
+    Html(INDEX_HTML).into_response()
 }
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<WebServerState>,
     headers: axum::http::HeaderMap,
-) -> axum::response::Response {
+    uri: axum::http::Uri,
+) -> Response {
+    if !auth_passes(&state, &uri) {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
     let touch = crate::web::resolve_touch(
         state.touch_mode,
         headers
@@ -483,6 +648,74 @@ fn parse_web_input(data: &str) -> Vec<crossterm::event::KeyEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn state_with(token: Option<&str>, auth_required: bool) -> WebServerState {
+        WebServerState {
+            config: Arc::new(UserConfig::default()),
+            limiter: Arc::new(crate::web::ConnectionLimiter::new(0)),
+            touch_mode: crate::web::TouchMode::Auto,
+            read_only: false,
+            token: token.map(|s| s.to_string()),
+            auth_required,
+        }
+    }
+
+    #[test]
+    fn query_token_extracts_from_query() {
+        let uri: axum::http::Uri = "/?token=abc123&x=1".parse().unwrap();
+        assert_eq!(query_token(&uri).as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn query_token_missing() {
+        let uri: axum::http::Uri = "/".parse().unwrap();
+        assert_eq!(query_token(&uri), None);
+    }
+
+    #[test]
+    fn auth_passes_open_server() {
+        let s = state_with(None, false);
+        assert!(auth_passes(&s, &"/".parse().unwrap()));
+    }
+
+    #[test]
+    fn auth_passes_token_required_rejects_missing() {
+        let s = state_with(Some("secret"), true);
+        assert!(!auth_passes(&s, &"/".parse().unwrap()));
+    }
+
+    #[test]
+    fn auth_passes_token_required_accepts_valid() {
+        let s = state_with(Some("secret"), true);
+        assert!(auth_passes(&s, &"/?token=secret".parse().unwrap()));
+    }
+
+    #[test]
+    fn auth_passes_token_required_rejects_wrong() {
+        let s = state_with(Some("secret"), true);
+        assert!(!auth_passes(&s, &"/?token=wrong".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn index_open_serves_page() {
+        let s = state_with(None, false);
+        let resp = index(State(s), "/".parse().unwrap()).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn index_gated_rejects_without_token() {
+        let s = state_with(Some("secret"), true);
+        let resp = index(State(s), "/".parse().unwrap()).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn index_gated_accepts_valid_token() {
+        let s = state_with(Some("secret"), true);
+        let resp = index(State(s), "/?token=secret".parse().unwrap()).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    }
 
     #[test]
     fn parse_web_ctrl_b() {

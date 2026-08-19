@@ -527,6 +527,31 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn pty_writes_spaces_and_enter_execute_command() {
+        use crate::terminal::window::Window;
+        let size = WinSize { cols: 80, rows: 24 };
+        let wake = Box::new(|| {}) as Box<dyn Fn() + Send + 'static>;
+        let w = Window::spawn("df", "Terminal", size, "/bin/bash", None, wake, &[]).unwrap();
+        // Wait for the shell prompt.
+        std::thread::sleep(Duration::from_millis(700));
+        // Write a command with spaces and a trailing CR, one byte at a time
+        // (mimicking the web input loop which forwards key-by-key).
+        for b in b"echo HELLO_WORLD\r" {
+            w.write(&[*b]);
+        }
+        std::thread::sleep(Duration::from_millis(1200));
+        let text = w.emulator.lock().unwrap().render_text();
+        // The marker appears twice: once in the typed-line echo, once as the
+        // command's output on its own line. A single occurrence means the
+        // shell never executed the line.
+        let occurrences = text.matches("HELLO_WORLD").count();
+        assert!(
+            occurrences >= 2,
+            "expected echo + executed output, got {occurrences} occurrences: {text:?}"
+        );
+    }
+
+    #[test]
     fn spawn_pty_delivers_output() {
         let size = WinSize { cols: 80, rows: 24 };
         let argv = vec![

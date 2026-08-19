@@ -333,6 +333,7 @@ pub struct SshOptions {
     pub key_path: Option<String>,
     pub default_session: Option<String>,
     pub ephemeral: bool,
+    pub read_only: bool,
 }
 
 impl Default for SshOptions {
@@ -343,6 +344,7 @@ impl Default for SshOptions {
             key_path: None,
             default_session: None,
             ephemeral: false,
+            read_only: false,
         }
     }
 }
@@ -374,7 +376,94 @@ pub fn parse_ssh_args(args: &[String]) -> Result<SshOptions, String> {
                 opts.default_session = args.get(i).cloned();
             }
             "--ephemeral" => opts.ephemeral = true,
+            "--read-only" => opts.read_only = true,
             other => return Err(format!("unknown ssh flag '{other}'")),
+        }
+        i += 1;
+    }
+    Ok(opts)
+}
+
+// ─── Web Command ─────────────────────────────────────────────────────────
+
+/// Options for the `web` command.
+#[derive(Debug, Clone)]
+pub struct WebOptions {
+    pub host: String,
+    pub port: String,
+    /// Bearer token required from non-loopback clients (and always when set).
+    pub token: Option<String>,
+    /// Guests see output but their input is dropped.
+    pub read_only: bool,
+    /// Max concurrent WebSocket connections (0 = unlimited).
+    pub max_connections: u64,
+    /// Touch detection: auto/on/off.
+    pub touch: String,
+    /// Explicit TLS certificate/key, or auto-generate a self-signed cert.
+    pub cert: Option<String>,
+    pub key: Option<String>,
+    pub auto_tls: bool,
+}
+
+impl Default for WebOptions {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: "8080".to_string(),
+            token: None,
+            read_only: false,
+            max_connections: 0,
+            touch: "auto".to_string(),
+            cert: None,
+            key: None,
+            auto_tls: false,
+        }
+    }
+}
+
+/// Parse `web` command arguments.
+pub fn parse_web_args(args: &[String]) -> Result<WebOptions, String> {
+    let mut opts = WebOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--host" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    opts.host = v.clone();
+                }
+            }
+            "--port" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    opts.port = v.clone();
+                }
+            }
+            "--token" => {
+                i += 1;
+                opts.token = args.get(i).cloned();
+            }
+            "--read-only" => opts.read_only = true,
+            "--max-connections" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    opts.max_connections = v.parse().unwrap_or(0);
+                }
+            }
+            "--touch" => {
+                i += 1;
+                opts.touch = args.get(i).cloned().unwrap_or_else(|| "auto".to_string());
+            }
+            "--cert" => {
+                i += 1;
+                opts.cert = args.get(i).cloned();
+            }
+            "--key" => {
+                i += 1;
+                opts.key = args.get(i).cloned();
+            }
+            "--auto-tls" => opts.auto_tls = true,
+            other => return Err(format!("unknown web flag '{other}'")),
         }
         i += 1;
     }
@@ -1141,6 +1230,7 @@ pub const COMPLETION_COMMANDS: &[&str] = &[
     "block-until-exit",
     "exec",
     "ssh",
+    "web",
     "new-window",
     "run-command",
     "set-config",
@@ -1370,6 +1460,72 @@ mod tests {
     fn parse_ssh_args_unknown_flag() {
         let args = vec!["--bogus".into()];
         assert!(parse_ssh_args(&args).is_err());
+    }
+
+    #[test]
+    fn parse_ssh_args_read_only() {
+        let args = vec!["--read-only".into()];
+        let opts = parse_ssh_args(&args).unwrap();
+        assert!(opts.read_only);
+    }
+
+    #[test]
+    fn parse_web_args_defaults() {
+        let opts = parse_web_args(&[]).unwrap();
+        assert_eq!(opts.host, "127.0.0.1");
+        assert_eq!(opts.port, "8080");
+        assert!(opts.token.is_none());
+        assert!(!opts.read_only);
+        assert!(!opts.auto_tls);
+        assert_eq!(opts.max_connections, 0);
+        assert_eq!(opts.touch, "auto");
+    }
+
+    #[test]
+    fn parse_web_args_full() {
+        let args = vec![
+            "--host".into(),
+            "0.0.0.0".into(),
+            "--port".into(),
+            "8443".into(),
+            "--token".into(),
+            "s3cret".into(),
+            "--read-only".into(),
+            "--max-connections".into(),
+            "5".into(),
+            "--touch".into(),
+            "on".into(),
+            "--auto-tls".into(),
+        ];
+        let opts = parse_web_args(&args).unwrap();
+        assert_eq!(opts.host, "0.0.0.0");
+        assert_eq!(opts.port, "8443");
+        assert_eq!(opts.token.as_deref(), Some("s3cret"));
+        assert!(opts.read_only);
+        assert_eq!(opts.max_connections, 5);
+        assert_eq!(opts.touch, "on");
+        assert!(opts.auto_tls);
+    }
+
+    #[test]
+    fn parse_web_args_cert_key() {
+        let args = vec![
+            "--cert".into(),
+            "/tmp/cert.pem".into(),
+            "--key".into(),
+            "/tmp/key.pem".into(),
+        ];
+        let opts = parse_web_args(&args).unwrap();
+        assert_eq!(opts.cert.as_deref(), Some("/tmp/cert.pem"));
+        assert_eq!(opts.key.as_deref(), Some("/tmp/key.pem"));
+        // Supplying a cert implies TLS even without --auto-tls.
+        assert!(!opts.auto_tls);
+    }
+
+    #[test]
+    fn parse_web_args_unknown_flag() {
+        let args = vec!["--bogus".into()];
+        assert!(parse_web_args(&args).is_err());
     }
 
     #[test]

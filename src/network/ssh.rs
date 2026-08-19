@@ -31,6 +31,8 @@ pub struct SshServerConfig {
     pub addr: String,
     /// Path to the host key file. If None, a random key is generated.
     pub host_key_path: Option<String>,
+    /// Read-only observer mode: client input is dropped at the Os layer.
+    pub read_only: bool,
 }
 
 /// A TermOS SSH server. Each connection gets a fresh `Os` with its own
@@ -43,6 +45,8 @@ pub struct TermosSshServer {
     next_id: Arc<std::sync::atomic::AtomicUsize>,
     /// The user config to clone for each session.
     config: Arc<UserConfig>,
+    /// Read-only observer mode: client input is dropped at the Os layer.
+    read_only: bool,
 }
 
 /// A connected client's terminal and Os state.
@@ -395,11 +399,13 @@ impl TermosSshServer {
             clients: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             config: Arc::new(config),
+            read_only: false,
         }
     }
 
     /// Run the SSH server on the given address.
     pub async fn run(mut self, cfg: SshServerConfig) -> Result<(), Box<dyn std::error::Error>> {
+        self.read_only = cfg.read_only;
         let addr: SocketAddr = cfg.addr.parse()?;
 
         // Load the host key. A key path is required for the SSH server.
@@ -507,6 +513,7 @@ impl Handler for TermosSshServer {
     ) -> Result<bool, Self::Error> {
         let terminal = TerminalHandle::start(session.handle(), channel.id()).await;
         let mut os = Os::new((*self.config).clone());
+        os.read_only = self.read_only;
         os.init_graphics();
 
         let id = self

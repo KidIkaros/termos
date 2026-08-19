@@ -243,6 +243,7 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
         "block-until-exit" => cmd_block_until_exit(&args[1..]),
         "exec" => cmd_exec(&args[1..]),
         "ssh" => cmd_ssh(&args[1..]),
+        "web" => cmd_web(&args[1..]),
         "new-window" => cmd_new_window(&args[1..]),
         "run-command" => cmd_run_command(&args[1..]),
         "set-config" => cmd_set_config(&args[1..]),
@@ -508,6 +509,7 @@ fn print_help() {
     println!("    start-server               Start the daemon (alias for daemon)");
     println!("    kill-server                Stop the daemon");
     println!("    ssh [--host H] [--port P]  Run as SSH server (requires --features network)");
+    println!("    web [--host H] [--port P]  Run web terminal server; --token/--read-only/--auto-tls");
     println!("    session-info [name] [--json]  Show session details");
     println!("    list-windows [session] [--json]  List windows in a session");
     println!("    get-window [id] [--json]   Get detailed window info");
@@ -2594,6 +2596,7 @@ fn cmd_ssh(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let cfg = termos::network::ssh::SshServerConfig {
         addr,
         host_key_path: opts.key_path,
+        read_only: opts.read_only,
     };
     // The SSH server runs a tokio runtime internally.
     let rt = tokio::runtime::Runtime::new()?;
@@ -2604,6 +2607,40 @@ fn cmd_ssh(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(not(feature = "network"))]
 fn cmd_ssh(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Err("ssh server requires building with --features network".into())
+}
+
+/// `tuios web` — HTTP + WebSocket server mode (requires the `network`
+/// feature). Serves the xterm.js frontend with optional token auth,
+/// read-only observer mode, and TLS.
+#[cfg(feature = "network")]
+fn cmd_web(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let opts = termos::cli::parse_web_args(args)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+    let touch = termos::web::TouchMode::parse(&opts.touch)
+        .ok_or_else(|| format!("invalid --touch value '{}' (auto|on|off)", opts.touch))?;
+    let cert = opts.cert;
+    let key = opts.key;
+    let config = UserConfig::load();
+    let rt = tokio::runtime::Runtime::new()?;
+    let server_opts = termos::network::web::WebServerOptions {
+        addr: format!("{}:{}", opts.host, opts.port),
+        config,
+        touch_mode: touch,
+        max_connections: opts.max_connections,
+        read_only: opts.read_only,
+        tls_enabled: opts.auto_tls || cert.is_some(),
+        token: opts.token,
+        cert,
+        key,
+    };
+    rt.block_on(termos::network::web::run_web_server(server_opts))?;
+    Ok(())
+}
+
+#[cfg(not(feature = "network"))]
+fn cmd_web(_args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    Err("web server requires building with --features network".into())
 }
 
 /// `tuios new-window [name]` — create a new window in a session.

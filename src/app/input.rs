@@ -3853,9 +3853,7 @@ mod click_to_type_tests {
         assert_eq!(os.mode, Mode::WindowManagement);
         // A selection was started instead.
         assert!(os.selection.is_some());
-    }
-
-    #[test]
+    }    #[test]
     fn terminal_mode_click_still_selects() {
         let mut os = os_with_window();
         os.mode = Mode::Terminal;
@@ -3864,4 +3862,30 @@ mod click_to_type_tests {
         handle_mouse(&mut os, &mouse(MouseEventKind::Up(MouseButton::Left)));
         assert_eq!(os.mode, Mode::Terminal);
     }
+
+    // --- Read-only observer mode ---
+
+    #[test]
+    fn read_only_blocks_passthrough_input() {
+        let mut os = os_with_window();
+        os.mode = Mode::Terminal;
+        os.read_only = true;
+        // Printable input is consumed and never written to the focused pane.
+        let result = handle_key(&mut os, &KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn read_only_still_allows_window_management() {
+        let mut os = os_with_window();
+        os.read_only = true;
+        // Leader (Ctrl+B) + a navigation key is a window-management command,
+        // not passthrough, so it still works for an observer.
+        let leader = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        assert!(is_leader_key(&leader, os.leader_key()));
+        let result = handle_key(&mut os, &leader);
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::Leader);
+    }
+
 }

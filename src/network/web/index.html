@@ -16,7 +16,9 @@
     const term = new Terminal({ cols: 80, rows: 24, theme: { background: '#000' } });
     term.open(document.getElementById('terminal'));
 
-    const ws = new WebSocket(`ws://${location.host}/ws`);
+    // Carry the token from the login flow (e.g. /?token=...) onto the WebSocket
+    // handshake, which the server validates the same way as the page.
+    const ws = new WebSocket(`ws://${location.host}/ws${location.search}`);
     ws.binaryType = 'arraybuffer';
 
     ws.onmessage = (event) => {

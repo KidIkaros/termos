@@ -342,6 +342,33 @@ pub fn is_loopback_host(host: &str) -> bool {
     host == "localhost" || host == "127.0.0.1" || host == "::1" || host.starts_with("127.")
 }
 
+/// Whether clients must present a token: always when one is configured, and
+/// for any non-loopback bind even without one (a remote frontend must be
+/// gated, so an empty configured token means "no access"). Loopback binds
+/// without a configured token stay open, matching the roadmap rule.
+pub fn requires_token(host: &str, token: Option<&str>) -> bool {
+    !is_loopback_host(host) || token.is_some()
+}
+
+/// Validate a client-supplied token against the configured one. When no
+/// token is configured there is nothing to validate against, so any supplied
+/// value is rejected rather than accepted.
+pub fn token_is_valid(expected: Option<&str>, provided: Option<&str>) -> bool {
+    match (expected, provided) {
+        (Some(exp), Some(prov)) => {
+            // Constant-time comparison to avoid leaking the token via timing.
+            if exp.len() != prov.len() {
+                return false;
+            }
+            exp.bytes()
+                .zip(prov.bytes())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0
+        }
+        _ => false,
+    }
+}
+
 /// Check whether the server should refuse to start without TLS.
 ///
 /// Non-loopback addresses require TLS to prevent credential exposure on the
@@ -360,6 +387,27 @@ pub fn check_transport_security(host: &str, tls_enabled: bool) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requires_token_rules() {
+        assert!(!requires_token("127.0.0.1", None));
+        assert!(!requires_token("localhost", None));
+        assert!(requires_token("127.0.0.1", Some("secret")));
+        assert!(requires_token("0.0.0.0", None));
+        assert!(requires_token("192.168.1.10", None));
+        assert!(requires_token("192.168.1.10", Some("secret")));
+    }
+
+    #[test]
+    fn token_is_valid_matches_constant_time() {
+        assert!(token_is_valid(Some("s3cret"), Some("s3cret")));
+        assert!(!token_is_valid(Some("s3cret"), Some("wrong")));
+        assert!(!token_is_valid(Some("s3cret"), None));
+        assert!(!token_is_valid(None, Some("anything")));
+        assert!(!token_is_valid(None, None));
+        // Length mismatch short-circuits.
+        assert!(!token_is_valid(Some("abc"), Some("abcd")));
+    }
 
     #[test]
     fn touch_mode_parse() {

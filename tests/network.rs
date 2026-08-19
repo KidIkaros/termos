@@ -43,6 +43,7 @@ async fn ssh_server_starts_and_accepts_connection() {
     let _server_cfg = SshServerConfig {
         addr: "127.0.0.1:0".to_string(),
         host_key_path: Some(key_path.to_string_lossy().into_owned()),
+        read_only: false,
     };
 
     // We can't easily get the bound port with the current API, so we bind
@@ -54,6 +55,7 @@ async fn ssh_server_starts_and_accepts_connection() {
     let server_cfg2 = SshServerConfig {
         addr: addr.to_string(),
         host_key_path: Some(key_path.to_string_lossy().into_owned()),
+        read_only: false,
     };
 
     // Spawn the server.
@@ -105,14 +107,17 @@ async fn web_server_serves_index_html() {
 
     let config = UserConfig::default();
     tokio::spawn(async move {
-        let _ = run_web_server(
-            &addr.to_string(),
+        let _ = run_web_server(termos::network::web::WebServerOptions {
+            addr: addr.to_string(),
             config,
-            termos::web::TouchMode::Auto,
-            0,
-            false,
-            false,
-        )
+            touch_mode: termos::web::TouchMode::Auto,
+            max_connections: 0,
+            read_only: false,
+            tls_enabled: false,
+            token: None,
+            cert: None,
+            key: None,
+        })
         .await;
     });
 
@@ -135,6 +140,83 @@ async fn web_server_serves_index_html() {
     );
 }
 
+/// Verify token auth: a gated server returns 401 without a token and serves
+/// the page with the correct one.
+#[tokio::test]
+async fn web_token_auth_gates_index() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let config = UserConfig::default();
+    tokio::spawn(async move {
+        let _ = run_web_server(termos::network::web::WebServerOptions {
+            addr: addr.to_string(),
+            config,
+            touch_mode: termos::web::TouchMode::Auto,
+            max_connections: 0,
+            read_only: false,
+            tls_enabled: false,
+            token: Some("s3cret".to_string()),
+            cert: None,
+            key: None,
+        })
+        .await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Without a token: 401 + the login page.
+    let mut stream = TcpStream::connect(addr).await.expect("should connect");
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("should write");
+    let mut response = Vec::new();
+    let _ = timeout(Duration::from_secs(5), stream.read_to_end(&mut response)).await;
+    let text = String::from_utf8_lossy(&response);
+    assert!(
+        text.starts_with("HTTP/1.1 401"),
+        "expected 401 without token, got: {}",
+        text.lines().next().unwrap_or("")
+    );
+    assert!(
+        text.contains("access token"),
+        "expected login page, got: {} bytes",
+        response.len()
+    );
+
+    // With the correct token: 200 + the terminal page.
+    let mut stream = TcpStream::connect(addr).await.expect("should connect");
+    stream
+        .write_all(b"GET /?token=s3cret HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("should write");
+    let mut response = Vec::new();
+    let _ = timeout(Duration::from_secs(5), stream.read_to_end(&mut response)).await;
+    let text = String::from_utf8_lossy(&response);
+    assert!(
+        text.starts_with("HTTP/1.1 200"),
+        "expected 200 with token, got: {}",
+        text.lines().next().unwrap_or("")
+    );
+
+    // With a wrong token: 401.
+    let mut stream = TcpStream::connect(addr).await.expect("should connect");
+    stream
+        .write_all(b"GET /?token=wrong HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("should write");
+    let mut response = Vec::new();
+    let _ = timeout(Duration::from_secs(5), stream.read_to_end(&mut response)).await;
+    let text = String::from_utf8_lossy(&response);
+    assert!(
+        text.starts_with("HTTP/1.1 401"),
+        "expected 401 with wrong token, got: {}",
+        text.lines().next().unwrap_or("")
+    );
+}
+
 /// Verify the web server accepts a WebSocket upgrade at /ws.
 #[tokio::test]
 async fn web_websocket_upgrade() {
@@ -146,14 +228,17 @@ async fn web_websocket_upgrade() {
 
     let config = UserConfig::default();
     tokio::spawn(async move {
-        let _ = run_web_server(
-            &addr.to_string(),
+        let _ = run_web_server(termos::network::web::WebServerOptions {
+            addr: addr.to_string(),
             config,
-            termos::web::TouchMode::Auto,
-            0,
-            false,
-            false,
-        )
+            touch_mode: termos::web::TouchMode::Auto,
+            max_connections: 0,
+            read_only: false,
+            tls_enabled: false,
+            token: None,
+            cert: None,
+            key: None,
+        })
         .await;
     });
 
@@ -180,24 +265,30 @@ async fn web_websocket_upgrade() {
         }
     };
 
-    // Send a text message and verify we get an echo back.
+    // Enter terminal mode (`i` in window-management mode), then type text and
+    // verify the keystrokes echo back through the shell: the input is parsed
+    // into key events, forwarded to the PTY, and the tty echo appears in a
+    // later rendered frame. Frames are JSON: {"type":"input","data":"..."}.
     ws_stream
-        .send(Message::Text("hello".into()))
+        .send(Message::Text("{\"type\":\"input\",\"data\":\"i\"}".into()))
+        .await
+        .expect("should send");
+    ws_stream
+        .send(Message::Text("{\"type\":\"input\",\"data\":\"hello\"}".into()))
         .await
         .expect("should send");
 
-    let msg = match timeout(Duration::from_secs(5), ws_stream.next()).await {
-        Ok(Some(Ok(m))) => m,
-        _ => {
-            eprintln!("skipping WebSocket test: no response");
-            return;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut saw_echo = false;
+    while tokio::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), ws_stream.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) if text.contains("hello") => {
+                saw_echo = true;
+                break;
+            }
+            Ok(Some(Ok(_))) => continue,
+            _ => break,
         }
-    };
-
-    if let Message::Text(text) = msg {
-        assert!(
-            text.contains("hello"),
-            "echo should contain 'hello': {text}"
-        );
     }
+    assert!(saw_echo, "echo should contain 'hello' within 10s");
 }

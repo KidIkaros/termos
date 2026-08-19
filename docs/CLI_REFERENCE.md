@@ -142,13 +142,31 @@ Keybind reference:
 
 ## Network Modes (requires `--features network`)
 
-### `tuios --network ssh --host-key <PATH> [--addr <ADDR>]`
+### `tuios ssh [--host <HOST>] [--port <PORT>] [--key-path <PATH>] [--read-only]`
 
 Run the SSH server. Each connection gets a fresh TermOS session.
 
-### `tuios --network web [--addr <ADDR>]`
+- `--host` (default `localhost`), `--port` (default `2222`)
+- `--key-path <PATH>`: host private key (required)
+- `--read-only`: guests see output but their input is dropped (observer mode)
+
+### `tuios web [--host <HOST>] [--port <PORT>] [--token <TOKEN>] [--read-only] [--max-connections N] [--touch auto|on|off] [--cert <PEM> --key <PEM> | --auto-tls]`
 
 Run the web terminal server (xterm.js + WebSocket).
+
+- `--host` (default `127.0.0.1`), `--port` (default `8080`)
+- `--token <TOKEN>`: require an access token. Loopback binds without a token
+  stay open; non-loopback binds always require a token (or refuse to start
+  without TLS). The token is presented as `?token=` on the page or socket URL.
+- `--read-only`: guests see output but their input is dropped (observer mode)
+- `--max-connections <N>`: cap concurrent WebSocket clients (0 = unlimited)
+- `--touch auto|on|off`: touch detection for the mobile key bar
+- `--cert <PEM> --key <PEM>`: serve HTTPS with explicit certificate/key files
+- `--auto-tls`: generate a self-signed certificate for the bind host (stored
+  under the data dir) and serve HTTPS
+
+TLS is required for any non-loopback bind (`check_transport_security` refuses
+plain HTTP off localhost).
 
 ## Environment
 
