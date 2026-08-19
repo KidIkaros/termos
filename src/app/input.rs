@@ -8,7 +8,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use super::{Mode, Os, Prefix, SwitcherKind};
+use super::{Mode, Os, Prefix, SwitcherKind, TapeManagerMode};
 use crate::layout::{PreselectionDir, SplitType};
 
 /// The result of handling a key: whether the event was consumed (not passed
@@ -1030,6 +1030,13 @@ fn handle_project_tape_review(os: &mut Os, key: &KeyEvent) -> KeyResult {
 
 /// The tape manager overlay: filter, navigate, Enter to play, Esc to close.
 fn handle_tape_manager(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    // Route to mode-specific handlers first.
+    match os.tape_manager_mode {
+        TapeManagerMode::ConfirmDelete => return handle_tape_manager_confirm_delete(os, key),
+        TapeManagerMode::Naming => return handle_tape_manager_naming(os, key),
+        TapeManagerMode::List => {}
+    }
+
     match key.code {
         KeyCode::Esc => {
             os.tape_manager_open = false;
@@ -1044,6 +1051,7 @@ fn handle_tape_manager(os: &mut Os, key: &KeyEvent) -> KeyResult {
             if items > 0 {
                 os.tape_manager_selected = (os.tape_manager_selected + items - 1) % items;
             }
+            os.clamp_tape_scroll();
             KeyResult::Consumed
         }
         KeyCode::Down | KeyCode::Char('j') => {
@@ -1051,6 +1059,15 @@ fn handle_tape_manager(os: &mut Os, key: &KeyEvent) -> KeyResult {
             if items > 0 {
                 os.tape_manager_selected = (os.tape_manager_selected + 1) % items;
             }
+            os.clamp_tape_scroll();
+            KeyResult::Consumed
+        }
+        KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            os.tape_manager_delete();
+            KeyResult::Consumed
+        }
+        KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            os.tape_manager_start_naming();
             KeyResult::Consumed
         }
         KeyCode::Backspace => {
@@ -1062,6 +1079,46 @@ fn handle_tape_manager(os: &mut Os, key: &KeyEvent) -> KeyResult {
             if !key.modifiers.contains(KeyModifiers::CONTROL) {
                 os.tape_manager_query.push(c);
                 os.tape_manager_selected = 0;
+            }
+            KeyResult::Consumed
+        }
+        _ => KeyResult::Consumed,
+    }
+}
+
+/// Handle keys while the tape manager is in confirm-delete mode.
+fn handle_tape_manager_confirm_delete(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Enter => {
+            os.tape_manager_confirm_delete();
+            KeyResult::Consumed
+        }
+        KeyCode::Char('n') | KeyCode::Esc => {
+            os.tape_manager_cancel_delete();
+            KeyResult::Consumed
+        }
+        _ => KeyResult::Consumed,
+    }
+}
+
+/// Handle keys while the tape manager is in naming mode.
+fn handle_tape_manager_naming(os: &mut Os, key: &KeyEvent) -> KeyResult {
+    match key.code {
+        KeyCode::Enter => {
+            os.tape_manager_confirm_name();
+            KeyResult::Consumed
+        }
+        KeyCode::Esc => {
+            os.tape_manager_cancel_naming();
+            KeyResult::Consumed
+        }
+        KeyCode::Backspace => {
+            os.tape_manager_name_buffer.pop();
+            KeyResult::Consumed
+        }
+        KeyCode::Char(c) => {
+            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                os.tape_manager_name_buffer.push(c);
             }
             KeyResult::Consumed
         }

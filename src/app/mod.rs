@@ -571,6 +571,14 @@ pub struct Os {
     pub tape_manager_open: bool,
     pub tape_manager_query: String,
     pub tape_manager_selected: usize,
+    /// Tape manager scroll offset (first visible row).
+    pub tape_manager_scroll: usize,
+    /// Tape manager mode (list, confirm-delete, naming).
+    pub tape_manager_mode: TapeManagerMode,
+    /// Buffer for naming a new tape.
+    pub tape_manager_name_buffer: String,
+    /// Pending delete confirmation path.
+    pub tape_manager_delete_path: Option<std::path::PathBuf>,
     /// Remote `tape exec` progress (current index, total), if one is running.
     pub remote_tape: Option<(usize, usize)>,
     /// A discovered project tape awaiting a trust decision (the review
@@ -666,6 +674,18 @@ pub enum QuitMenuKind {
     Standalone,
     /// Close the menu and do nothing.
     Cancel,
+}
+
+/// Tape manager overlay mode (mirrors the Go `TapeManagerMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TapeManagerMode {
+    /// List of tape files (default).
+    #[default]
+    List,
+    /// Confirm deletion of the selected tape.
+    ConfirmDelete,
+    /// Enter a name for a new tape recording.
+    Naming,
 }
 
 /// One row of the quit menu.
@@ -840,6 +860,10 @@ impl Os {
             tape_manager_open: false,
             tape_manager_query: String::new(),
             tape_manager_selected: 0,
+            tape_manager_scroll: 0,
+            tape_manager_mode: TapeManagerMode::List,
+            tape_manager_name_buffer: String::new(),
+            tape_manager_delete_path: None,
             remote_tape: None,
             project_tape_pending: None,
             kitty_passthrough: None,
@@ -1913,7 +1937,99 @@ impl Os {
         self.tape_manager_open = true;
         self.tape_manager_query.clear();
         self.tape_manager_selected = 0;
+        self.tape_manager_scroll = 0;
+        self.tape_manager_mode = TapeManagerMode::List;
+        self.tape_manager_name_buffer.clear();
+        self.tape_manager_delete_path = None;
         self.prefix = Prefix::None;
+    }
+
+    /// Number of tape files visible at once in the manager list.
+    pub const TAPE_MANAGER_VISIBLE_ROWS: usize = 10;
+
+    /// Clamp the scroll offset so the selected row stays visible and the
+    /// offset never runs past the end of the list.
+    pub fn clamp_tape_scroll(&mut self) {
+        let items_len = self.tape_manager_items().len();
+        let visible = Self::TAPE_MANAGER_VISIBLE_ROWS;
+        if self.tape_manager_selected < self.tape_manager_scroll {
+            self.tape_manager_scroll = self.tape_manager_selected;
+        } else if self.tape_manager_selected >= self.tape_manager_scroll + visible {
+            self.tape_manager_scroll = self.tape_manager_selected - visible + 1;
+        }
+        let max_offset = items_len.saturating_sub(visible);
+        if self.tape_manager_scroll > max_offset {
+            self.tape_manager_scroll = max_offset;
+        }
+    }
+
+    /// Initiate deletion of the selected tape (enters confirm mode).
+    pub fn tape_manager_delete(&mut self) {
+        let items = self.tape_manager_items();
+        if let Some(path) = items.get(self.tape_manager_selected).cloned() {
+            self.tape_manager_delete_path = Some(path);
+            self.tape_manager_mode = TapeManagerMode::ConfirmDelete;
+        }
+    }
+
+    /// Confirm and execute deletion of the pending tape.
+    pub fn tape_manager_confirm_delete(&mut self) {
+        if let Some(path) = self.tape_manager_delete_path.take() {
+            match std::fs::remove_file(&path) {
+                Ok(_) => {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    self.notify(format!("deleted '{name}'"), "info");
+                }
+                Err(e) => {
+                    self.notify(format!("failed to delete: {e}"), "error");
+                }
+            }
+        }
+        self.tape_manager_mode = TapeManagerMode::List;
+        let items_len = self.tape_manager_items().len();
+        if self.tape_manager_selected >= items_len && items_len > 0 {
+            self.tape_manager_selected = items_len - 1;
+        }
+        self.clamp_tape_scroll();
+    }
+
+    /// Cancel deletion (return to list mode).
+    pub fn tape_manager_cancel_delete(&mut self) {
+        self.tape_manager_mode = TapeManagerMode::List;
+        self.tape_manager_delete_path = None;
+    }
+
+    /// Enter naming mode for a new tape recording.
+    pub fn tape_manager_start_naming(&mut self) {
+        self.tape_manager_mode = TapeManagerMode::Naming;
+        self.tape_manager_name_buffer.clear();
+    }
+
+    /// Confirm the name, start recording, and close the manager.
+    pub fn tape_manager_confirm_name(&mut self) {
+        let name = if self.tape_manager_name_buffer.trim().is_empty() {
+            format!("recording-{}", crate::tape::tapes::timestamp_stamp())
+        } else {
+            self.tape_manager_name_buffer.trim().to_string()
+        };
+        self.start_recording_with_name(&name);
+        self.tape_manager_open = false;
+        self.tape_manager_mode = TapeManagerMode::List;
+        self.tape_manager_name_buffer.clear();
+    }
+
+    /// Cancel naming mode (return to list mode).
+    pub fn tape_manager_cancel_naming(&mut self) {
+        self.tape_manager_mode = TapeManagerMode::List;
+        self.tape_manager_name_buffer.clear();
+    }
+
+    /// Start recording with a specific tape name (used by naming mode).
+    fn start_recording_with_name(&mut self, _name: &str) {
+        self.start_recording();
     }
 
     /// The tape files for the manager overlay, filtered by the query.

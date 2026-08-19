@@ -1113,12 +1113,42 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
 fn render_tape_manager(os: &Os, buf: &mut Buffer, area: TuiRect) {
     let items = os.tape_manager_items();
     let mut lines = Vec::new();
+
+    match os.tape_manager_mode {
+        super::TapeManagerMode::ConfirmDelete => {
+            let name = os
+                .tape_manager_delete_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            lines.push(format!("Delete '{name}'?"));
+            lines.push(String::new());
+            lines.push("y: confirm   n/Esc: cancel".into());
+            render_overlay(buf, area, &lines, "Tape manager — confirm delete");
+            return;
+        }
+        super::TapeManagerMode::Naming => {
+            lines.push("Name for new recording:".into());
+            lines.push(String::new());
+            lines.push(format!("> {}", os.tape_manager_name_buffer));
+            lines.push(String::new());
+            lines.push("Enter: start   Esc: cancel".into());
+            render_overlay(buf, area, &lines, "Tape manager — name recording");
+            return;
+        }
+        super::TapeManagerMode::List => {}
+    }
+
     lines.push(format!("Filter: {}", os.tape_manager_query));
     lines.push(String::new());
     if items.is_empty() {
-        lines.push("No recordings yet — Ctrl+B T r to start recording".into());
+        lines.push("No recordings yet — r to start recording".into());
     }
-    for (i, path) in items.iter().enumerate() {
+    let visible = super::Os::TAPE_MANAGER_VISIBLE_ROWS;
+    let scroll = os.tape_manager_scroll.min(items.len().saturating_sub(visible));
+    let end = (scroll + visible).min(items.len());
+    for (i, path) in items.iter().enumerate().skip(scroll).take(end - scroll) {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -1130,8 +1160,16 @@ fn render_tape_manager(os: &Os, buf: &mut Buffer, area: TuiRect) {
         };
         lines.push(format!("{marker}{name}"));
     }
+    if items.len() > visible {
+        lines.push(format!(
+            "  ({}-{} of {})",
+            scroll + 1,
+            end,
+            items.len()
+        ));
+    }
     lines.push(String::new());
-    lines.push("Enter: play   j/k: move   type: filter   Esc: close".into());
+    lines.push("Enter: play   j/k: move   d: delete   r: record   type: filter   Esc: close".into());
     render_overlay(buf, area, &lines, "Tape manager");
 }
 
