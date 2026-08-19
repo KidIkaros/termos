@@ -1068,7 +1068,9 @@ impl Os {
         let mut changed: Vec<(usize, String, String)> = Vec::new();
         for (i, w) in self.windows.iter_mut().enumerate() {
             let report = {
-                let mut emu = w.emulator.lock().unwrap();
+                let Ok(mut emu) = w.emulator.lock() else {
+                    continue;
+                };
                 emu.take_pending_progress()
             };
             let Some((state, _percent)) = report else {

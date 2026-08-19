@@ -39,6 +39,10 @@ pub trait Target {
 }
 
 /// The action vocabulary for window-manager fuzzing.
+///
+/// Mirrors the Go TUIOS `fuzz.Kind` alphabet: the leader chords, drags,
+/// resizes, runtime settings flips, and multi-client events that have
+/// historically broken this codebase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
     NewWindow,
@@ -58,6 +62,26 @@ pub enum Action {
     RotateSplit,
     EqualizeSplits,
     Scrollback,
+    /// Resize the host to (width, height) in cells.
+    Resize(u16, u16),
+    /// Focus a specific window index (modulo the count).
+    FocusPane(u8),
+    /// Toggle the sidebar visibility.
+    ToggleSidebar,
+    /// Open an overlay by index (help, palette, switcher, etc.).
+    OpenOverlay(u8),
+    /// Close any open overlay.
+    CloseOverlay,
+    /// One maintenance tick.
+    Tick,
+    /// Enter rename mode for the focused window.
+    Rename,
+    /// Switch session by index (modulo the count).
+    SwitchSession(u8),
+    /// Detach the current client.
+    Detach,
+    /// Attach to a session.
+    Attach,
 }
 
 /// Every action, for generation.
@@ -81,6 +105,23 @@ pub const ACTIONS: &[Action] = &[
     Action::RotateSplit,
     Action::EqualizeSplits,
     Action::Scrollback,
+    Action::Resize(80, 25),
+    Action::Resize(120, 40),
+    Action::Resize(40, 10),
+    Action::FocusPane(0),
+    Action::FocusPane(1),
+    Action::FocusPane(2),
+    Action::ToggleSidebar,
+    Action::OpenOverlay(0),
+    Action::OpenOverlay(1),
+    Action::OpenOverlay(2),
+    Action::CloseOverlay,
+    Action::Tick,
+    Action::Rename,
+    Action::SwitchSession(0),
+    Action::SwitchSession(1),
+    Action::Detach,
+    Action::Attach,
 ];
 
 /// A tiny deterministic PRNG (xorshift64*), so runs are reproducible.
@@ -249,6 +290,56 @@ impl Target for AppTarget {
                 os.workspace_mut(ws).tree.equalize_ratios();
             }
             Action::Scrollback => os.enter_scrollback_mode(),
+            Action::Resize(w, h) => {
+                os.width = (*w).max(20) as i32;
+                os.height = (*h).max(5) as i32;
+                os.sync_window_sizes();
+            }
+            Action::FocusPane(n) => {
+                let len = os.windows.len();
+                if len > 0 {
+                    os.focus_window((*n as usize) % len);
+                }
+            }
+            Action::ToggleSidebar => {
+                os.sidebar.toggle();
+            }
+            Action::OpenOverlay(n) => match n % 4 {
+                0 => os.help_open = !os.help_open,
+                1 => os.open_palette(),
+                2 => os.open_switcher(crate::app::SwitcherKind::Workspace),
+                _ => os.open_tape_manager(),
+            },
+            Action::CloseOverlay => {
+                os.help_open = false;
+                os.palette_open = false;
+                os.switcher_open = false;
+                os.tape_manager_open = false;
+                os.theme_picker_open = false;
+                os.settings_open = false;
+            }
+            Action::Tick => {
+                os.tick_agent_progress();
+                os.tick_agent_alerts();
+                os.tick_animations();
+                os.tick_tooltip();
+                os.tick_script();
+                os.sync_window_sizes();
+            }
+            Action::Rename => {
+                if let Some(idx) = os.focused_window {
+                    os.rename_dialog = Some((idx, String::new()));
+                }
+            }
+            Action::SwitchSession(_) => {
+                // No daemon in fuzz; no-op.
+            }
+            Action::Detach => {
+                // No daemon in fuzz; no-op.
+            }
+            Action::Attach => {
+                // No daemon in fuzz; no-op.
+            }
         }
         // Refresh membership for the invariant checks.
         self.membership.clear();
