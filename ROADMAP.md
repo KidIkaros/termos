@@ -294,16 +294,20 @@ protocol so a WASM layer can slot in later.
   env).
 - ✅ Document the extension protocol (`docs/EXTENSIONS.md`): hooks, verb
   surface, rendering contract, WASM roadmap.
-- ⬜ Re-evaluate WASM plugins only if adoption justifies it.
+- ⬜ Re-evaluate WASM plugins only if adoption justifies it.## Phase 16 — Kitty animation protocol (Tier 3: niche)
 
-## Phase 16 — Kitty animation protocol (Tier 3: niche)
+Explicitly unsupported upstream in TUIOS (`a=f`, `a=a`, `a=c`). Completes
+the kitty graphics story (`docs/GRAPHICS.md`).
 
-Explicitly unsupported upstream in TUIOS (`a=f`, `a=a`, `a=c`). Completes the
-kitty graphics story (`docs/GRAPHICS.md`).
-
-- ⬜ Parse and forward kitty animation frames (APC `a=` transmissions).
-- ⬜ Interplay with placement tracking, scrollback, and zoom.
-- ⬜ Tests: frame sequences, id reuse, cleanup on pane close.
+- ✅ Parse and forward kitty animation frames: `KittyAction::Frame`
+  (`a=f`), `::Animate` (`a=A`), `::Compose` (`a=c`), `::Split` (`a=S`);
+  `KittyCommand.animation_group` field parsed from `g=` param;
+  `AnimationGroup` tracking in `KittyState` with frame list, playing
+  state, delay, looping.
+- ✅ Interplay with placement tracking: `clear_graphics()` calls
+  `clear_groups()` to drop animation frames on pane close / alt-screen.
+- ✅ Tests: 4 parser tests + 2 kitty_state animation tests; 18 total
+  kitty graphics tests pass.
 
 ## Phase 17 — Performance & correctness baselines (Tier 4)
 

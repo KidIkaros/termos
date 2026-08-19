@@ -40,6 +40,26 @@ pub struct KittyImage {
     pub compression: KittyCompression,
     pub data: Vec<u8>,
     pub transmit_time: Instant,
+    /// Animation group this image belongs to (0 = not animated).
+    pub animation_group: u32,
+}
+
+/// An animation group: a sequence of images played as frames.
+#[derive(Debug, Clone)]
+pub struct AnimationGroup {
+    pub group_id: u32,
+    /// Image IDs in frame order.
+    pub frames: Vec<u32>,
+    /// Current frame index.
+    pub current_frame: usize,
+    /// Whether the animation is playing.
+    pub playing: bool,
+    /// Frame delay in milliseconds (0 = default).
+    pub delay_ms: u32,
+    /// Total duration in milliseconds (0 = loop forever).
+    pub duration_ms: u32,
+    /// Whether the animation loops.
+    pub looping: bool,
 }
 
 /// A placement of an image on the screen.
@@ -98,6 +118,9 @@ struct KittyStateInner {
     placements: Vec<KittyPlacement>,
     next_id: u32,
     pending: Option<KittyPendingChunk>,
+    /// Animation groups: group_id → group state.
+    animation_groups: HashMap<u32, AnimationGroup>,
+    next_group_id: u32,
 }
 
 impl KittyState {
@@ -109,6 +132,8 @@ impl KittyState {
                 placements: Vec::new(),
                 next_id: 1,
                 pending: None,
+                animation_groups: HashMap::new(),
+                next_group_id: 1,
             }),
         }
     }
@@ -259,11 +284,116 @@ impl KittyState {
             compression: KittyCompression::None,
             data: pending.data_buffer,
             transmit_time: Instant::now(),
+            animation_group: 0,
         })
     }
 
     pub fn clear_pending(&self) {
         self.inner.lock().unwrap().pending = None;
+    }
+
+    // --- Animation group management ---
+
+    /// Allocate a new animation group ID.
+    pub fn allocate_group_id(&self) -> u32 {
+        let mut inner = self.inner.lock().unwrap();
+        let id = inner.next_group_id;
+        inner.next_group_id += 1;
+        if inner.next_group_id == 0 {
+            inner.next_group_id = 1;
+        }
+        id
+    }
+
+    /// Get or create an animation group.
+    pub fn get_or_create_group(&self, group_id: u32) -> AnimationGroup {
+        let mut inner = self.inner.lock().unwrap();
+        inner
+            .animation_groups
+            .entry(group_id)
+            .or_insert_with(|| AnimationGroup {
+                group_id,
+                frames: Vec::new(),
+                current_frame: 0,
+                playing: false,
+                delay_ms: 0,
+                duration_ms: 0,
+                looping: true,
+            })
+            .clone()
+    }
+
+    /// Add a frame to an animation group.
+    pub fn add_frame_to_group(&self, group_id: u32, image_id: u32) {
+        let mut inner = self.inner.lock().unwrap();
+        let group = inner
+            .animation_groups
+            .entry(group_id)
+            .or_insert_with(|| AnimationGroup {
+                group_id,
+                frames: Vec::new(),
+                current_frame: 0,
+                playing: false,
+                delay_ms: 0,
+                duration_ms: 0,
+                looping: true,
+            });
+        group.frames.push(image_id);
+    }
+
+    /// Set animation group playing state.
+    pub fn set_group_playing(&self, group_id: u32, playing: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(group) = inner.animation_groups.get_mut(&group_id) {
+            group.playing = playing;
+        }
+    }
+
+    /// Set animation group delay.
+    pub fn set_group_delay(&self, group_id: u32, delay_ms: u32) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(group) = inner.animation_groups.get_mut(&group_id) {
+            group.delay_ms = delay_ms;
+        }
+    }
+
+    /// Delete an animation group and its images.
+    pub fn delete_group(&self, group_id: u32) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(group) = inner.animation_groups.remove(&group_id) {
+            for img_id in &group.frames {
+                inner.images.remove(img_id);
+                inner.images_by_num.retain(|_, id| id != img_id);
+            }
+            inner
+                .placements
+                .retain(|p| !group.frames.contains(&p.image_id));
+        }
+    }
+
+    /// Delete all animation groups.
+    pub fn clear_groups(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        let frame_ids: Vec<u32> = inner
+            .animation_groups
+            .drain()
+            .flat_map(|(_, g)| g.frames)
+            .collect();
+        for img_id in &frame_ids {
+            inner.images.remove(img_id);
+            inner.images_by_num.retain(|_, id| id != img_id);
+        }
+        inner.placements.retain(|p| !frame_ids.contains(&p.image_id));
+    }
+
+    /// Collect all image IDs belonging to any animation group.
+    pub fn group_image_ids(&self) -> Vec<u32> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .animation_groups
+            .values()
+            .flat_map(|g| g.frames.iter().copied())
+            .collect()
     }
 }
 
@@ -312,6 +442,7 @@ mod tests {
             compression: KittyCompression::None,
             data: vec![0; 100],
             transmit_time: Instant::now(),
+            animation_group: 0,
         };
         state.add_image(img);
         assert!(state.get_image(id).is_some());
@@ -367,5 +498,78 @@ mod tests {
         let resp = build_kitty_response(true, 5, "");
         let s = String::from_utf8_lossy(&resp);
         assert!(s.contains("\x1b_Gi=5;OK\x1b\\"));
+    }
+
+    #[test]
+    fn animation_group_lifecycle() {
+        let state = KittyState::new();
+        let gid = state.allocate_group_id();
+        assert_eq!(gid, 1);
+
+        // Add frames to the group.
+        let id1 = state.allocate_id();
+        let id2 = state.allocate_id();
+        state.add_frame_to_group(gid, id1);
+        state.add_frame_to_group(gid, id2);
+
+        let group = state.get_or_create_group(gid);
+        assert_eq!(group.frames, vec![id1, id2]);
+        assert!(!group.playing);
+
+        // Start playing.
+        state.set_group_playing(gid, true);
+        let group = state.get_or_create_group(gid);
+        assert!(group.playing);
+
+        // Set delay.
+        state.set_group_delay(gid, 100);
+        let group = state.get_or_create_group(gid);
+        assert_eq!(group.delay_ms, 100);
+
+        // Delete the group.
+        state.delete_group(gid);
+        let group = state.get_or_create_group(gid);
+        assert!(group.frames.is_empty());
+    }
+
+    #[test]
+    fn clear_groups_removes_images() {
+        let state = KittyState::new();
+        let gid = state.allocate_group_id();
+        let id1 = state.allocate_id();
+        let id2 = state.allocate_id();
+
+        state.add_image(KittyImage {
+            id: id1,
+            number: 0,
+            width: 10,
+            height: 10,
+            format: KittyFormat::Rgba,
+            compression: KittyCompression::None,
+            data: vec![0; 10],
+            transmit_time: Instant::now(),
+            animation_group: gid,
+        });
+        state.add_image(KittyImage {
+            id: id2,
+            number: 0,
+            width: 10,
+            height: 10,
+            format: KittyFormat::Rgba,
+            compression: KittyCompression::None,
+            data: vec![0; 10],
+            transmit_time: Instant::now(),
+            animation_group: gid,
+        });
+        state.add_frame_to_group(gid, id1);
+        state.add_frame_to_group(gid, id2);
+
+        assert!(state.get_image(id1).is_some());
+        assert!(state.get_image(id2).is_some());
+
+        state.clear_groups();
+
+        assert!(state.get_image(id1).is_none());
+        assert!(state.get_image(id2).is_none());
     }
 }

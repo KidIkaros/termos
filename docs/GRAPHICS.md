@@ -50,3 +50,31 @@ When TermOS runs inside tmux or screen, graphics sequences may be filtered
 by the outer multiplexer. The capability probe detects this
 (`inside_multiplexer`) but cannot work around it — the outer multiplexer
 must be configured to pass through APC/DCS sequences.
+
+## Animation Protocol
+
+TermOS supports kitty animation actions as a passthrough:
+
+| Action | Wire | Description |
+|--------|------|-------------|
+| `Frame` | `a=f` | Transmit a single animation frame |
+| `Animate` | `a=A` | Start/stop animation display for a group |
+| `Compose` | `a=c` | Composite animation frames |
+| `Split` | `a=S` | Split a static image into animation frames |
+
+### Animation Groups
+
+Each animation belongs to a **group** (`g=N` parameter). The VT state
+tracks groups with frame lists, playing state, delay, and looping. When
+a pane is closed or the alternate screen is cleared, `clear_graphics()`
+calls `clear_groups()` to drop all animation frames and their images.
+
+### How It Works
+
+1. The application transmits frames with `a=f,g=N,i=ID`.
+2. Each frame is stored as a `KittyImage` and added to the group.
+3. `a=A,g=N` starts playback; the host terminal handles rendering.
+4. All APC sequences are forwarded verbatim to the host via passthrough
+   (the `KittyPassthrough` layer rewrites `i=` and `x=`/`y=` but
+   leaves `a=` and `g=` untouched).
+5. On pane close, all groups and their images are cleaned up.

@@ -15,6 +15,14 @@ pub enum KittyAction {
     Delete,
     Query,
     TransmitAndDisplay,
+    /// `a=f` — transmit a single animation frame.
+    Frame,
+    /// `a=a` — display animation frames in sequence.
+    Animate,
+    /// `a=c` — composite animation frames.
+    Compose,
+    /// `a=S` — split a static image into animation frames.
+    Split,
 }
 
 impl KittyAction {
@@ -26,8 +34,17 @@ impl KittyAction {
             'D' => Some(Self::Delete),
             'q' => Some(Self::Query),
             'a' => Some(Self::TransmitAndDisplay),
+            'f' => Some(Self::Frame),
+            'c' => Some(Self::Compose),
+            'S' => Some(Self::Split),
+            'A' => Some(Self::Animate),
             _ => None,
         }
+    }
+
+    /// True if this action is an animation action.
+    pub fn is_animation(self) -> bool {
+        matches!(self, Self::Frame | Self::Animate | Self::Compose | Self::Split)
     }
 
     /// The wire letter.
@@ -39,6 +56,10 @@ impl KittyAction {
             Self::Delete => 'D',
             Self::Query => 'q',
             Self::TransmitAndDisplay => 'a',
+            Self::Frame => 'f',
+            Self::Compose => 'c',
+            Self::Split => 'S',
+            Self::Animate => 'A',
         }
     }
 }
@@ -160,6 +181,8 @@ pub struct KittyCommand {
     pub cursor_move: i32,
     /// Whether the placement is virtual (`U=1`).
     pub virtual_placement: bool,
+    /// Animation group id (`g=`).
+    pub animation_group: u32,
     /// The decoded data (direct medium) or the decoded path/shared-memory id.
     pub payload: Vec<u8>,
 }
@@ -242,6 +265,7 @@ impl Default for KittyCommand {
             z_index: 0,
             cursor_move: 0,
             virtual_placement: false,
+            animation_group: 0,
             payload: Vec::new(),
         }
     }
@@ -320,6 +344,7 @@ impl KittyCommand {
                 "z" => cmd.z_index = v.parse().unwrap_or(0),
                 "C" => cmd.cursor_move = v.parse().unwrap_or(0),
                 "U" => cmd.virtual_placement = v == "1",
+                "g" => cmd.animation_group = v.parse().unwrap_or(0),
                 _ => {}
             }
         }
@@ -423,5 +448,33 @@ mod tests {
     fn png_format() {
         let cmd = KittyCommand::parse("a=t,f=p");
         assert_eq!(cmd.format, KittyFormat::Png);
+    }
+
+    #[test]
+    fn animation_frame_action() {
+        let cmd = KittyCommand::parse("a=f,i=100,g=1");
+        assert_eq!(cmd.action, KittyAction::Frame);
+        assert_eq!(cmd.image_id, 100);
+        assert_eq!(cmd.animation_group, 1);
+    }
+
+    #[test]
+    fn animation_animate_action() {
+        let cmd = KittyCommand::parse("a=A,g=1");
+        assert_eq!(cmd.action, KittyAction::Animate);
+        assert_eq!(cmd.animation_group, 1);
+    }
+
+    #[test]
+    fn animation_compose_action() {
+        let cmd = KittyCommand::parse("a=c,g=1");
+        assert_eq!(cmd.action, KittyAction::Compose);
+    }
+
+    #[test]
+    fn animation_split_action() {
+        let cmd = KittyCommand::parse("a=S,i=50,g=2");
+        assert_eq!(cmd.action, KittyAction::Split);
+        assert_eq!(cmd.animation_group, 2);
     }
 }

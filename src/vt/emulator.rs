@@ -1423,6 +1423,7 @@ impl Emulator {
                         },
                         data: cmd.payload.clone(),
                         transmit_time: std::time::Instant::now(),
+                        animation_group: 0,
                     };
                     self.kitty_state.add_image(img);
 
@@ -1508,6 +1509,32 @@ impl Emulator {
                     self.kitty_state.delete_placements_by_z_index(cmd.z_index);
                 }
             }
+            KittyAction::Frame => {
+                // `a=f` — transmit a single animation frame.
+                // The image is already stored by the Transmit path above.
+                // Track it in the animation group.
+                if cmd.animation_group > 0 && cmd.image_id > 0 {
+                    self.kitty_state.add_frame_to_group(cmd.animation_group, cmd.image_id);
+                    // Mark the image as belonging to this group.
+                    if let Some(mut img) = self.kitty_state.get_image(cmd.image_id) {
+                        img.animation_group = cmd.animation_group;
+                    }
+                }
+            }
+            KittyAction::Animate => {
+                // `a=A` — start/stop animation display for a group.
+                if cmd.animation_group > 0 {
+                    self.kitty_state.set_group_playing(cmd.animation_group, true);
+                }
+            }
+            KittyAction::Compose => {
+                // `a=c` — composite animation frames (passthrough).
+                // No additional local state needed beyond forwarding.
+            }
+            KittyAction::Split => {
+                // `a=S` — split a static image into animation frames (passthrough).
+                // No additional local state needed beyond forwarding.
+            }
         }
     }
 
@@ -1526,6 +1553,7 @@ impl Emulator {
     /// Clear all graphics state (called on hard reset / alternate screen
     /// entry where the host terminal also clears its graphics).
     pub fn clear_graphics(&mut self) {
+        self.kitty_state.clear_groups();
         self.kitty_state.clear();
         self.sixel_state.clear();
     }
