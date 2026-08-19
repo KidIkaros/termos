@@ -94,3 +94,8 @@ harness = false
 [[bench]]
 name = "vt_render"
 harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

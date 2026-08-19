@@ -101,7 +101,7 @@ impl KittyPassthrough {
         let rewritten = self.rewrite_apc(window_id, pane_x, pane_y, apc);
         // Track the placement if this is a transmit-and-place or place command.
         self.record_placement_if_any(window_id, pane_x, pane_y, apc);
-        let mut out = self.host_out.lock().unwrap();
+        let mut out = self.host_out.lock().unwrap_or_else(|e| e.into_inner());
         out.write_all(b"\x1b_G")?;
         out.write_all(rewritten.as_bytes())?;
         out.write_all(b"\x1b\\")?;
@@ -120,7 +120,7 @@ impl KittyPassthrough {
                 | super::kitty_parser::KittyAction::TransmitAndDisplay
         );
         if gid != 0 {
-            let mut store = self.placements.lock().unwrap();
+            let mut store = self.placements.lock().unwrap_or_else(|e| e.into_inner());
             let host_id = store.map_id(window_id, gid);
             if is_place {
                 store.place(
@@ -165,7 +165,7 @@ impl KittyPassthrough {
     fn rewrite_param(&self, window_id: u32, pane_x: u32, pane_y: u32, param: &str) -> String {
         if let Some(rest) = param.strip_prefix("i=") {
             if let Ok(guest_id) = rest.parse::<u32>() {
-                let host_id = self.placements.lock().unwrap().map_id(window_id, guest_id);
+                let host_id = self.placements.lock().unwrap_or_else(|e| e.into_inner()).map_id(window_id, guest_id);
                 return format!("i={host_id}");
             }
         }
@@ -184,12 +184,12 @@ impl KittyPassthrough {
 
     /// Clear all placements for a window (on close or workspace switch).
     pub fn clear_window(&self, window_id: u32) {
-        self.placements.lock().unwrap().clear_window(window_id);
+        self.placements.lock().unwrap_or_else(|e| e.into_inner()).clear_window(window_id);
     }
 
     /// True if a window has any tracked placements.
     pub fn has_placements(&self, window_id: u32) -> bool {
-        self.placements.lock().unwrap().has_placements(window_id)
+        self.placements.lock().unwrap_or_else(|e| e.into_inner()).has_placements(window_id)
     }
 
     /// Re-emit placement commands (`a=p`) for all of a window's images at
@@ -203,12 +203,12 @@ impl KittyPassthrough {
         if !self.enabled {
             return Ok(());
         }
-        let store = self.placements.lock().unwrap();
+        let store = self.placements.lock().unwrap_or_else(|e| e.into_inner());
         let placements = store.placements_for(window_id);
         if placements.is_empty() {
             return Ok(());
         }
-        let mut out = self.host_out.lock().unwrap();
+        let mut out = self.host_out.lock().unwrap_or_else(|e| e.into_inner());
         for p in placements {
             // Delete the old placement, then re-place at the new position.
             // d=p deletes only the placement, not the image data.
@@ -243,7 +243,7 @@ impl KittyPassthrough {
         if !self.enabled {
             return Ok(());
         }
-        let mut store = self.placements.lock().unwrap();
+        let mut store = self.placements.lock().unwrap_or_else(|e| e.into_inner());
         let result = refresh_all_placements(
             &mut store,
             all_windows,
@@ -256,7 +256,7 @@ impl KittyPassthrough {
         );
         drop(store);
         if !result.output.is_empty() {
-            let mut out = self.host_out.lock().unwrap();
+            let mut out = self.host_out.lock().unwrap_or_else(|e| e.into_inner());
             out.write_all(&result.output)?;
             out.flush()?;
         }
@@ -269,13 +269,13 @@ impl KittyPassthrough {
         if !self.enabled {
             return Ok(());
         }
-        let mut store = self.placements.lock().unwrap();
+        let mut store = self.placements.lock().unwrap_or_else(|e| e.into_inner());
         let output = hide_all_placements(&mut store, |p, out| {
             emit_hide_one(p, out);
         });
         drop(store);
         if !output.is_empty() {
-            let mut out = self.host_out.lock().unwrap();
+            let mut out = self.host_out.lock().unwrap_or_else(|e| e.into_inner());
             out.write_all(&output)?;
             out.flush()?;
         }
@@ -284,17 +284,17 @@ impl KittyPassthrough {
 
     /// True if any window has passthrough placements.
     pub fn has_any_placements(&self) -> bool {
-        self.placements.lock().unwrap().has_any_passthrough()
+        self.placements.lock().unwrap_or_else(|e| e.into_inner()).has_any_passthrough()
     }
 
     /// Clear everything (host reset).
     pub fn clear_all(&self) -> std::io::Result<()> {
-        self.placements.lock().unwrap().clear_all();
+        self.placements.lock().unwrap_or_else(|e| e.into_inner()).clear_all();
         if !self.enabled {
             return Ok(());
         }
         // Kitty delete-all: `\x1b_Ga=d\x1b\\`
-        let mut out = self.host_out.lock().unwrap();
+        let mut out = self.host_out.lock().unwrap_or_else(|e| e.into_inner());
         out.write_all(b"\x1b_Ga=d\x1b\\")?;
         out.flush()?;
         Ok(())
@@ -494,7 +494,7 @@ mod tests {
         struct SharedWriter(Arc<StdMutex<Vec<u8>>>);
         impl Write for SharedWriter {
             fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(b);
+                self.0.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(b);
                 Ok(b.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
@@ -506,7 +506,7 @@ mod tests {
         kp.forward(1, 0, 0, "a=T,i=1;AAAA").unwrap();
         // Refresh at (10, 5).
         kp.refresh_placements(1, 10, 5).unwrap();
-        let buf_inner = buf.lock().unwrap();
+        let buf_inner = buf.lock().unwrap_or_else(|e| e.into_inner());
         let s = String::from_utf8_lossy(&buf_inner);
         // Should contain a delete-placement and a re-place at the new position.
         assert!(s.contains("a=d,d=p,i=1"), "got: {s:?}");
@@ -533,7 +533,7 @@ mod tests {
         struct SharedWriter(Arc<StdMutex<Vec<u8>>>);
         impl Write for SharedWriter {
             fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(b);
+                self.0.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(b);
                 Ok(b.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
@@ -550,7 +550,7 @@ mod tests {
         let kp = KittyPassthrough::new(test_caps(true), writer);
 
         {
-            let mut store = kp.placements.lock().unwrap();
+            let mut store = kp.placements.lock().unwrap_or_else(|e| e.into_inner());
             let mut p = PassthroughPlacement::new(1, 1, 1);
             p.cols = 10;
             p.rows = 5;
@@ -576,7 +576,7 @@ mod tests {
         );
 
         kp.refresh_all_placements(&windows).unwrap();
-        let buf_inner = buf.lock().unwrap();
+        let buf_inner = buf.lock().unwrap_or_else(|e| e.into_inner());
         let s = String::from_utf8_lossy(&buf_inner);
         assert!(s.contains("a=p,i=1"), "should emit place command: {s:?}");
         assert!(s.contains("\x1b[6;6H"), "should position at (5,5): {s:?}");
@@ -588,7 +588,7 @@ mod tests {
         let kp = KittyPassthrough::new(test_caps(true), writer);
 
         {
-            let mut store = kp.placements.lock().unwrap();
+            let mut store = kp.placements.lock().unwrap_or_else(|e| e.into_inner());
             let mut p = PassthroughPlacement::new(1, 1, 1);
             p.cols = 10;
             p.rows = 10;
@@ -620,7 +620,7 @@ mod tests {
         );
 
         kp.refresh_all_placements(&windows).unwrap();
-        let buf_inner = buf.lock().unwrap();
+        let buf_inner = buf.lock().unwrap_or_else(|e| e.into_inner());
         let s = String::from_utf8_lossy(&buf_inner);
         assert!(s.contains("a=d,d=i,i=1"), "should emit hide: {s:?}");
         assert!(!s.contains("a=p,i=1"), "should not place occluded: {s:?}");
@@ -632,7 +632,7 @@ mod tests {
         let kp = KittyPassthrough::new(test_caps(true), writer);
 
         {
-            let mut store = kp.placements.lock().unwrap();
+            let mut store = kp.placements.lock().unwrap_or_else(|e| e.into_inner());
             let mut p = PassthroughPlacement::new(1, 1, 1);
             p.cols = 10;
             p.rows = 5;
@@ -667,7 +667,7 @@ mod tests {
         );
 
         kp.refresh_all_placements(&windows).unwrap();
-        let buf_inner = buf.lock().unwrap();
+        let buf_inner = buf.lock().unwrap_or_else(|e| e.into_inner());
         let s = String::from_utf8_lossy(&buf_inner);
         assert!(
             !s.contains("a=p,i=1"),
@@ -681,7 +681,7 @@ mod tests {
         let kp = KittyPassthrough::new(test_caps(true), writer);
 
         {
-            let mut store = kp.placements.lock().unwrap();
+            let mut store = kp.placements.lock().unwrap_or_else(|e| e.into_inner());
             let mut p = PassthroughPlacement::new(1, 1, 1);
             p.cols = 10;
             p.rows = 5;
@@ -690,7 +690,7 @@ mod tests {
         }
 
         kp.hide_all_placements().unwrap();
-        let buf_inner = buf.lock().unwrap();
+        let buf_inner = buf.lock().unwrap_or_else(|e| e.into_inner());
         let s = String::from_utf8_lossy(&buf_inner);
         assert!(s.contains("a=d,d=i,i=1"), "should emit delete: {s:?}");
     }
@@ -700,7 +700,7 @@ mod tests {
         let kp = KittyPassthrough::new(test_caps(true), Box::new(std::io::sink()));
         assert!(!kp.has_any_placements());
         {
-            let mut store = kp.placements.lock().unwrap();
+            let mut store = kp.placements.lock().unwrap_or_else(|e| e.into_inner());
             store.place_passthrough(1, PassthroughPlacement::new(1, 1, 1));
         }
         assert!(kp.has_any_placements());

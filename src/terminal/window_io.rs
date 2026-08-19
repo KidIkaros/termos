@@ -433,7 +433,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
 
         // The emulator should have received the data.
-        let emu = emulator.lock().unwrap();
+        let emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
         let text = emu.render_text();
         assert!(text.contains("hello world"), "text: {text}");
     }
@@ -449,7 +449,7 @@ mod tests {
         writer.stop();
         std::thread::sleep(Duration::from_millis(20));
 
-        let emu = emulator.lock().unwrap();
+        let emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(emu.width(), 100);
         assert_eq!(emu.height(), 30);
     }
@@ -468,7 +468,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
 
         // The stale data should have been dropped.
-        let emu = emulator.lock().unwrap();
+        let emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
         let text = emu.render_text();
         assert!(!text.contains("stale data"), "text: {text}");
     }
@@ -500,7 +500,7 @@ mod tests {
     fn resize_to_snapshot_changes_size() {
         let emulator = Arc::new(Mutex::new(Emulator::new(80, 24)));
         resize_emulator_to_snapshot(&emulator, 120, 40);
-        let emu = emulator.lock().unwrap();
+        let emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(emu.width(), 120);
         assert_eq!(emu.height(), 40);
     }
@@ -509,7 +509,7 @@ mod tests {
     fn resize_to_snapshot_same_size_is_noop() {
         let emulator = Arc::new(Mutex::new(Emulator::new(80, 24)));
         resize_emulator_to_snapshot(&emulator, 80, 24);
-        let emu = emulator.lock().unwrap();
+        let emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(emu.width(), 80);
         assert_eq!(emu.height(), 24);
     }
@@ -519,7 +519,7 @@ mod tests {
         let emulator = Arc::new(Mutex::new(Emulator::new(80, 24)));
         resize_emulator_to_snapshot(&emulator, 0, 0);
         resize_emulator_to_snapshot(&emulator, -1, 10);
-        let emu = emulator.lock().unwrap();
+        let emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(emu.width(), 80);
         assert_eq!(emu.height(), 24);
     }
@@ -529,7 +529,7 @@ mod tests {
         let emulator = Arc::new(Mutex::new(Emulator::new(80, 24)));
         // Queue a response in the emulator.
         {
-            let mut emu = emulator.lock().unwrap();
+            let mut emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
             emu.write(b"\x1b[c"); // DA1 query → queues a response
             let _ = emu.take_response(); // clear it
         }
@@ -538,7 +538,7 @@ mod tests {
 
         // Queue another response.
         {
-            let mut emu = emulator.lock().unwrap();
+            let mut emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
             emu.write(b"\x1b[c");
         }
 
@@ -546,7 +546,7 @@ mod tests {
 
         // The response should have been drained.
         {
-            let mut emu = emulator.lock().unwrap();
+            let mut emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
             let resp = emu.take_response();
             assert!(resp.is_empty(), "response was not drained");
         }
@@ -569,7 +569,7 @@ mod tests {
         writer.stop();
         std::thread::sleep(Duration::from_millis(20));
 
-        let emu = emulator.lock().unwrap();
+        let emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
         let text = emu.render_text();
         assert!(text.contains("line0"), "text: {text}");
         assert!(text.contains("line9"), "text: {text}");

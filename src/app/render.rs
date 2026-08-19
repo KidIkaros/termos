@@ -141,7 +141,7 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     } else if let Some(menu) = &os.context_menu {
         render_context_menu(buf, content_area, menu);
     } else if let Some(pending) = &os.project_tape_pending {
-        let mut lines = Vec::new();
+        let mut lines = Vec::with_capacity(8);
         lines.push("A .tuios.tape was found in this directory.".into());
         lines.push(format!("  {}", pending.path));
         lines.push(format!(
@@ -1112,7 +1112,7 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
 /// Render the tape manager overlay: a filterable list of recorded tapes.
 fn render_tape_manager(os: &Os, buf: &mut Buffer, area: TuiRect) {
     let items = os.tape_manager_items();
-    let mut lines = Vec::new();
+    let mut lines = Vec::with_capacity(8);
 
     match os.tape_manager_mode {
         super::TapeManagerMode::ConfirmDelete => {
@@ -1201,7 +1201,7 @@ pub fn build_which_key_lines(os: &Os) -> Vec<String> {
         _ => "",
     };
     let bindings = keybindings::get_prefix_keybindings(prefix_type, false);
-    let mut lines = Vec::new();
+    let mut lines = Vec::with_capacity(16);
     lines.push(format!("{:?} commands:", os.prefix));
     for b in bindings {
         lines.push(format!("  {:10} {}", b.key, b.description));
@@ -1216,7 +1216,7 @@ pub fn build_which_key_lines(os: &Os) -> Vec<String> {
 fn debug_stats_lines(os: &Os) -> Vec<String> {
     let frames = os.tick_stats.frame_count();
     let avg = os.tick_stats.avg_render_time();
-    let mut lines = Vec::new();
+    let mut lines = Vec::with_capacity(16);
     lines.push(format!(
         "frames rendered: {frames}   avg render: {:.2}ms",
         avg.as_secs_f64() * 1000.0

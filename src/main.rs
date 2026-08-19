@@ -1297,12 +1297,12 @@ fn spawn_reader(
         while let Ok(msg) = protocol::read_message(&mut reader) {
             match msg {
                 Message::PtyOutput { window, data } => {
-                    if let Some(tx) = outputs.lock().unwrap().get(&window).cloned() {
+                    if let Some(tx) = outputs.lock().unwrap_or_else(|e| e.into_inner()).get(&window).cloned() {
                         let _ = tx.send(data);
                     }
                 }
                 Message::PtyClosed { window } => {
-                    outputs.lock().unwrap().remove(&window);
+                    outputs.lock().unwrap_or_else(|e| e.into_inner()).remove(&window);
                     let _ = events.send(RemoteEvent::WindowClosed(window));
                 }
                 Message::WindowAdded { window } => {
@@ -1364,7 +1364,7 @@ fn register_windows(
 ) {
     for info in windows {
         let (out_tx, out_rx) = unbounded::<Vec<u8>>();
-        outputs.lock().unwrap().insert(info.id.clone(), out_tx);
+        outputs.lock().unwrap_or_else(|e| e.into_inner()).insert(info.id.clone(), out_tx);
         let sink = RemoteSink::new(info.id.clone(), msg_tx.clone());
         let direction = os.pending_split.take();
         os.add_remote_window(info.clone(), Box::new(sink), out_rx, direction);
@@ -1398,7 +1398,7 @@ fn run_remote_event_loop(
                 // at the loop level rather than becoming `Msg`s.
                 RemoteEvent::WindowAdded(info) => {
                     let (out_tx, out_rx) = unbounded::<Vec<u8>>();
-                    outputs.lock().unwrap().insert(info.id.clone(), out_tx);
+                    outputs.lock().unwrap_or_else(|e| e.into_inner()).insert(info.id.clone(), out_tx);
                     let sink = RemoteSink::new(info.id.clone(), msg_tx.clone());
                     let direction = os.pending_split.take();
                     os.add_remote_window(info, Box::new(sink), out_rx, direction);
@@ -1408,7 +1408,7 @@ fn run_remote_event_loop(
                     if let Some(index) = os.windows.iter().position(|w| w.id == id) {
                         os.remove_window(index);
                     }
-                    outputs.lock().unwrap().remove(&id);
+                    outputs.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
                     os.notify("window closed", "info");
                 }
                 other => {
@@ -1535,7 +1535,7 @@ fn execute_attach(
     if target != current {
         match switch_session(target, msg_tx, events) {
             Ok(windows) => {
-                outputs.lock().unwrap().clear();
+                outputs.lock().unwrap_or_else(|e| e.into_inner()).clear();
                 os.clear_all_windows();
                 register_windows(os, &windows, msg_tx, outputs);
                 *current = target.to_string();
@@ -1593,7 +1593,7 @@ fn execute_kill(
         {
             match switch_session(&next, msg_tx, events) {
                 Ok(windows) => {
-                    outputs.lock().unwrap().clear();
+                    outputs.lock().unwrap_or_else(|e| e.into_inner()).clear();
                     os.clear_all_windows();
                     register_windows(os, &windows, msg_tx, outputs);
                     *current = next.clone();

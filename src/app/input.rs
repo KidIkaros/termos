@@ -1075,12 +1075,14 @@ fn handle_tape_manager(os: &mut Os, key: &KeyEvent) -> KeyResult {
         KeyCode::Backspace => {
             os.tape_manager_query.pop();
             os.tape_manager_selected = 0;
+            os.update_tape_manager_cache();
             KeyResult::Consumed
         }
         KeyCode::Char(c) => {
             if !key.modifiers.contains(KeyModifiers::CONTROL) {
                 os.tape_manager_query.push(c);
                 os.tape_manager_selected = 0;
+                os.update_tape_manager_cache();
             }
             KeyResult::Consumed
         }
@@ -1093,6 +1095,7 @@ fn handle_tape_manager_confirm_delete(os: &mut Os, key: &KeyEvent) -> KeyResult 
     match key.code {
         KeyCode::Char('y') | KeyCode::Enter => {
             os.tape_manager_confirm_delete();
+            os.refresh_tape_manager_cache();
             KeyResult::Consumed
         }
         KeyCode::Char('n') | KeyCode::Esc => {
@@ -1653,13 +1656,15 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
                     return true;
                 }
             }
+            // Compute the layout once for both border and window hit-testing.
+            let layout = os.current_layout();
             // Check for border-drag resize first.
-            if let Some((wid, edge)) = os.border_at(column, row) {
+            if let Some((wid, edge)) = os.border_at_with_layout(column, row, &layout) {
                 let pos = if edge.vertical() { column } else { row };
                 os.begin_border_drag(wid, edge, pos);
                 return true;
             }
-            if let Some(idx) = os.window_at(column, row) {
+            if let Some(idx) = os.window_at_with_layout(column, row, &layout) {
                 os.focus_window(idx);
                 os.prefix = Prefix::None;
                 // Click-to-type: in window-management mode a clean press arms

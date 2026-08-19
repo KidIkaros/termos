@@ -149,14 +149,14 @@ impl SessionBroadcast {
     fn subscribe(&self) -> (u64, Receiver<Message>) {
         let (tx, rx) = unbounded();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.subscribers.lock().unwrap().insert(id, tx);
+        self.subscribers.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
         (id, rx)
     }
 
     /// Register a subscriber with a client name and dimensions.
     fn subscribe_named(&self, name: &str, cols: u16, rows: u16) -> (u64, Receiver<Message>) {
         let (id, rx) = self.subscribe();
-        self.clients.lock().unwrap().insert(
+        self.clients.lock().unwrap_or_else(|e| e.into_inner()).insert(
             id,
             ClientEntry {
                 name: name.to_string(),
@@ -168,32 +168,32 @@ impl SessionBroadcast {
     }
 
     fn unsubscribe(&self, id: u64) {
-        self.subscribers.lock().unwrap().remove(&id);
-        self.clients.lock().unwrap().remove(&id);
+        self.subscribers.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        self.clients.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     }
 
     /// Update a client's reported terminal dimensions.
     fn update_size(&self, id: u64, cols: u16, rows: u16) {
-        if let Some(entry) = self.clients.lock().unwrap().get_mut(&id) {
+        if let Some(entry) = self.clients.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id) {
             entry.cols = cols;
             entry.rows = rows;
         }
     }
 
     fn is_attached(&self) -> bool {
-        !self.subscribers.lock().unwrap().is_empty()
+        !self.subscribers.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
     }
 
     /// The number of clients attached to this session.
     fn client_count(&self) -> usize {
-        self.subscribers.lock().unwrap().len()
+        self.subscribers.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// The minimum (cols, rows) across all attached clients with non-zero
     /// dimensions. Returns `None` when no client has reported dimensions.
     /// This is Go's `calculateEffectiveSize`.
     fn effective_size(&self) -> Option<(u16, u16)> {
-        let clients = self.clients.lock().unwrap();
+        let clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         let mut min: Option<(u16, u16)> = None;
         for entry in clients.values() {
             if entry.cols == 0 || entry.rows == 0 {
@@ -221,12 +221,12 @@ impl SessionBroadcast {
 
     /// The name of a client by subscriber id, if present.
     fn client_name(&self, id: u64) -> Option<String> {
-        self.clients.lock().unwrap().get(&id).map(|e| e.name.clone())
+        self.clients.lock().unwrap_or_else(|e| e.into_inner()).get(&id).map(|e| e.name.clone())
     }
 
     fn send_to_all(&self, msg: &Message) {
         let subs: Vec<Sender<Message>> =
-            self.subscribers.lock().unwrap().values().cloned().collect();
+            self.subscribers.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
         for tx in subs {
             let _ = tx.send(msg.clone());
         }
@@ -338,8 +338,8 @@ impl Daemon {
 
     /// The session list with window counts and attach state.
     pub fn list_infos(&self) -> Vec<super::model::SessionInfo> {
-        let windows = self.windows.lock().unwrap();
-        let broadcast = self.broadcast.lock().unwrap();
+        let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+        let broadcast = self.broadcast.lock().unwrap_or_else(|e| e.into_inner());
         self.manager
             .list()
             .into_iter()
@@ -409,7 +409,7 @@ impl Daemon {
                 Err(e) => log::warn!("failed to respawn window '{id}' in session '{name}': {e}"),
             }
         }
-        self.windows.lock().unwrap().insert(name.to_string(), wins);
+        self.windows.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_string(), wins);
         Ok(())
     }
 
@@ -483,7 +483,7 @@ impl Daemon {
         cols: u16,
         rows: u16,
     ) -> Result<(Vec<WindowInfo>, u64, Receiver<Message>), String> {
-        let windows = self.windows.lock().unwrap();
+        let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let sess = windows
             .get(name)
             .ok_or_else(|| format!("session '{name}' not found"))?;
@@ -518,7 +518,7 @@ impl Daemon {
     ) -> Result<(Vec<WindowInfo>, u64, u64, Receiver<Message>), String> {
         let (infos, sub_id, rx) = self.attach_named(name, client_name, cols, rows)?;
         // Replay buffered output for each window from the resume position.
-        let rings = self.rings.lock().unwrap();
+        let rings = self.rings.lock().unwrap_or_else(|e| e.into_inner());
         let mut max_seq = from_seq;
         for info in &infos {
             if let Some(ring) = rings.get(&(name.to_string(), info.id.clone())) {
@@ -529,8 +529,8 @@ impl Daemon {
                     // instead, we rely on the forward thread to drain the
                     // channel. We push a sequenced output message so the
                     // client knows the position.
-                    if let Some(b) = self.broadcast.lock().unwrap().get(name) {
-                        let subs = b.subscribers.lock().unwrap();
+                    if let Some(b) = self.broadcast.lock().unwrap_or_else(|e| e.into_inner()).get(name) {
+                        let subs = b.subscribers.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(tx) = subs.get(&sub_id) {
                             let _ = tx.send(Message::PtyOutputSequenced {
                                 window: info.id.clone(),
@@ -547,7 +547,7 @@ impl Daemon {
     }
 
     fn detach(&self, name: &str, sub_id: u64) {
-        if let Some(b) = self.broadcast.lock().unwrap().get(name) {
+        if let Some(b) = self.broadcast.lock().unwrap_or_else(|e| e.into_inner()).get(name) {
             let client_name = b.client_name(sub_id).unwrap_or_default();
             b.unsubscribe(sub_id);
             // Notify remaining clients that this client left.
@@ -567,14 +567,14 @@ impl Daemon {
     /// Kill a session: stop its PTYs, drop state, remove its save file.
     fn kill(&self, name: &str) -> Result<(), String> {
         self.manager.delete(name).map_err(|e| e.to_string())?;
-        self.windows.lock().unwrap().remove(name);
-        self.broadcast.lock().unwrap().remove(name);
+        self.windows.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
+        self.broadcast.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
         persistence::remove(name);
         Ok(())
     }
 
     fn write_input(&self, session: &str, window: &str, data: &[u8]) {
-        let windows = self.windows.lock().unwrap();
+        let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(wins) = windows.get(session) {
             if let Some(w) = wins.iter().find(|w| w.info.id == window) {
                 w.writer.write(data);
@@ -588,7 +588,7 @@ impl Daemon {
     }
 
     fn resize(&self, session: &str, window: &str, cols: u16, rows: u16) {
-        let windows = self.windows.lock().unwrap();
+        let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(wins) = windows.get(session) {
             if let Some(w) = wins.iter().find(|w| w.info.id == window) {
                 w.writer.resize(WinSize { cols, rows });
@@ -611,7 +611,7 @@ impl Daemon {
         };
         // Resize every window in the session to the effective size.
         let window_ids: Vec<String> = {
-            let windows = self.windows.lock().unwrap();
+            let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
             windows
                 .get(session)
                 .map(|wins| wins.iter().map(|w| w.info.id.clone()).collect())
@@ -643,7 +643,7 @@ impl Daemon {
     /// Reports session count, client count, uptime, and best-effort memory.
     pub fn diagnose(&self) -> super::protocol::DaemonReport {
         let sessions = self.list_infos();
-        let broadcast = self.broadcast.lock().unwrap();
+        let broadcast = self.broadcast.lock().unwrap_or_else(|e| e.into_inner());
         let session_reports: Vec<super::protocol::SessionReport> = sessions
             .iter()
             .map(|s| super::protocol::SessionReport {
@@ -686,7 +686,7 @@ impl Daemon {
             "list-windows" => {
                 let name = session
                     .ok_or_else(|| "missing session parameter".to_string())?;
-                let windows = self.windows.lock().unwrap();
+                let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
                 let wins = windows
                     .get(name)
                     .ok_or_else(|| format!("session '{name}' not found"))?;
@@ -729,7 +729,7 @@ impl Daemon {
     /// (exact, then prefix), else the session's most recently active window,
     /// else its first. `session` must exist.
     fn resolve_window(&self, session: &str, window: Option<&str>) -> Result<String, String> {
-        let windows = self.windows.lock().unwrap();
+        let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let wins = windows
             .get(session)
             .ok_or_else(|| format!("session '{session}' not found"))?;
@@ -768,7 +768,7 @@ impl Daemon {
         harness: &str,
     ) -> Result<String, String> {
         let target = self.resolve_window(session, window)?;
-        let mut windows = self.windows.lock().unwrap();
+        let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let wins = windows
             .get_mut(session)
             .ok_or_else(|| format!("session '{session}' not found"))?;
@@ -823,7 +823,7 @@ impl Daemon {
         window: Option<&str>,
     ) -> Result<(String, String, String, String), String> {
         let target = self.resolve_window(session, window)?;
-        let windows = self.windows.lock().unwrap();
+        let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let wins = windows
             .get(session)
             .ok_or_else(|| format!("session '{session}' not found"))?;
@@ -846,7 +846,7 @@ impl Daemon {
         data: &[u8],
     ) -> Result<String, String> {
         let target = self.resolve_window(session, window)?;
-        let windows = self.windows.lock().unwrap();
+        let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let wins = windows
             .get(session)
             .ok_or_else(|| format!("session '{session}' not found"))?;
@@ -870,7 +870,7 @@ impl Daemon {
         window: Option<&str>,
     ) -> Result<(String, String), String> {
         let target = self.resolve_window(session, window)?;
-        let rings = self.rings.lock().unwrap();
+        let rings = self.rings.lock().unwrap_or_else(|e| e.into_inner());
         let content = rings
             .get(&(session.to_string(), target.clone()))
             .map(|r| r.as_lossy())
@@ -900,7 +900,7 @@ impl Daemon {
         let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
         loop {
             let hit = {
-                let rings = self.rings.lock().unwrap();
+                let rings = self.rings.lock().unwrap_or_else(|e| e.into_inner());
                 rings
                     .get(&(session.to_string(), target.clone()))
                     .map(|r| re.is_match(&r.as_lossy()))
@@ -948,7 +948,7 @@ impl Daemon {
             }
             "list-windows" => {
                 let name = verb_session(params)?;
-                let windows = self.windows.lock().unwrap();
+                let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
                 let wins = windows.get(&name).ok_or_else(|| {
                     verb_error(ERR_SESSION_NOT_FOUND, format!("session '{name}' not found"))
                 })?;
@@ -1137,7 +1137,7 @@ impl Daemon {
     }
 
     fn add_window(&self, session: &str, shell: &str, workspace: i32) -> Result<WindowInfo, String> {
-        let mut windows = self.windows.lock().unwrap();
+        let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let wins = windows
             .get_mut(session)
             .ok_or_else(|| format!("session '{session}' not found"))?;
@@ -1175,7 +1175,7 @@ impl Daemon {
     }
 
     fn close_window(&self, session: &str, window: &str) -> Result<(), String> {
-        let mut windows = self.windows.lock().unwrap();
+        let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let wins = windows
             .get_mut(session)
             .ok_or_else(|| format!("session '{session}' not found"))?;
@@ -1213,14 +1213,14 @@ impl Daemon {
 
     /// Send an event to every client attached to a session.
     fn broadcast_event(&self, session: &str, msg: &Message) {
-        if let Some(b) = self.broadcast.lock().unwrap().get(session) {
+        if let Some(b) = self.broadcast.lock().unwrap_or_else(|e| e.into_inner()).get(session) {
             b.send_to_all(msg);
         }
     }
 
     /// Persist a session's window definitions for resurrection.
     fn save_session(&self, name: &str) {
-        let windows = self.windows.lock().unwrap();
+        let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let Some(wins) = windows.get(name) else {
             return;
         };
@@ -1347,7 +1347,7 @@ impl Daemon {
         };
         // Read the window's output ring tail.
         let tail: Vec<String> = {
-            let rings = self.rings.lock().unwrap();
+            let rings = self.rings.lock().unwrap_or_else(|e| e.into_inner());
             rings
                 .get(&(session.to_string(), target.clone()))
                 .map(|r| {
@@ -1389,7 +1389,7 @@ impl Daemon {
             .manager
             .get(session)
             .ok_or_else(|| format!("session '{session}' not found"))?;
-        let windows = self.windows.lock().unwrap();
+        let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let count = windows.get(session).map(|w| w.len()).unwrap_or(0);
         let meta = self.session_meta(session);
         Ok(serde_json::json!({
@@ -1407,7 +1407,7 @@ impl Daemon {
     /// the live registry.
     pub fn state_for_session(&self, name: &str) -> crate::session::state_merge::SessionState {
         use crate::session::state_merge::WindowState as MergeWindow;
-        let windows = self.windows.lock().unwrap();
+        let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let wins: Vec<WindowInfo> = windows
             .get(name)
             .map(|wins| wins.iter().map(|w| w.info.clone()).collect())
@@ -1523,7 +1523,7 @@ fn apply_osc_progress_pieces(
     broadcast: &Arc<SessionBroadcast>,
 ) {
     let current = {
-        let windows = windows.lock().unwrap();
+        let windows = windows.lock().unwrap_or_else(|e| e.into_inner());
         windows
             .get(session)
             .and_then(|wins| wins.iter().find(|w| w.info.id == window))
@@ -1531,13 +1531,13 @@ fn apply_osc_progress_pieces(
     };
     let Some(current) = current else { return };
     if *state == current {
-        holds.lock().unwrap().remove(window);
+        holds.lock().unwrap_or_else(|e| e.into_inner()).remove(window);
         return;
     }
     if !hold_quieter_state(holds, window, state, &current, now) {
         return;
     }
-    let mut wins = windows.lock().unwrap();
+    let mut wins = windows.lock().unwrap_or_else(|e| e.into_inner());
     let Some(live) = wins
         .get_mut(session)
         .and_then(|wins| wins.iter_mut().find(|w| w.info.id == window))
@@ -1566,10 +1566,10 @@ fn hold_quieter_state(
     now: std::time::Instant,
 ) -> bool {
     if agent_loudness(next) >= agent_loudness(current) {
-        holds.lock().unwrap().remove(window);
+        holds.lock().unwrap_or_else(|e| e.into_inner()).remove(window);
         return true;
     }
-    let mut holds = holds.lock().unwrap();
+    let mut holds = holds.lock().unwrap_or_else(|e| e.into_inner());
     match holds.get(window) {
         Some((held, since)) if *held == *next => {
             if now.duration_since(*since) < OSC_HOLD_WINDOW {
@@ -1645,7 +1645,7 @@ fn handle_verb_client<R: BufRead>(
                 verb_error(ERR_INVALID_REQUEST, format!("malformed JSON request: {e}")),
             ),
         };
-        let mut out = writer.lock().unwrap();
+        let mut out = writer.lock().unwrap_or_else(|e| e.into_inner());
         if out.write_all(response.to_line().as_bytes()).is_err() {
             return;
         }
@@ -2124,7 +2124,7 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                 };
                 match daemon.resolve_window(&target_session, window.as_deref()) {
                     Ok(target) => {
-                        let windows = daemon.windows.lock().unwrap();
+                        let windows = daemon.windows.lock().unwrap_or_else(|e| e.into_inner());
                         let info = windows
                             .get(&target_session)
                             .and_then(|wins| wins.iter().find(|w| w.info.id == target))
@@ -2327,7 +2327,7 @@ fn resolve_session(
 }
 
 fn send(stream: &Arc<Mutex<UnixStream>>, msg: &Message) -> io::Result<()> {
-    let mut s = stream.lock().unwrap();
+    let mut s = stream.lock().unwrap_or_else(|e| e.into_inner());
     protocol::write_message(&mut *s, msg)
 }
 

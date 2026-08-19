@@ -1056,7 +1056,7 @@ mod tests {
         assert!(win.output_buffer.is_empty());
 
         // The emulator should have received the data.
-        let emu = win.emulator.lock().unwrap();
+        let emu = win.emulator.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(emu.width(), 80);
         assert_eq!(emu.height(), 24);
     }
@@ -1136,7 +1136,7 @@ mod tests {
         // Output buffer should be flushed (empty after reset).
         assert!(win.output_buffer.is_empty());
         // Emulator should still be functional.
-        let emu = win.emulator.lock().unwrap();
+        let emu = win.emulator.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(emu.width(), 80);
         assert_eq!(emu.height(), 24);
     }
@@ -1227,7 +1227,7 @@ mod tests {
         handle.join().unwrap();
 
         // Verify the emulator received the data by checking it has content.
-        let emu = emulator.lock().unwrap();
+        let emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(emu.width(), 80);
         assert_eq!(emu.height(), 24);
     }

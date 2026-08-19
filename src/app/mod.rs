@@ -579,6 +579,9 @@ pub struct Os {
     pub tape_manager_name_buffer: String,
     /// Pending delete confirmation path.
     pub tape_manager_delete_path: Option<std::path::PathBuf>,
+    /// Cached tape file list + the query it was filtered for, to avoid
+    /// re-scanning the filesystem on every render frame.
+    pub tape_manager_cache: Option<(String, Vec<std::path::PathBuf>)>,
     /// Remote `tape exec` progress (current index, total), if one is running.
     pub remote_tape: Option<(usize, usize)>,
     /// A discovered project tape awaiting a trust decision (the review
@@ -868,6 +871,7 @@ impl Os {
             tape_manager_mode: TapeManagerMode::List,
             tape_manager_name_buffer: String::new(),
             tape_manager_delete_path: None,
+            tape_manager_cache: None,
             remote_tape: None,
             project_tape_pending: None,
             kitty_passthrough: None,
@@ -1690,7 +1694,7 @@ impl Os {
         let mut apc_jobs: Vec<(u32, u32, u32, Vec<u8>)> = Vec::new();
         let mut sixel_jobs: Vec<(u32, u32, Vec<u8>)> = Vec::new();
         for (i, w) in self.windows.iter_mut().enumerate() {
-            let mut emu = w.emulator.lock().unwrap();
+            let mut emu = crate::util::lock(&w.emulator);
             let apcs = emu.drain_pending_apc();
             if !apcs.is_empty() {
                 let (px, py) = origins.get(i).copied().unwrap_or((0, 0));
@@ -1947,6 +1951,8 @@ impl Os {
         self.tape_manager_mode = TapeManagerMode::List;
         self.tape_manager_name_buffer.clear();
         self.tape_manager_delete_path = None;
+        self.tape_manager_cache = None;
+        self.update_tape_manager_cache();
         self.prefix = Prefix::None;
     }
 
@@ -2039,12 +2045,22 @@ impl Os {
     }
 
     /// The tape files for the manager overlay, filtered by the query.
+    ///
+    /// Uses an internal cache keyed by the current query string to avoid
+    /// re-scanning the filesystem on every render frame. The cache is
+    /// invalidated when the query changes or `refresh_tape_manager_cache`
+    /// is called.
     pub fn tape_manager_items(&self) -> Vec<std::path::PathBuf> {
+        let query = self.tape_manager_query.to_lowercase();
+        if let Some((cached_query, ref cached_items)) = &self.tape_manager_cache {
+            if cached_query == &query {
+                return cached_items.clone();
+            }
+        }
         let Ok(files) = crate::tape::tapes::list_tapes() else {
             return Vec::new();
         };
-        let query = self.tape_manager_query.to_lowercase();
-        files
+        let filtered: Vec<std::path::PathBuf> = files
             .into_iter()
             .filter(|p| {
                 query.is_empty()
@@ -2052,7 +2068,33 @@ impl Os {
                         .map(|n| n.to_string_lossy().to_lowercase().contains(&query))
                         .unwrap_or(false)
             })
-            .collect()
+            .collect();
+        filtered
+    }
+
+    /// Invalidate the tape manager cache so the next `tape_manager_items`
+    /// call re-scans the filesystem.
+    pub fn refresh_tape_manager_cache(&mut self) {
+        self.tape_manager_cache = None;
+    }
+
+    /// Update the tape manager cache after a query or file change.
+    pub fn update_tape_manager_cache(&mut self) {
+        let query = self.tape_manager_query.to_lowercase();
+        let Ok(files) = crate::tape::tapes::list_tapes() else {
+            self.tape_manager_cache = Some((query, Vec::new()));
+            return;
+        };
+        let filtered: Vec<std::path::PathBuf> = files
+            .into_iter()
+            .filter(|p| {
+                query.is_empty()
+                    || p.file_name()
+                        .map(|n| n.to_string_lossy().to_lowercase().contains(&query))
+                        .unwrap_or(false)
+            })
+            .collect();
+        self.tape_manager_cache = Some((query, filtered));
     }
 
     /// Play the selected tape from the manager (loads it as the script).
@@ -4341,8 +4383,19 @@ impl Os {
     /// The window index under a cell coordinate (column, row), if any.
     pub fn window_at(&self, column: i32, row: i32) -> Option<usize> {
         let layout = self.current_layout();
+        self.window_at_with_layout(column, row, &layout)
+    }
+
+    /// Like `window_at` but accepts a precomputed layout to avoid recomputing
+    /// the BSP tree on every call.
+    pub fn window_at_with_layout(
+        &self,
+        column: i32,
+        row: i32,
+        layout: &HashMap<i32, Rect>,
+    ) -> Option<usize> {
         let mut best: Option<(usize, i32)> = None;
-        for (window_id, rect) in layout {
+        for (&window_id, &rect) in layout {
             if column >= rect.x
                 && column < rect.x + rect.w
                 && row >= rect.y
@@ -4360,50 +4413,59 @@ impl Os {
 
     /// Detect if a screen coordinate is on a pane border (within 1 cell slop).
     /// Returns (window_id, edge) if the click is on a border between panes.
-    fn border_at(&self, column: i32, row: i32) -> Option<(i32, crate::layout::ResizeEdge)> {
-        let layout = self.current_layout();
+    /// Precomputes edge coordinate sets so neighbor checks are O(1) instead
+    /// of O(n), making the overall function O(n) instead of O(n²).
+    pub fn border_at_with_layout(
+        &self,
+        column: i32,
+        row: i32,
+        layout: &HashMap<i32, Rect>,
+    ) -> Option<(i32, crate::layout::ResizeEdge)> {
         let slop = 1;
-        for (&wid, &rect) in &layout {
+        // Precompute sets of all x and y coordinates that appear as rect
+        // left edges or right edges, so neighbor checks are O(1).
+        let mut left_edges: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        let mut right_edges: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        let mut top_edges: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        let mut bottom_edges: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        for rect in layout.values() {
+            left_edges.insert(rect.x);
+            right_edges.insert(rect.x + rect.w);
+            top_edges.insert(rect.y);
+            bottom_edges.insert(rect.y + rect.h);
+        }
+        for (&wid, &rect) in layout {
             // Right border: column is at rect.x + rect.w or rect.x + rect.w - 1
             if (column == rect.x + rect.w || column == rect.x + rect.w - 1)
                 && row >= rect.y.saturating_sub(slop)
                 && row < rect.y + rect.h + slop
+                && left_edges.contains(&(rect.x + rect.w))
             {
-                // Check if there's a neighbor to the right.
-                let has_right = layout.iter().any(|(_, r)| r.x == rect.x + rect.w);
-                if has_right {
-                    return Some((wid, crate::layout::ResizeEdge::Right));
-                }
+                return Some((wid, crate::layout::ResizeEdge::Right));
             }
             // Bottom border
             if (row == rect.y + rect.h || row == rect.y + rect.h - 1)
                 && column >= rect.x.saturating_sub(slop)
                 && column < rect.x + rect.w + slop
+                && top_edges.contains(&(rect.y + rect.h))
             {
-                let has_below = layout.iter().any(|(_, r)| r.y == rect.y + rect.h);
-                if has_below {
-                    return Some((wid, crate::layout::ResizeEdge::Bottom));
-                }
+                return Some((wid, crate::layout::ResizeEdge::Bottom));
             }
             // Left border
             if (column == rect.x || column == rect.x + 1)
                 && row >= rect.y.saturating_sub(slop)
                 && row < rect.y + rect.h + slop
+                && right_edges.contains(&rect.x)
             {
-                let has_left = layout.iter().any(|(_, r)| r.x + r.w == rect.x);
-                if has_left {
-                    return Some((wid, crate::layout::ResizeEdge::Left));
-                }
+                return Some((wid, crate::layout::ResizeEdge::Left));
             }
             // Top border
             if (row == rect.y || row == rect.y + 1)
                 && column >= rect.x.saturating_sub(slop)
                 && column < rect.x + rect.w + slop
+                && bottom_edges.contains(&rect.y)
             {
-                let has_above = layout.iter().any(|(_, r)| r.y + r.h == rect.y);
-                if has_above {
-                    return Some((wid, crate::layout::ResizeEdge::Top));
-                }
+                return Some((wid, crate::layout::ResizeEdge::Top));
             }
         }
         None

@@ -147,7 +147,7 @@ impl SixelPassthrough {
         if !self.enabled {
             return Ok(());
         }
-        let mut out = self.host_out.lock().unwrap();
+        let mut out = self.host_out.lock().unwrap_or_else(|e| e.into_inner());
         // Save cursor, move to pane origin, write the Sixel DCS, restore.
         write!(out, "\x1b[s")?;
         write!(out, "\x1b[{};{}H", pane_y + 1, pane_x + 1)?;
@@ -181,7 +181,7 @@ impl SixelPassthrough {
             1
         };
 
-        let mut placements = self.placements.lock().unwrap();
+        let mut placements = self.placements.lock().unwrap_or_else(|e| e.into_inner());
         let window_placements = placements.entry(window_id).or_default();
 
         // Check for existing placement at the same position with same dimensions
@@ -211,14 +211,14 @@ impl SixelPassthrough {
 
     /// Clear all placements for a window.
     pub fn clear_window(&self, window_id: u32) {
-        self.placements.lock().unwrap().remove(&window_id);
+        self.placements.lock().unwrap_or_else(|e| e.into_inner()).remove(&window_id);
     }
 
     /// Remove placements that were made on the alt screen. Called when
     /// transitioning from alt screen to normal screen. Ported from Go's
     /// `ClearAltScreenPlacements`.
     pub fn clear_alt_screen_placements(&self, window_id: u32) {
-        let mut placements = self.placements.lock().unwrap();
+        let mut placements = self.placements.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(window_placements) = placements.get_mut(&window_id) {
             window_placements.retain(|p| !p.placed_on_alt_screen);
         }
@@ -227,7 +227,7 @@ impl SixelPassthrough {
     /// Remove placements that have scrolled past a certain line. Ported from
     /// Go's `ClearScrolledOut`. Used for memory management.
     pub fn clear_scrolled_out(&self, window_id: u32, min_line: i32) {
-        let mut placements = self.placements.lock().unwrap();
+        let mut placements = self.placements.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(window_placements) = placements.get_mut(&window_id) {
             window_placements.retain(|p| p.absolute_line + p.rows > min_line);
         }
@@ -300,7 +300,7 @@ impl SixelPassthrough {
             return;
         }
 
-        let mut placements = self.placements.lock().unwrap();
+        let mut placements = self.placements.lock().unwrap_or_else(|e| e.into_inner());
         let mut output = Vec::new();
         let window_ids: Vec<u32> = placements.keys().copied().collect();
 
@@ -431,7 +431,7 @@ impl SixelPassthrough {
 
         // Write accumulated output to the host.
         if !output.is_empty() {
-            let mut out = self.host_out.lock().unwrap();
+            let mut out = self.host_out.lock().unwrap_or_else(|e| e.into_inner());
             let _ = out.write_all(&output);
             let _ = out.flush();
         }
@@ -443,7 +443,7 @@ impl SixelPassthrough {
     /// Hide all sixel placements and queue clear commands. Used during resize
     /// to prevent stale positions.
     pub fn hide_all_placements(&self) {
-        let mut placements = self.placements.lock().unwrap();
+        let mut placements = self.placements.lock().unwrap_or_else(|e| e.into_inner());
         let mut output = Vec::new();
         for window_placements in placements.values_mut() {
             for p in window_placements.iter_mut() {
@@ -453,7 +453,7 @@ impl SixelPassthrough {
             }
         }
         if !output.is_empty() {
-            let mut out = self.host_out.lock().unwrap();
+            let mut out = self.host_out.lock().unwrap_or_else(|e| e.into_inner());
             let _ = out.write_all(&output);
             let _ = out.flush();
         }
@@ -461,9 +461,9 @@ impl SixelPassthrough {
 
     /// Flush any pending output to the host terminal.
     pub fn flush_output(&self) -> std::io::Result<()> {
-        let mut pending = self.pending_output.lock().unwrap();
+        let mut pending = self.pending_output.lock().unwrap_or_else(|e| e.into_inner());
         if !pending.is_empty() {
-            let mut out = self.host_out.lock().unwrap();
+            let mut out = self.host_out.lock().unwrap_or_else(|e| e.into_inner());
             out.write_all(&pending)?;
             out.flush()?;
             pending.clear();
@@ -477,7 +477,7 @@ impl SixelPassthrough {
         if !self.enabled {
             return Ok(());
         }
-        let mut out = self.host_out.lock().unwrap();
+        let mut out = self.host_out.lock().unwrap_or_else(|e| e.into_inner());
         out.write_all(b"\x1b[2J")?;
         out.flush()?;
         Ok(())
@@ -507,7 +507,7 @@ mod tests {
         struct SharedWriter(Arc<StdMutex<Vec<u8>>>);
         impl Write for SharedWriter {
             fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(b);
+                self.0.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(b);
                 Ok(b.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
@@ -566,7 +566,7 @@ mod tests {
         let (buf, writer) = shared_writer();
         let sp = SixelPassthrough::new(test_caps(true), writer);
         sp.forward(10, 5, b"~!1~").unwrap();
-        let buf_inner = buf.lock().unwrap();
+        let buf_inner = buf.lock().unwrap_or_else(|e| e.into_inner());
         let s = String::from_utf8_lossy(&buf_inner);
         assert!(s.starts_with("\x1b[s"), "got: {s:?}");
         assert!(s.contains("\x1b[6;11H"), "got: {s:?}");
@@ -636,7 +636,7 @@ mod tests {
         let windows = HashMap::from([(1, make_window_info(5, 5, 80, 24))]);
         sp.refresh_placements(&|wid| windows.get(&wid).cloned(), 20, 100);
 
-        let buf_inner = buf.lock().unwrap();
+        let buf_inner = buf.lock().unwrap_or_else(|e| e.into_inner());
         let s = String::from_utf8_lossy(&buf_inner);
         assert!(s.contains("\x1bP"), "should emit sixel DCS: {s:?}");
         assert!(s.contains("\x1b7"), "should save cursor: {s:?}");
@@ -651,13 +651,13 @@ mod tests {
         let windows = HashMap::from([(1, make_window_info(5, 5, 80, 24))]);
         sp.refresh_placements(&|wid| windows.get(&wid).cloned(), 20, 100);
 
-        buf.lock().unwrap().clear();
+        buf.lock().unwrap_or_else(|e| e.into_inner()).clear();
         let mut info = make_window_info(5, 5, 80, 24);
         info.visible = false;
         let windows2 = HashMap::from([(1, info)]);
         sp.refresh_placements(&|wid| windows2.get(&wid).cloned(), 20, 100);
 
-        let buf_inner = buf.lock().unwrap();
+        let buf_inner = buf.lock().unwrap_or_else(|e| e.into_inner());
         let s = String::from_utf8_lossy(&buf_inner);
         assert!(s.contains("\x1b["), "should emit erase: {s:?}");
     }
@@ -673,7 +673,7 @@ mod tests {
         let windows = HashMap::from([(1, info)]);
         sp.refresh_placements(&|wid| windows.get(&wid).cloned(), 20, 100);
 
-        let buf_inner = buf.lock().unwrap();
+        let buf_inner = buf.lock().unwrap_or_else(|e| e.into_inner());
         let s = String::from_utf8_lossy(&buf_inner);
         assert!(
             !s.contains("\x1bP~"),
@@ -689,9 +689,9 @@ mod tests {
 
         let windows = HashMap::from([(1, make_window_info(5, 5, 80, 24))]);
         sp.refresh_placements(&|wid| windows.get(&wid).cloned(), 20, 100);
-        buf.lock().unwrap().clear();
+        buf.lock().unwrap_or_else(|e| e.into_inner()).clear();
         sp.refresh_placements(&|wid| windows.get(&wid).cloned(), 20, 100);
-        let buf_inner = buf.lock().unwrap();
+        let buf_inner = buf.lock().unwrap_or_else(|e| e.into_inner());
         let s = String::from_utf8_lossy(&buf_inner);
         assert!(
             !s.contains("\x1bP~"),
@@ -708,9 +708,9 @@ mod tests {
         let windows = HashMap::from([(1, make_window_info(5, 5, 80, 24))]);
         sp.refresh_placements(&|wid| windows.get(&wid).cloned(), 20, 100);
 
-        buf.lock().unwrap().clear();
+        buf.lock().unwrap_or_else(|e| e.into_inner()).clear();
         sp.hide_all_placements();
-        let buf_inner = buf.lock().unwrap();
+        let buf_inner = buf.lock().unwrap_or_else(|e| e.into_inner());
         let s = String::from_utf8_lossy(&buf_inner);
         assert!(s.contains("\x1b7"), "should emit save cursor: {s:?}");
         assert!(s.contains('X'), "should emit erase char: {s:?}");
