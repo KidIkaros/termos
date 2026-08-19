@@ -220,6 +220,44 @@ pub fn build_session_picker(sessions: &[(String, usize, bool, u64)]) -> Vec<Sess
         .collect()
 }
 
+// ─── HTML / URL escaping ─────────────────────────────────────────────────
+
+/// Percent-encode a string for use as a single URL path segment (RFC 3986
+/// unreserved characters pass through). Session names are already restricted
+/// to a safe charset, but this guards against anything that slipped through.
+pub fn url_path_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from_digit((b >> 4) as u32, 16).unwrap().to_ascii_uppercase());
+                out.push(char::from_digit((b & 0x0f) as u32, 16).unwrap().to_ascii_uppercase());
+            }
+        }
+    }
+    out
+}
+
+/// Escape a string for safe embedding in HTML text and attribute values.
+pub fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 // ─── Read-Only Mode ──────────────────────────────────────────────────────
 
 /// Read-only mode prevents input from being sent to the PTY.
@@ -387,6 +425,27 @@ pub fn check_transport_security(host: &str, tls_enabled: bool) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn url_path_escape_keeps_unreserved() {
+        assert_eq!(url_path_escape("dev"), "dev");
+        assert_eq!(url_path_escape("session-0"), "session-0");
+        assert_eq!(url_path_escape("Payments-API"), "Payments-API");
+    }
+
+    #[test]
+    fn url_path_escape_encodes_reserved() {
+        assert_eq!(url_path_escape("a b"), "a%20b");
+        assert_eq!(url_path_escape("a&b"), "a%26b");
+        assert_eq!(url_path_escape("a?b#c"), "a%3Fb%23c");
+        assert_eq!(url_path_escape("100%"), "100%25");
+    }
+
+    #[test]
+    fn html_escape_entities() {
+        assert_eq!(html_escape("dev"), "dev");
+        assert_eq!(html_escape("<script>&\"'"), "&lt;script&gt;&amp;&quot;&#39;");
+    }
 
     #[test]
     fn requires_token_rules() {

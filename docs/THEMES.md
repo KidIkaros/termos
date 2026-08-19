@@ -10,6 +10,7 @@ overlays, the dockbar) from them.
 ## Table of Contents
 
 - [Selecting a Theme](#selecting-a-theme)
+- [Automatic Light/Dark Detection](#automatic-lightdark-detection)
 - [Custom Themes](#custom-themes)
 - [Theme File Format](#theme-file-format)
 - [Defaults for Omitted Colors](#defaults-for-omitted-colors)
@@ -41,6 +42,36 @@ restores the theme that was active when you opened it.
 Leaving the theme unset disables theming entirely and TermOS uses your terminal's
 own colors. An unknown theme name logs a warning and leaves the colors as they
 were, rather than failing to start.
+
+## Automatic Light/Dark Detection
+
+Set `theme = "auto"` to pick a theme from the host terminal's light/dark
+preference instead of a fixed one:
+
+```toml
+[appearance]
+theme = "auto"
+theme_auto_light = "catppuccin-latte"   # used when the terminal is light
+theme_auto_dark  = "catppuccin-mocha"   # used when the terminal is dark
+```
+
+Detection happens in two stages:
+
+1. **At startup** the TUI sends an OSC 11 query (`ESC ] 11 ; ? BEL`) and asks
+   the terminal for its default background color, then classifies it by
+   relative luminance. If the terminal doesn't answer, the `COLORFGBG`
+   environment variable (set by urxvt, konsole, …) is used as a fallback.
+2. **On demand** — the command palette entry **Re-detect light/dark theme**
+   re-runs the query and swaps the theme live, so changing the OS theme in
+   the middle of a session takes effect immediately.
+
+When detection fails entirely, `auto` falls back to `theme_auto_dark`. The
+`theme` key stays `"auto"`, so every launch re-detects. Picking a concrete
+theme (picker, settings, `--theme`) turns `auto` off. Contexts without a host
+terminal (daemon, SSH, web) resolve `auto` from `COLORFGBG` only.
+
+The theme picker marks each theme with a ☀/☾ glyph so you can tell light
+palettes from dark ones at a glance.
 
 ## Custom Themes
 

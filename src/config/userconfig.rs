@@ -261,6 +261,20 @@ pub struct AppearanceConfig {
     /// Format string for window titles: {title}, {index}, {cwd}.
     #[serde(default)]
     pub window_title_format: String,
+    /// Theme used when `theme = "auto"` detects a dark host terminal.
+    #[serde(default = "default_auto_dark")]
+    pub theme_auto_dark: String,
+    /// Theme used when `theme = "auto"` detects a light host terminal.
+    #[serde(default = "default_auto_light")]
+    pub theme_auto_light: String,
+}
+
+fn default_auto_dark() -> String {
+    "catppuccin-mocha".into()
+}
+
+fn default_auto_light() -> String {
+    "catppuccin-latte".into()
 }
 
 fn default_true() -> bool {
@@ -317,6 +331,8 @@ impl Default for AppearanceConfig {
             click_to_type: "single".into(),
             word_characters: "@-./_~".into(),
             window_title_format: String::new(),
+            theme_auto_dark: default_auto_dark(),
+            theme_auto_light: default_auto_light(),
         }
     }
 }
@@ -928,5 +944,27 @@ mod tests {
     fn appearance_config_window_title_position_default() {
         let a = AppearanceConfig::default();
         assert_eq!(a.window_title_position, "bottom");
+    }
+
+    #[test]
+    fn appearance_config_auto_theme_defaults() {
+        let a = AppearanceConfig::default();
+        assert_eq!(a.theme_auto_dark, "catppuccin-mocha");
+        assert_eq!(a.theme_auto_light, "catppuccin-latte");
+    }
+
+    #[test]
+    fn old_config_without_auto_theme_fields_still_parses() {
+        // A config saved before the auto-theme fields existed must load with
+        // the new fields defaulted (missing fields are not a parse error).
+        let full = toml::to_string(&UserConfig::default_config()).unwrap();
+        let old = full
+            .lines()
+            .filter(|l| !l.contains("theme_auto_dark") && !l.contains("theme_auto_light"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cfg = UserConfig::parse_str(&old);
+        assert_eq!(cfg.appearance.theme_auto_dark, "catppuccin-mocha");
+        assert_eq!(cfg.appearance.theme_auto_light, "catppuccin-latte");
     }
 }

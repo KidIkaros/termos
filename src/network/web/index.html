@@ -16,15 +16,31 @@
     const term = new Terminal({ cols: 80, rows: 24, theme: { background: '#000' } });
     term.open(document.getElementById('terminal'));
 
+    // The session is the URL path: / picks the picker page, /<session> is a
+    // terminal attached to that daemon session.
+    let session = '';
+    const rawPath = location.pathname.slice(1);
+    if (rawPath) {
+      try {
+        session = decodeURIComponent(rawPath);
+      } catch (e) {
+        session = rawPath;
+      }
+      document.title = `TermOS — ${session}`;
+    }
+
     // Carry the token from the login flow (e.g. /?token=...) onto the WebSocket
     // handshake, which the server validates the same way as the page.
-    const ws = new WebSocket(`ws://${location.host}/ws${location.search}`);
+    const wsPath = session ? `/ws/${encodeURIComponent(session)}` : '/ws';
+    const ws = new WebSocket(`ws://${location.host}${wsPath}${location.search}`);
     ws.binaryType = 'arraybuffer';
 
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data);
       if (msg.type === 'output') {
         term.write(msg.data);
+      } else if (msg.type === 'error') {
+        term.write(`\r\n[${msg.data}]\r\n`);
       }
     };
 

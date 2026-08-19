@@ -1778,6 +1778,8 @@ fn run_remote_tui(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     set_os_size(&mut os);
     os.queue_keyboard_enhancements();
     os.queue_keyboard_enhancements();
+    // Resolve `theme = "auto"` against the live terminal (OSC 11 query).
+    os.redetect_theme();
 
     let result = run_remote_event_loop(
         &mut os,
@@ -2209,6 +2211,8 @@ fn run_local_tui_with_overrides(overrides: &Overrides) -> Result<(), Box<dyn std
     set_os_size(&mut os);
     os.queue_keyboard_enhancements();
     os.queue_mac_option_advice();
+    // Resolve `theme = "auto"` against the live terminal (OSC 11 query).
+    os.redetect_theme();
 
     // Spawn the first shell.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
@@ -2622,6 +2626,11 @@ fn cmd_web(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let cert = opts.cert;
     let key = opts.key;
     let config = UserConfig::load();
+    // Sessions are daemon-owned; start one if none is reachable so the
+    // picker page has sessions to show and `/ws/<session>` can attach.
+    if let Err(e) = termos::session::ensure_daemon_running() {
+        eprintln!("warning: no daemon reachable; web sessions unavailable: {e}");
+    }
     let rt = tokio::runtime::Runtime::new()?;
     let server_opts = termos::network::web::WebServerOptions {
         addr: format!("{}:{}", opts.host, opts.port),

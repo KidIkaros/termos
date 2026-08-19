@@ -26,7 +26,11 @@ fn config_file_header(config_path: &str) -> String {
     sb.push_str("# border_style: rounded, single, double, plain, ascii\n");
     sb.push_str("# dockbar_position: bottom, top, hidden\n");
     sb.push_str("# window_title_position: bottom, top, hidden\n");
-    sb.push_str("# theme: color theme name (e.g. dracula, nord); empty for terminal colors\n");
+    sb.push_str("# theme: color theme name (e.g. dracula, nord); empty for terminal colors;\n");
+    sb.push_str("#        'auto' detects the host terminal's light/dark preference and picks\n");
+    sb.push_str("#        between theme_auto_dark and theme_auto_light.\n");
+    sb.push_str("# theme_auto_dark: theme used by 'auto' when the terminal is dark (default catppuccin-mocha)\n");
+    sb.push_str("# theme_auto_light: theme used by 'auto' when the terminal is light (default catppuccin-latte)\n");
     sb.push_str("# ============================================================================\n\n");
 
     sb.push_str("# ============================================================================\n");

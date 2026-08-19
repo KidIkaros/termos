@@ -25,6 +25,19 @@ impl Rgb {
         let b = u8::from_str_radix(&s[4..6], 16).ok()?;
         Some(Rgb(r, g, b))
     }
+
+    /// WCAG-style relative luminance in `[0, 1]`.
+    pub fn luminance(&self) -> f64 {
+        let lin = |c: u8| {
+            let c = f64::from(c) / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(self.0) + 0.7152 * lin(self.1) + 0.0722 * lin(self.2)
+    }
 }
 
 /// A terminal theme: 16 ANSI palette colors plus fg/bg/cursor.
@@ -380,6 +393,12 @@ impl Theme {
         ];
         names.sort();
         names
+    }
+
+    /// Whether this theme's background reads as light (for `theme = "auto"`
+    /// pairing and picker annotations).
+    pub fn is_light(&self) -> bool {
+        self.background.luminance() > 0.5
     }
 
     /// Convert this theme's ANSI palette to `vt::Color` values.

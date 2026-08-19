@@ -1687,6 +1687,15 @@ fn render_theme_picker_overlay(os: &Os, buf: &mut Buffer, area: TuiRect) {
                 buf[(nx, line_y)].set_char(*ch);
             }
         }
+        // Light/dark marker between the name and swatch.
+        let light = crate::config::theme::Theme::built_in(name)
+            .map(|t| t.is_light())
+            .unwrap_or(false);
+        let marker = if light { "\u{2600}" } else { "\u{263e}" }; // ☀ / ☾
+        let mx = rect.x + 4 + max_name as u16 + 1;
+        if mx < rect.x + rect.width - 2 {
+            buf[(mx, line_y)].set_char(marker.chars().next().unwrap());
+        }
         // Draw swatch: 8 colored block characters.
         let swatch = crate::config::theme::Theme::built_in(name)
             .map(|t| t.swatch())

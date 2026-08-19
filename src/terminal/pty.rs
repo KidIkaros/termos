@@ -532,22 +532,42 @@ mod tests {
         let size = WinSize { cols: 80, rows: 24 };
         let wake = Box::new(|| {}) as Box<dyn Fn() + Send + 'static>;
         let w = Window::spawn("df", "Terminal", size, "/bin/bash", None, wake, &[]).unwrap();
-        // Wait for the shell prompt.
-        std::thread::sleep(Duration::from_millis(700));
+        // Wait until the shell has printed its prompt (its termios setup is
+        // done by then, so typed input is not flushed).
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let text = w.emulator.lock().unwrap().render_text();
+            if text.contains('$') || text.contains("#") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "shell prompt never appeared: {text:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
         // Write a command with spaces and a trailing CR, one byte at a time
         // (mimicking the web input loop which forwards key-by-key).
         for b in b"echo HELLO_WORLD\r" {
             w.write(&[*b]);
         }
-        std::thread::sleep(Duration::from_millis(1200));
-        let text = w.emulator.lock().unwrap().render_text();
+        // Poll until the command output settles.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut occurrences = 0;
+        while std::time::Instant::now() < deadline {
+            let text = w.emulator.lock().unwrap().render_text();
+            occurrences = text.matches("HELLO_WORLD").count();
+            if occurrences >= 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
         // The marker appears twice: once in the typed-line echo, once as the
         // command's output on its own line. A single occurrence means the
         // shell never executed the line.
-        let occurrences = text.matches("HELLO_WORLD").count();
         assert!(
             occurrences >= 2,
-            "expected echo + executed output, got {occurrences} occurrences: {text:?}"
+            "expected echo + executed output, got {occurrences} occurrences"
         );
     }
 

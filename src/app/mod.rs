@@ -84,6 +84,7 @@ pub enum Command {
     SwitchWorkspace(i32),
     Quit,
     Theme,
+    ThemeDetect,
     Settings,
     // Extended commands for category-aware palette.
     FocusLeft,
@@ -158,6 +159,7 @@ impl Command {
         }
         cmds.push(Command::Quit);
         cmds.push(Command::Theme);
+        cmds.push(Command::ThemeDetect);
         cmds
     }
 
@@ -176,6 +178,7 @@ impl Command {
             Command::SwitchWorkspace(i) => format!("Switch to workspace {i}"),
             Command::Quit => "Quit".into(),
             Command::Theme => "Theme picker".into(),
+            Command::ThemeDetect => "Re-detect light/dark theme".into(),
             Command::Settings => "Settings".into(),
             Command::FocusLeft => "Focus left".into(),
             Command::FocusRight => "Focus right".into(),
@@ -219,8 +222,8 @@ impl Command {
             Command::Scrollback | Command::CopyMode | Command::OpenBrowser
             | Command::OpenAggregate => "View",
             Command::SwitchWorkspace(_) | Command::WorkspaceSwitcher => "Workspace",
-            Command::Settings | Command::Theme | Command::AccentPicker
-            | Command::ToggleSidebar => "Settings",
+            Command::Settings | Command::Theme | Command::ThemeDetect
+            | Command::AccentPicker | Command::ToggleSidebar => "Settings",
             Command::CommandPalette | Command::SessionSwitcher | Command::LayoutSwitcher
             | Command::TapeManager | Command::Help => "Open",
             Command::Quit | Command::Detach => "Session",
@@ -381,6 +384,8 @@ pub struct Os {
     pub config: UserConfig,
     /// The active theme.
     pub theme: Option<Theme>,
+    /// Whether `theme = "auto"` is active (host-terminal light/dark detection).
+    pub auto_theme: bool,
     /// Terminal dimensions in cells.
     pub width: i32,
     pub height: i32,
@@ -753,8 +758,20 @@ impl Os {
         for i in 1..=9 {
             workspaces.insert(i, Workspace::new(i));
         }
+        let auto_theme = config.appearance.theme == "auto";
         let theme = if config.appearance.theme.is_empty() {
             None
+        } else if auto_theme {
+            // Env-only resolution: no terminal I/O here (daemon/web/ssh
+            // contexts have no host terminal). The TUI re-detects live via
+            // `redetect_theme()` once raw mode is active.
+            let mode = crate::util::theme_detect::detect_from_env();
+            let name = crate::util::theme_detect::resolve_auto_theme_name(
+                mode,
+                &config.appearance.theme_auto_light,
+                &config.appearance.theme_auto_dark,
+            );
+            Theme::built_in(&name)
         } else {
             Theme::built_in(&config.appearance.theme)
         };
@@ -776,6 +793,7 @@ impl Os {
             current_workspace: 1,
             config,
             theme,
+            auto_theme,
             width: 80,
             height: 24,
             shared_borders,
@@ -3673,6 +3691,7 @@ impl Os {
                 self.show_quit_confirmation = true;
             }
             Command::Theme => self.open_theme_picker(),
+            Command::ThemeDetect => self.redetect_theme(),
             Command::Settings => self.open_settings(),
             Command::FocusLeft => {
                 let _ = self.focus_direction("left");
@@ -5426,6 +5445,38 @@ impl Os {
 
     pub fn close_theme_picker(&mut self) {
         self.theme_picker_open = false;
+    }
+
+    /// Re-run host-terminal light/dark detection and swap the theme in place.
+    ///
+    /// Only acts when `theme = "auto"` is configured, and should be called
+    /// with the terminal in raw mode so the OSC 11 reply is delivered. Leaves
+    /// `config.appearance.theme` as `"auto"` so the next launch re-detects.
+    pub fn redetect_theme(&mut self) {
+        if !self.auto_theme {
+            return;
+        }
+        let mode = crate::util::theme_detect::detect_terminal_mode();
+        let name = crate::util::theme_detect::resolve_auto_theme_name(
+            mode,
+            &self.config.appearance.theme_auto_light,
+            &self.config.appearance.theme_auto_dark,
+        );
+        let applied = Theme::built_in(&name);
+        let unchanged = matches!(
+            (&self.theme, &applied),
+            (Some(cur), Some(next)) if cur.name == next.name
+        );
+        if unchanged {
+            return;
+        }
+        let mode_name = match mode {
+            Some(crate::util::theme_detect::ThemeMode::Light) => "light",
+            _ => "dark",
+        };
+        self.theme = applied;
+        self.notify(format!("theme: {name} ({mode_name} detected)"), "info");
+        self.log_action(&format!("theme_detect {name}"));
     }
 
     pub fn theme_picker_move(&mut self, delta: i32) {
@@ -7974,3 +8025,94 @@ mod browser_tests {
     }
 
 }
+
+#[cfg(test)]
+mod auto_theme_tests {
+    use super::*;
+
+    // The three env-resolution tests mutate COLORFGBG, which is process
+    // global — serialize them so they don't race each other.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn config_with_auto() -> UserConfig {
+        let mut cfg = UserConfig::default_config();
+        cfg.appearance.theme = "auto".into();
+        cfg.appearance.theme_auto_dark = "catppuccin-mocha".into();
+        cfg.appearance.theme_auto_light = "catppuccin-latte".into();
+        cfg
+    }
+
+    #[test]
+    fn auto_sets_flag_and_resolves_from_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // COLORFGBG "0;15" = black fg on white bg → light host terminal.
+        let prev = std::env::var("COLORFGBG").ok();
+        std::env::set_var("COLORFGBG", "0;15");
+        let os = Os::new(config_with_auto());
+        if let Some(p) = prev {
+            std::env::set_var("COLORFGBG", p);
+        } else {
+            std::env::remove_var("COLORFGBG");
+        }
+        assert!(os.auto_theme);
+        let name = os.theme.as_ref().expect("auto resolved a theme").name.clone();
+        assert_eq!(name, "catppuccin-latte");
+    }
+
+    #[test]
+    fn auto_dark_env_resolves_dark() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var("COLORFGBG").ok();
+        std::env::set_var("COLORFGBG", "7;0");
+        let os = Os::new(config_with_auto());
+        if let Some(p) = prev {
+            std::env::set_var("COLORFGBG", p);
+        } else {
+            std::env::remove_var("COLORFGBG");
+        }
+        let name = os.theme.as_ref().expect("auto resolved a theme").name.clone();
+        assert_eq!(name, "catppuccin-mocha");
+    }
+
+    #[test]
+    fn auto_without_env_falls_back_to_dark() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var("COLORFGBG").ok();
+        std::env::remove_var("COLORFGBG");
+        let os = Os::new(config_with_auto());
+        if let Some(p) = prev {
+            std::env::set_var("COLORFGBG", p);
+        }
+        let name = os.theme.as_ref().expect("auto resolved a theme").name.clone();
+        assert_eq!(name, "catppuccin-mocha");
+    }
+
+    #[test]
+    fn explicit_theme_is_not_auto() {
+        let mut cfg = UserConfig::default_config();
+        cfg.appearance.theme = "dracula".into();
+        let os = Os::new(cfg);
+        assert!(!os.auto_theme);
+        assert_eq!(os.theme.as_ref().unwrap().name, "dracula");
+    }
+
+    #[test]
+    fn redetect_noops_when_not_auto() {
+        let mut cfg = UserConfig::default_config();
+        cfg.appearance.theme = "dracula".into();
+        let mut os = Os::new(cfg);
+        let before = os.theme.as_ref().unwrap().name.clone();
+        os.redetect_theme();
+        assert_eq!(os.theme.as_ref().unwrap().name, before);
+        assert_eq!(os.config.appearance.theme, "dracula");
+    }
+
+    #[test]
+    fn palette_theme_detect_command_dispatches() {
+        let mut os = Os::new(config_with_auto());
+        // redetect with no terminal signal keeps a valid theme and logs.
+        os.run_command(Command::ThemeDetect);
+        assert!(os.theme.is_some());
+    }
+}
+

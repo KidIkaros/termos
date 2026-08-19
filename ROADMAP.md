@@ -201,14 +201,22 @@ read-only tokens, and HTTPS attach. TermOS's web mode
 (`src/network/web.rs`) is an unauthenticated single-owner frontend — this
 phase covers the collaboration quadrant.
 
-- ⬜ Token auth for the web server (`--network web --token …`); no auth when
-  bound to localhost only.
-- ⬜ Read-only observer mode: viewers see output and scrollback but cannot
-  send input (covers SSH too — read-only attach).
-- ⬜ Persistent session URLs (e.g., `http://host:port/<session>`), with a
-  session picker page when none is specified.
-- ⬜ Optional HTTPS via existing auto-TLS machinery from the parity campaign.
-- ⬜ Tests: auth rejection, read-only enforcement (input frames dropped).
+- ✅ Token auth for the web server (`--network web --token …`); no auth when
+  bound to localhost only. The terminal page forwards the token onto the
+  WebSocket upgrade URL so the login flow connects end-to-end.
+- ✅ Read-only observer mode: viewers see output and scrollback but cannot
+  send input (covers SSH too — read-only attach). Input is dropped at the
+  per-client `Os` gate.
+- ✅ Persistent session URLs (e.g., `http://host:port/<session>`), with a
+  session picker page when none is specified. The web server attaches to
+  daemon sessions: `/` lists sessions + a new-session form, `/new` creates
+  one and redirects, `/ws/<session>` streams it (daemon auto-started by the
+  web command).
+- ✅ Optional HTTPS via existing auto-TLS machinery from the parity campaign
+  (explicit certs, auto-TLS with persisted self-signed cert, plaintext
+  refused off localhost).
+- ✅ Tests: auth rejection (HTTP + WS), read-only enforcement (input frames
+  dropped), picker listing/creation, daemon-attach E2E typing over WS.
 
 ## Phase 12 — Light/dark theme detection (Tier 2)
 
@@ -216,10 +224,20 @@ tmux 3.8 added built-in light/dark themes with terminal-theme detection.
 TermOS has 21 themes + a swatch picker (`src/config/theme.rs`) but no auto
 switching.
 
-- ⬜ Query the host terminal's light/dark preference (CSI 11 / OSC 4 fallback)
-  and expose it in config as `theme = "auto"` (or per-workspace).
-- ⬜ Respect the setting dynamically: theme swap on terminal change.
-- ⬜ Tests: detection parsing + swap behavior.
+- ✅ Query the host terminal's light/dark preference (OSC 11 query with a
+  `COLORFGBG` env fallback) and expose it in config as `theme = "auto"`
+  (`src/util/theme_detect.rs`). Which themes `auto` picks is configurable via
+  `theme_auto_dark` / `theme_auto_light` (defaults: catppuccin-mocha/latte).
+- ✅ Respect the setting dynamically: the TUI re-queries the live terminal
+  after entering raw mode at startup, and the palette command
+  "Re-detect light/dark theme" re-runs detection on demand.
+- ✅ Tests: OSC 11 parsing (xterm/hex/ST/BEL/fragmented), luminance
+  classification, COLORFGBG parsing, auto resolution fallbacks, config
+  backward-compat, and Os-level auto resolution + redetect behavior.
+- ✅ End-to-end: `tests/theme_detect_osc.rs` runs the real binary in a PTY,
+  answers the startup query light and the re-detect query dark (palette
+  driven via real keystrokes), and asserts the dockbar swaps
+  latte → mocha with the "dark detected" notification.
 
 ## Phase 13 — Command panes (Tier 2: lightweight automation)
 

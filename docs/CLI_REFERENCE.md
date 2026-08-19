@@ -152,7 +152,8 @@ Run the SSH server. Each connection gets a fresh TermOS session.
 
 ### `tuios web [--host <HOST>] [--port <PORT>] [--token <TOKEN>] [--read-only] [--max-connections N] [--touch auto|on|off] [--cert <PEM> --key <PEM> | --auto-tls]`
 
-Run the web terminal server (xterm.js + WebSocket).
+Run the web terminal server (xterm.js + WebSocket). The web server attaches
+clients to daemon sessions, so the daemon is auto-started on launch.
 
 - `--host` (default `127.0.0.1`), `--port` (default `8080`)
 - `--token <TOKEN>`: require an access token. Loopback binds without a token
@@ -167,6 +168,19 @@ Run the web terminal server (xterm.js + WebSocket).
 
 TLS is required for any non-loopback bind (`check_transport_security` refuses
 plain HTTP off localhost).
+
+**Routes:**
+
+- `GET /` — session picker: lists daemon sessions (name, window count,
+  attached viewers) as attach links, with a "New session" form. `?error=`
+  shows a creation/validation error.
+- `POST /new` — create a daemon session (name from the form) and redirect to
+  `/name`.
+- `GET /<session>` — the terminal page for that session; the page connects to
+  `/ws/<session>`.
+- `GET /ws/<session>` — WebSocket attach endpoint: streams the session's
+  rendered frames and forwards input (unless `--read-only`). `?token=` is
+  required when the server is token-gated.
 
 ## Environment
 

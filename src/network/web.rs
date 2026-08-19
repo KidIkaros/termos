@@ -7,15 +7,17 @@
 //! JSON frames: `{ "type": "input", "data": "..." }` and
 //! `{ "type": "output", "data": "..." }`.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
-use axum::response::{Html, IntoResponse, Response};
+use axum::extract::{Path, Query, State};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::Router;
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use futures_util::{SinkExt, StreamExt};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::Terminal;
@@ -24,6 +26,10 @@ use tokio::sync::Mutex;
 use crate::app::render::render;
 use crate::app::Os;
 use crate::config::UserConfig;
+use crate::session::protocol::Message as DaemonMessage;
+use crate::session::remote::{RemoteEvent, RemoteSink};
+use crate::session::DaemonClient;
+use crate::web::{html_escape, url_path_escape, SessionPickerEntry};
 
 /// The static HTML page with xterm.js that connects to the WebSocket.
 const INDEX_HTML: &str = include_str!("web/index.html");
@@ -42,6 +48,82 @@ justify-content:center;height:100vh;margin:0\">\
 style=\"padding:8px;width:16em;font-size:14px\">\
 <button type=\"submit\" style=\"padding:8px 14px;margin-left:6px\">Connect</button>\
 </form></body></html>";
+
+/// The web session picker page: lists daemon sessions as attach links and
+/// offers a "new session" form. Rendered server-side so it works without any
+/// client-side logic beyond link navigation.
+const PICKER_HTML: &str = "<!DOCTYPE html>\
+<html><head><meta charset=\"utf-8\"><title>TermOS — sessions</title>\
+<style>\
+body{font-family:ui-monospace,Menlo,Consolas,monospace;background:#111;color:#ddd;\
+margin:0;display:flex;justify-content:center;padding:48px 16px}\
+.card{width:560px}\
+h1{font-size:20px;margin:0 0 4px;color:#fff}\n\
+.sub{color:#888;margin:0 0 24px;font-size:13px}\n\
+ul{list-style:none;padding:0;margin:0 0 24px}\n\
+li{background:#1a1a1a;border:1px solid #2c2c2c;border-radius:8px;margin-bottom:8px;\
+padding:12px 14px;display:flex;align-items:center;gap:10px}\n\
+li a{color:#4cc38a;text-decoration:none;font-size:15px;font-weight:600;flex:1}\n\
+li a:hover{text-decoration:underline}\n\
+.meta{color:#888;font-size:12px}\n\
+.badge{font-size:11px;padding:2px 8px;border-radius:99px}\n\
+.attached{background:#1e3a2f;color:#4cc38a}\n\
+.detached{background:#262626;color:#999}\n\
+.empty{color:#888;border:1px dashed #333;border-radius:8px;padding:24px;\
+text-align:center;margin:0 0 24px}\n\
+form{display:flex;gap:8px}\n\
+input{flex:1;background:#1a1a1a;border:1px solid #333;color:#eee;border-radius:6px;\
+padding:10px 12px;font-size:14px;font-family:inherit}\n\
+button{background:#4cc38a;color:#0b1f16;border:0;border-radius:6px;padding:10px 18px;\
+font-size:14px;font-weight:700;cursor:pointer;font-family:inherit}\n\
+.error{color:#ff7b72;font-size:13px;margin:0 0 16px}\n\
+</style></head>\
+<body><div class=\"card\">\
+<h1>TermOS</h1>\
+<p class=\"sub\">Pick a session to attach, or create a new one.</p>\
+{error}\
+<ul>{rows}</ul>\
+<form action=\"/new\" method=\"get\"><input name=\"name\" placeholder=\"new session name\" autofocus>\
+<button>New session</button></form>\
+<p class=\"sub\" style=\"margin-top:16px\">Sessions are daemon sessions — start one with <code>termos daemon</code>.</p>\
+</div></body></html>";
+
+/// Render the session picker page from daemon session info.
+fn render_picker(
+    sessions: &[SessionPickerEntry],
+    error: Option<&str>,
+) -> String {
+    let error = error
+        .map(|e| format!("<p class=\"error\">{}</p>", html_escape(e)))
+        .unwrap_or_default();
+    let rows = if sessions.is_empty() {
+        "<p class=\"empty\">No sessions yet — create one below.</p>".to_string()
+    } else {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        sessions
+            .iter()
+            .map(|s| {
+                let age = now.saturating_sub(s.created_at);
+                let attached = if s.attached { "attached" } else { "detached" };
+                let cls = if s.attached { "attached" } else { "detached" };
+                format!(
+                    "<li><a href=\"/{href}\">{name}</a>\
+                     <span class=\"meta\">{} window{s} · created {age}s ago</span>\
+                     <span class=\"badge {cls}\">{attached}</span></li>",
+                    s.window_count,
+                    s = if s.window_count == 1 { "" } else { "s" },
+                    href = url_path_escape(&s.name),
+                    name = html_escape(&s.name),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    PICKER_HTML.replace("{error}", &error).replace("{rows}", &rows)
+}
 
 /// Web server state shared across connections.
 #[derive(Clone)]
@@ -135,8 +217,11 @@ pub async fn run_web_server(
     };
 
     let app = Router::new()
-        .route("/", get(index))
-        .route("/ws", get(ws_handler))
+        .route("/", get(index_picker))
+        .route("/new", get(new_session_page))
+        .route("/:session", get(index_session))
+        .route("/ws", get(ws_local))
+        .route("/ws/:session", get(ws_attach))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -244,14 +329,80 @@ pub(crate) fn auth_passes(state: &WebServerState, uri: &axum::http::Uri) -> bool
         || crate::web::token_is_valid(state.token.as_deref(), query_token(uri).as_deref())
 }
 
-async fn index(State(state): State<WebServerState>, uri: axum::http::Uri) -> Response {
+/// The session picker: `/` lists daemon sessions as attach links, or shows a
+/// "no sessions / daemon unavailable" state with a create form.
+async fn index_picker(State(state): State<WebServerState>, uri: axum::http::Uri) -> Response {
     if !auth_passes(&state, &uri) {
         return (axum::http::StatusCode::UNAUTHORIZED, Html(LOGIN_HTML)).into_response();
+    }
+    let (sessions, error) = match list_daemon_sessions() {
+        Ok(entries) => (entries, None),
+        Err(e) => (Vec::new(), Some(format!("cannot reach the daemon: {e}"))),
+    };
+    Html(render_picker(&sessions, error.as_deref())).into_response()
+}
+
+/// The terminal page for a named session (`/<session>`): the same xterm.js
+/// frontend as before, which derives the session from the URL path and opens
+/// `/ws/<session>`.
+async fn index_session(
+    State(state): State<WebServerState>,
+    uri: axum::http::Uri,
+    Path(session): Path<String>,
+) -> Response {
+    if !auth_passes(&state, &uri) {
+        return (axum::http::StatusCode::UNAUTHORIZED, Html(LOGIN_HTML)).into_response();
+    }
+    if session.is_empty() || session == "." || session == ".." {
+        return Redirect::to("/").into_response();
     }
     Html(INDEX_HTML).into_response()
 }
 
-async fn ws_handler(
+/// Create a session and redirect to its terminal page (`GET /new?name=X`).
+async fn new_session_page(
+    State(state): State<WebServerState>,
+    uri: axum::http::Uri,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if !auth_passes(&state, &uri) {
+        return (axum::http::StatusCode::UNAUTHORIZED, Html(LOGIN_HTML)).into_response();
+    }
+    let name = params.get("name").cloned().unwrap_or_default();
+    if let Err(e) = crate::session::validate_session_name(&name) {
+        let (sessions, error) = match list_daemon_sessions() {
+            Ok(entries) => (entries, Some(format!("cannot create session: {e}"))),
+            Err(de) => (Vec::new(), Some(format!("cannot reach the daemon: {de}"))),
+        };
+        return Html(render_picker(&sessions, error.as_deref())).into_response();
+    }
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    match DaemonClient::connect().and_then(|c| c.new_session(&name, &shell)) {
+        Ok(_) => Redirect::to(&format!("/{}", url_path_escape(&name))).into_response(),
+        Err(e) => {
+            let (sessions, error) = match list_daemon_sessions() {
+                Ok(entries) => (entries, Some(format!("cannot create session: {e}"))),
+                Err(de) => (Vec::new(), Some(format!("cannot reach the daemon: {de}"))),
+            };
+            Html(render_picker(&sessions, error.as_deref())).into_response()
+        }
+    }
+}
+
+/// List daemon sessions as picker entries.
+fn list_daemon_sessions() -> Result<Vec<SessionPickerEntry>, String> {
+    let client = DaemonClient::connect().map_err(|e| e.to_string())?;
+    let sessions = client.list().map_err(|e| e.to_string())?;
+    let entries: Vec<(String, usize, bool, u64)> = sessions
+        .iter()
+        .map(|s| (s.name.clone(), s.windows, s.attached, s.created_at))
+        .collect();
+    Ok(crate::web::build_session_picker(&entries))
+}
+
+/// The `/ws` upgrade: a fresh local ephemeral session (backwards compatible
+/// with direct WebSocket connects).
+async fn ws_local(
     ws: WebSocketUpgrade,
     State(state): State<WebServerState>,
     headers: axum::http::HeaderMap,
@@ -260,7 +411,27 @@ async fn ws_handler(
     if !auth_passes(&state, &uri) {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
-    let touch = crate::web::resolve_touch(
+    let touch = resolve_touch(&state, &headers);
+    ws.on_upgrade(move |socket| handle_ws(socket, state, touch, None))
+}
+
+/// The `/ws/<session>` upgrade: attach to a daemon session.
+async fn ws_attach(
+    ws: WebSocketUpgrade,
+    State(state): State<WebServerState>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+    Path(session): Path<String>,
+) -> Response {
+    if !auth_passes(&state, &uri) {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+    let touch = resolve_touch(&state, &headers);
+    ws.on_upgrade(move |socket| handle_ws(socket, state, touch, Some(session)))
+}
+
+fn resolve_touch(state: &WebServerState, headers: &axum::http::HeaderMap) -> bool {
+    crate::web::resolve_touch(
         state.touch_mode,
         headers
             .get("sec-ch-ua-mobile")
@@ -268,8 +439,7 @@ async fn ws_handler(
         headers
             .get(axum::http::header::USER_AGENT)
             .and_then(|v| v.to_str().ok()),
-    );
-    ws.on_upgrade(move |socket| handle_ws(socket, state, touch))
+    )
 }
 
 /// Handle a WebSocket connection: spawn a TermOS session and bridge I/O.
@@ -277,7 +447,126 @@ async fn ws_handler(
 /// The render loop draws Os state to a `CrosstermBackend<Vec<u8>>` and sends
 /// the ANSI escape sequences as JSON frames. Input from the WebSocket is
 /// parsed into crossterm `KeyEvent`s and forwarded to the Os.
-async fn handle_ws(socket: WebSocket, state: WebServerState, touch: bool) {
+/// The daemon side of an attached web session: the socket client plus the
+/// writer/reader thread wiring and the per-window output registry.
+#[derive(Clone)]
+struct DaemonWire {
+    /// The daemon connection (used for the final `Detach` on disconnect).
+    client: DaemonClient,
+    /// All daemon-bound messages (input/resize/control) stay ordered through
+    /// one channel drained by the writer thread.
+    msg_tx: Sender<DaemonMessage>,
+    /// Window id -> output channel feeding each `Window::remote` emulator.
+    outputs: Arc<std::sync::Mutex<HashMap<String, Sender<Vec<u8>>>>>,
+    /// Window add/close/error events from the reader thread, drained each
+    /// frame by the render loop.
+    events: Arc<Receiver<RemoteEvent>>,
+}
+
+/// Attach `os` to a daemon session: connect, subscribe, spawn the writer and
+/// reader threads, and register every session window as a `Window::remote`.
+fn wire_daemon_attach(os: &mut Os, session: &str) -> Result<DaemonWire, String> {
+    let client = DaemonClient::connect().map_err(|e| format!("cannot reach the daemon: {e}"))?;
+    let windows = client
+        .attach(session)
+        .map_err(|e| format!("cannot attach to session '{session}': {e}"))?;
+    let sessions = client.list().unwrap_or_default();
+
+    os.remote_session = Some(session.to_string());
+    os.remote_sessions = sessions;
+    os.fire_attached();
+
+    let (msg_tx, msg_rx) = unbounded::<DaemonMessage>();
+    os.remote_commands = Some(msg_tx.clone());
+    let (event_tx, event_rx) = unbounded::<RemoteEvent>();
+    let outputs: Arc<std::sync::Mutex<HashMap<String, Sender<Vec<u8>>>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+    // Writer thread: drain msg_tx and write frames to the daemon.
+    {
+        let client = client.clone();
+        std::thread::spawn(move || {
+            while let Ok(msg) = msg_rx.recv() {
+                if client.send(&msg).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    // Reader thread: route PTY output to the window emulators and window
+    // lifecycle events to the render loop.
+    {
+        let client = client.clone();
+        let outputs = Arc::clone(&outputs);
+        let events = event_tx.clone();
+        std::thread::spawn(move || {
+            let Ok(mut reader) = client.reader() else {
+                return;
+            };
+            while let Ok(msg) = crate::session::protocol::read_message(&mut reader) {
+                match msg {
+                    DaemonMessage::PtyOutput { window, data } => {
+                        if let Some(tx) = outputs
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get(&window)
+                            .cloned()
+                        {
+                            let _ = tx.send(data);
+                        }
+                    }
+                    DaemonMessage::PtyClosed { window } => {
+                        outputs
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&window);
+                        let _ = events.send(RemoteEvent::WindowClosed(window));
+                    }
+                    DaemonMessage::WindowAdded { window } => {
+                        let _ = events.send(RemoteEvent::WindowAdded(window));
+                    }
+                    DaemonMessage::WindowClosed { window } => {
+                        let _ = events.send(RemoteEvent::WindowClosed(window));
+                    }
+                    DaemonMessage::Error { message } => {
+                        let _ = events.send(RemoteEvent::Error(message));
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    // Register the session's windows as remote panes.
+    for info in &windows {
+        let (out_tx, out_rx) = unbounded::<Vec<u8>>();
+        outputs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(info.id.clone(), out_tx);
+        let sink = RemoteSink::new(info.id.clone(), msg_tx.clone());
+        os.add_remote_window(info.clone(), Box::new(sink), out_rx, None);
+    }
+    if let Some(first) = windows.first() {
+        os.current_workspace = first.workspace.clamp(1, 9);
+        os.focus_first_window();
+    }
+
+    Ok(DaemonWire {
+        client,
+        msg_tx,
+        outputs,
+        events: Arc::new(event_rx),
+    })
+}
+
+async fn handle_ws(
+    mut socket: WebSocket,
+    state: WebServerState,
+    touch: bool,
+    session: Option<String>,
+) {
     // Enforce the connection limit: a rejected socket is simply dropped.
     if !state.limiter.acquire() {
         log::warn!("web: connection limit reached, rejecting");
@@ -299,11 +588,26 @@ async fn handle_ws(socket: WebSocket, state: WebServerState, touch: bool) {
         os.height = 24;
     }
 
-    // Spawn a shell.
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let wake = Box::new(|| {}) as Box<dyn Fn() + Send + 'static>;
-    if let Err(e) = os.spawn_window(&shell, wake) {
-        log::warn!("web: failed to spawn shell: {e}");
+    // Wire the session: a named request attaches to a daemon session;
+    // otherwise spawn a fresh local shell (backwards compatible).
+    let mut daemon_wire: Option<DaemonWire> = None;
+    match session.filter(|s| !s.is_empty()) {
+        Some(name) => match wire_daemon_attach(&mut os, &name) {
+            Ok(wire) => daemon_wire = Some(wire),
+            Err(e) => {
+                let msg = serde_json::json!({ "type": "error", "data": e });
+                let _ = socket.send(Message::Text(msg.to_string())).await;
+                let _ = socket.close().await;
+                return;
+            }
+        },
+        None => {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+            let wake = Box::new(|| {}) as Box<dyn Fn() + Send + 'static>;
+            if let Err(e) = os.spawn_window(&shell, wake) {
+                log::warn!("web: failed to spawn shell: {e}");
+            }
+        }
     }
 
     let os = Arc::new(Mutex::new(os));
@@ -311,6 +615,7 @@ async fn handle_ws(socket: WebSocket, state: WebServerState, touch: bool) {
 
     // Render loop: draws Os state → ANSI → WebSocket JSON frames.
     let os_render = os.clone();
+    let wire_render = daemon_wire.clone();
     let render_handle = tokio::spawn(async move {
         let frame_budget = Duration::from_millis(16); // ~60 FPS
         let mut last_render = Instant::now();
@@ -327,6 +632,42 @@ async fn handle_ws(socket: WebSocket, state: WebServerState, touch: bool) {
             buf.clear();
             {
                 let mut os = os_render.lock().await;
+
+                // Apply daemon window events (new/closed panes) before the
+                // frame so the layout is current.
+                if let Some(wire) = &wire_render {
+                    while let Ok(ev) = wire.events.try_recv() {
+                        match ev {
+                            RemoteEvent::WindowAdded(info) => {
+                                let (out_tx, out_rx) = unbounded::<Vec<u8>>();
+                                wire
+                                    .outputs
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .insert(info.id.clone(), out_tx);
+                                let sink = RemoteSink::new(info.id.clone(), wire.msg_tx.clone());
+                                let direction = os.pending_split.take();
+                                os.add_remote_window(info, Box::new(sink), out_rx, direction);
+                                os.notify("window added", "info");
+                            }
+                            RemoteEvent::WindowClosed(id) => {
+                                if let Some(index) = os.windows.iter().position(|w| w.id == id) {
+                                    os.remove_window(index);
+                                }
+                                wire
+                                    .outputs
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .remove(&id);
+                                os.notify("window closed", "info");
+                            }
+                            RemoteEvent::Error(message) => {
+                                log::warn!("web: daemon error: {message}");
+                            }
+                            _ => {}
+                        }
+                    }
+                }
 
                 // Tick the Os state machine.
                 os.tick_agent_alerts();
@@ -422,6 +763,12 @@ async fn handle_ws(socket: WebSocket, state: WebServerState, touch: bool) {
     tokio::select! {
         _ = render_handle => {},
         _ = input_handle => {},
+    }
+
+    // Detach from the daemon session (best effort) now that the client is
+    // gone; the reader/writer threads exit when the socket closes.
+    if let Some(wire) = daemon_wire {
+        let _ = wire.client.send(&DaemonMessage::Detach);
     }
 }
 
@@ -697,24 +1044,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn index_open_serves_page() {
+    async fn index_picker_open_serves_page() {
         let s = state_with(None, false);
-        let resp = index(State(s), "/".parse().unwrap()).await;
+        let resp = index_picker(State(s), "/".parse().unwrap()).await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
     }
 
     #[tokio::test]
-    async fn index_gated_rejects_without_token() {
+    async fn index_picker_gated_rejects_without_token() {
         let s = state_with(Some("secret"), true);
-        let resp = index(State(s), "/".parse().unwrap()).await;
+        let resp = index_picker(State(s), "/".parse().unwrap()).await;
         assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn index_gated_accepts_valid_token() {
+    async fn index_picker_gated_accepts_valid_token() {
         let s = state_with(Some("secret"), true);
-        let resp = index(State(s), "/?token=secret".parse().unwrap()).await;
+        let resp = index_picker(State(s), "/?token=secret".parse().unwrap()).await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn index_session_open_serves_terminal_page() {
+        let s = state_with(None, false);
+        let resp = index_session(State(s), "/dev".parse().unwrap(), Path("dev".to_string())).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    }
+
+    #[test]
+    fn render_picker_lists_sessions() {
+        let entries = vec![
+            SessionPickerEntry {
+                name: "dev".into(),
+                window_count: 2,
+                attached: true,
+                created_at: 1000,
+            },
+            SessionPickerEntry {
+                name: "a&b".into(),
+                window_count: 1,
+                attached: false,
+                created_at: 2000,
+            },
+        ];
+        let html = render_picker(&entries, None);
+        assert!(html.contains("href=\"/dev\""));
+        assert!(html.contains(">dev</a>"));
+        assert!(html.contains("href=\"/a%26b\""));
+        assert!(html.contains("a&amp;b"));
+        assert!(html.contains("2 windows"));
+        assert!(html.contains("attached"));
+        assert!(html.contains("detached"));
+    }
+
+    #[test]
+    fn render_picker_empty_and_error() {
+        assert!(render_picker(&[], None).contains("No sessions yet"));
+        assert!(render_picker(&[], Some("boom")).contains("boom"));
+        assert!(render_picker(&[], Some("<script>")).contains("&lt;script&gt;"));
     }
 
     #[test]
