@@ -17,6 +17,7 @@ pub mod interaction;
 pub mod layout_templates;
 pub mod msg;
 pub mod overlay_hit;
+pub mod overlay_mouse;
 pub mod render;
 pub mod sidebar;
 pub mod update;
@@ -420,6 +421,14 @@ pub struct Os {
     pub switcher_selected: usize,
     /// Whether vim-like scrollback navigation is active.
     pub scrollback_mode: bool,
+    /// Overlay hit geometry recorded each frame for mouse routing.
+    pub overlay_hits: Vec<overlay_hit::OverlayPanelHit>,
+    /// Overlay z-order stack (frontmost is last).
+    pub overlay_z_order: Vec<String>,
+    /// Overlay drag offsets (kind → (dx, dy)).
+    pub overlay_offsets: overlay_hit::OverlayOffsets,
+    /// In-progress overlay drag state.
+    pub overlay_drag: overlay_hit::OverlayDragState,
     /// Copy-mode cursor position (content coordinates), used while
     /// `scrollback_mode` is active.
     pub copy_cursor_line: usize,
@@ -752,6 +761,10 @@ impl Os {
             switcher_query: String::new(),
             switcher_selected: 0,
             scrollback_mode: false,
+            overlay_hits: Vec::new(),
+            overlay_z_order: Vec::new(),
+            overlay_offsets: Vec::new(),
+            overlay_drag: overlay_hit::OverlayDragState::default(),
             copy_cursor_line: 0,
             copy_cursor_col: 0,
             copy_visual: false,

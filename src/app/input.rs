@@ -1511,6 +1511,12 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
 
     match mouse.kind {
         MouseEventKind::ScrollUp => {
+            // Overlay wheel routing takes precedence.
+            if super::overlay_mouse::overlay_active(os)
+                && super::overlay_mouse::overlay_mouse_wheel(os, column, row, true)
+            {
+                return true;
+            }
             let step = os.config.appearance.scroll_lines.max(1);
             if let Some(idx) = os.window_at(column, row) {
                 if forward_wheel_to_app(os, idx, mouse, -step) {
@@ -1521,6 +1527,12 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             true
         }
         MouseEventKind::ScrollDown => {
+            // Overlay wheel routing takes precedence.
+            if super::overlay_mouse::overlay_active(os)
+                && super::overlay_mouse::overlay_mouse_wheel(os, column, row, false)
+            {
+                return true;
+            }
             let step = os.config.appearance.scroll_lines.max(1);
             if let Some(idx) = os.window_at(column, row) {
                 if forward_wheel_to_app(os, idx, mouse, step) {
@@ -1531,6 +1543,13 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             true
         }
         MouseEventKind::Down(MouseButton::Right) => {
+            // Overlay click routing takes precedence.
+            if super::overlay_mouse::overlay_active(os) {
+                let (consumed, _) = super::overlay_mouse::overlay_mouse_click(os, column, row, true);
+                if consumed {
+                    return true;
+                }
+            }
             // A right-click anywhere dismisses any open menu first; a second
             // right-click opens the menu at the new position.
             if os.context_menu.is_some() {
@@ -1541,6 +1560,13 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             true
         }
         MouseEventKind::Down(MouseButton::Left) => {
+            // Overlay click routing takes precedence.
+            if super::overlay_mouse::overlay_active(os) {
+                let (consumed, _) = super::overlay_mouse::overlay_mouse_click(os, column, row, false);
+                if consumed {
+                    return true;
+                }
+            }
             // Check for border-drag resize first.
             if let Some((wid, edge)) = os.border_at(column, row) {
                 let pos = if edge.vertical() { column } else { row };
@@ -1585,6 +1611,11 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             true
         }
         MouseEventKind::Moved => {
+            // Overlay motion routing takes precedence.
+            if super::overlay_mouse::overlay_drag_active(os) {
+                super::overlay_mouse::overlay_mouse_motion(os, column, row);
+                return true;
+            }
             // Forward motion to the focused pane's application if it requested
             // all-motion or cell-motion tracking (DEC 1003/1002).
             if os.mode == Mode::Terminal {
@@ -1598,6 +1629,11 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             true
         }
         MouseEventKind::Drag(MouseButton::Left) => {
+            // Overlay drag routing takes precedence.
+            if super::overlay_mouse::overlay_drag_active(os) {
+                super::overlay_mouse::overlay_mouse_motion(os, column, row);
+                return true;
+            }
             // A drag cancels click-to-type and becomes a selection.
             if os.click_to_type.take().is_some() && os.selection.is_none() {
                 if let Some(idx) = os.window_at(column, row) {
@@ -1624,6 +1660,11 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
             true
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            // End overlay drag if active.
+            if super::overlay_mouse::overlay_drag_active(os) {
+                super::overlay_mouse::overlay_mouse_release(os);
+                return true;
+            }
             // End border-drag resize.
             if os.drag_resize.is_some() {
                 os.end_border_drag();
