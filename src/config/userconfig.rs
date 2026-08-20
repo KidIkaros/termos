@@ -505,8 +505,72 @@ impl UserConfig {
             notifications: NotificationsConfig::default(),
             tape: TapeConfig::default(),
             debug: DebugConfig::default(),
-            status_widgets: Vec::new(),
-            custom_actions: Vec::new(),
+            status_widgets: vec![
+                StatusWidgetConfig {
+                    name: "clock".into(),
+                    command: "date +'%H:%M'".into(),
+                    refresh_ms: 1000,
+                    alignment: "right".into(),
+                },
+                StatusWidgetConfig {
+                    name: "load".into(),
+                    command: "cat /proc/loadavg 2>/dev/null | cut -d' ' -f1-3".into(),
+                    refresh_ms: 5000,
+                    alignment: "right".into(),
+                },
+            ],
+            custom_actions: vec![
+                CustomActionConfig {
+                    name: "Git status".into(),
+                    command: "git status -s".into(),
+                    category: "Git".into(),
+                },
+                CustomActionConfig {
+                    name: "Git log (recent)".into(),
+                    command: "git log --oneline -15".into(),
+                    category: "Git".into(),
+                },
+                CustomActionConfig {
+                    name: "Git diff".into(),
+                    command: "git diff --stat".into(),
+                    category: "Git".into(),
+                },
+                CustomActionConfig {
+                    name: "Disk usage".into(),
+                    command: "df -h . | tail -1".into(),
+                    category: "System".into(),
+                },
+                CustomActionConfig {
+                    name: "Process list".into(),
+                    command: "ps aux --sort=-%cpu | head -12".into(),
+                    category: "System".into(),
+                },
+                CustomActionConfig {
+                    name: "List files".into(),
+                    command: "ls -la".into(),
+                    category: "Dev".into(),
+                },
+                CustomActionConfig {
+                    name: "Cargo check".into(),
+                    command: "cargo check 2>&1 | tail -5".into(),
+                    category: "Dev".into(),
+                },
+                CustomActionConfig {
+                    name: "Cargo test".into(),
+                    command: "cargo test 2>&1 | tail -10".into(),
+                    category: "Dev".into(),
+                },
+                CustomActionConfig {
+                    name: "Docker ps".into(),
+                    command: "docker ps --format 'table {{.Names}}\t{{.Status}}' 2>/dev/null || echo 'Docker not available'".into(),
+                    category: "Dev".into(),
+                },
+                CustomActionConfig {
+                    name: "Find files".into(),
+                    command: "find . -maxdepth 2 -type f | head -30".into(),
+                    category: "Dev".into(),
+                },
+            ],
         };
         cfg.keybindings.fill_missing();
         cfg

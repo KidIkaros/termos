@@ -8778,6 +8778,7 @@ mod extension_tests {
     #[test]
     fn status_widget_refresh_caches_output() {
         let mut os = os();
+        os.config.status_widgets.clear(); // isolate from built-in widgets
         os.config.status_widgets.push(StatusWidgetConfig {
             name: "test_widget".into(),
             command: "echo WIDGET_OK".into(),
@@ -8792,6 +8793,7 @@ mod extension_tests {
     #[test]
     fn status_widget_respects_refresh_interval() {
         let mut os = os();
+        os.config.status_widgets.clear(); // isolate from built-in widgets
         os.config.status_widgets.push(StatusWidgetConfig {
             name: "slow".into(),
             command: "echo FIRST".into(),
@@ -8841,18 +8843,19 @@ mod extension_tests {
 
     #[test]
     fn config_backward_compat_no_widgets() {
-        // Default config has empty status_widgets and custom_actions.
+        // Default config ships with built-in status_widgets and custom_actions.
         let cfg = UserConfig::default_config();
-        assert!(cfg.status_widgets.is_empty());
-        assert!(cfg.custom_actions.is_empty());
-        // Deserializing with the new fields present works.
-        let cfg: UserConfig = toml::from_str(
-            &toml::to_string(&UserConfig::default_config()).unwrap()
-                .replace("status_widgets = []", "[[status_widgets]]\nname = \"w\"\ncommand = \"echo x\"")
-                .replace("custom_actions = []", "[[custom_actions]]\nname = \"a\"\ncommand = \"echo y\""),
-        ).unwrap();
-        assert_eq!(cfg.status_widgets.len(), 1);
-        assert_eq!(cfg.custom_actions.len(), 1);
+        assert!(!cfg.status_widgets.is_empty());
+        assert!(!cfg.custom_actions.is_empty());
+        // Round-trip through TOML: serialize then deserialize preserves fields.
+        let serialized = toml::to_string(&cfg).unwrap();
+        let cfg2: UserConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(cfg2.status_widgets.len(), cfg.status_widgets.len());
+        assert_eq!(cfg2.custom_actions.len(), cfg.custom_actions.len());
+        // An empty override still works (stripping all defaults).
+        let cfg3: UserConfig = toml::from_str("").unwrap();
+        assert!(cfg3.status_widgets.is_empty());
+        assert!(cfg3.custom_actions.is_empty());
     }
 }
 
