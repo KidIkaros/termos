@@ -6329,6 +6329,26 @@ fn fire_desktop_notification(title: &str, body: &str) {
 }
 
 #[cfg(test)]
+impl Os {
+    /// Insert a fake window into the OS (no PTY spawned) for unit tests.
+    pub fn push_fake_window(&mut self, id: &str, title: &str, direction: SplitType) {
+        use crate::terminal::pty::WinSize;
+        use crate::terminal::Window;
+        let index = self.windows.len();
+        let ws = self.current_workspace;
+        let bounds = self.workspace_bounds(ws);
+        let focused = self.workspace(ws).focused.map(|f| f as i32).unwrap_or(-1);
+        let gap = self.gap;
+        let tree = &mut self.workspace_mut(ws).tree;
+        tree.insert_window(index as i32, focused, direction, 0.5, bounds, gap);
+        let win = Window::without_pty(id, title, WinSize { cols: 40, rows: 12 });
+        self.windows.push(win);
+        self.workspace_mut(ws).focused = Some(index);
+        self.focused_window = Some(index);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -8634,10 +8654,8 @@ mod stack_and_bulk_tests {
 
     fn os_with_two() -> Os {
         let mut os = os();
-        let shell = os.default_shell();
-        let _ = os.split(SplitType::Vertical, &shell, Box::new(|| {}));
-        os.focus_window(0);
-        let _ = os.split(SplitType::Vertical, &shell, Box::new(|| {}));
+        os.push_fake_window("win-0", "Terminal", SplitType::Vertical);
+        os.push_fake_window("win-1", "Terminal", SplitType::Vertical);
         os
     }
 
