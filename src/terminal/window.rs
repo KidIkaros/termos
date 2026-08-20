@@ -418,11 +418,6 @@ impl Window {
         self.dirty.store(false, Ordering::Relaxed);
     }
 
-    /// Get a clone of the dirty flag Arc (for sharing with drain threads).
-    fn dirty_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.dirty)
-    }
-
     /// Resize the PTY and the emulator (a no-op when the size is unchanged).
     /// Returns true when a new size was applied after the initial sizing —
     /// i.e. a real resize, not the first layout application. Used by the
