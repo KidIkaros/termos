@@ -1239,6 +1239,7 @@ pub const COMPLETION_COMMANDS: &[&str] = &[
     "set-workspace-name",
     "get-window",
     "completion",
+    "doctor",
 ];
 
 // ─── Log Level ────────────────────────────────────────────────────────────

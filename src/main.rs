@@ -139,6 +139,7 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
             print!("{}", SKILL_DOC);
             Ok(())
         }
+        "doctor" => cmd_doctor(),
         "--list-themes" => {
             let themes = termos::config::theme::list_theme_names();
             for t in themes {
@@ -436,7 +437,7 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
                 .into()),
             }
         }
-        other => Err(format!("unknown command '{other}' (try: daemon, run, attach, list, kill, exec, ssh, new-window, run-command, set-config, get-config, explain-agent-screen, set-workspace-name, get-window, completion, set-agent-state, get-agent-state, send-keys, send-text, capture-pane, wait-for, list-verbs, action, subscribe, block-until-exit, tape)").into()),
+        other => Err(format!("unknown command '{other}' (try: daemon, run, attach, list, kill, exec, ssh, new-window, run-command, set-config, get-config, explain-agent-screen, set-workspace-name, get-window, doctor, completion, set-agent-state, get-agent-state, send-keys, send-text, capture-pane, wait-for, list-verbs, action, subscribe, block-until-exit, tape)").into()),
     }
 }
 
@@ -537,6 +538,7 @@ fn print_help() {
     println!("    set-config <path> <value>  Set a runtime config option");
     println!("    get-config <path>          Get a runtime config option");
     println!("    explain-agent-screen [--harness H] [--lines N]  Explain screen rules");
+    println!("    doctor                     Check config, PTY, daemon, and theme health");
     println!("    completion <bash|zsh|fish> Generate shell completion scripts");
     println!();
     println!("EXAMPLES:");
@@ -3008,6 +3010,112 @@ fn generate_fish_completions() -> String {
     out
 }
 
+/// `termos doctor` — health check for config, PTY, daemon, and theme.
+fn cmd_doctor() -> Result<(), Box<dyn std::error::Error>> {
+    let mut ok = 0usize;
+    let mut warn = 0usize;
+    let mut fail = 0usize;
+
+    println!("termos doctor — checking environment");
+    println!();
+
+    // --- 1. Config file existence ---
+    {
+        let path = termos::cli::config_path();
+        if path.exists() {
+            println!("  ✓ Config file: {}", path.display());
+            ok += 1;
+        } else {
+            println!("  ✗ Config file: {} (not found)", path.display());
+            println!("    hint: run `termos config edit` to create one");
+            fail += 1;
+        }
+    }
+
+    // --- 2. Config validation ---
+    {
+        let cfg = termos::config::userconfig::UserConfig::load();
+        let result = termos::config::validation::validate_config(&cfg);
+        if result.errors.is_empty() && result.warnings.is_empty() {
+            println!("  ✓ Config validation: OK");
+            ok += 1;
+        } else {
+            for e in &result.errors {
+                println!("  ✗ Config error [{}]: {}", e.key, e.message);
+                fail += 1;
+            }
+            for w in &result.warnings {
+                println!("  ⚠ Config warning [{}]: {}", w.key, w.message);
+                warn += 1;
+            }
+        }
+    }
+
+    // --- 3. Theme check ---
+    {
+        let cfg = termos::config::userconfig::UserConfig::load();
+        let theme = &cfg.appearance.theme;
+        if theme.is_empty() {
+            println!("  ⚠ Theme: not set (using built-in default)");
+            warn += 1;
+        } else {
+            let themes = termos::config::theme::list_theme_names();
+            if themes.iter().any(|t| t == theme) {
+                println!("  ✓ Theme: {theme}");
+                ok += 1;
+            } else {
+                println!("  ✗ Theme: '{theme}' not found");
+                println!(
+                    "    available: {}",
+                    themes.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+                );
+                fail += 1;
+            }
+        }
+    }
+
+    // --- 4. PTY availability ---
+    {
+        if termos::testutil::pty_is_available() {
+            println!("  ✓ PTY allocation: available");
+            ok += 1;
+        } else {
+            println!("  ✗ PTY allocation: exhausted (ENOSPC)");
+            println!("    hint: kill orphaned shell processes to free PTYs");
+            fail += 1;
+        }
+    }
+
+    // --- 5. Daemon reachability ---
+    {
+        let running = {
+            use std::os::unix::net::UnixStream;
+            let path = termos::session::default_socket_path();
+            UnixStream::connect(path).is_ok()
+        };
+        if running {
+            println!("  ✓ Daemon: running");
+            ok += 1;
+        } else {
+            println!("  ⚠ Daemon: not running (start with `termos daemon`)");
+            warn += 1;
+        }
+    }
+
+    // --- Summary ---
+    println!();
+    let total = ok + warn + fail;
+    if fail == 0 && warn == 0 {
+        println!("All {total} checks passed.");
+    } else if fail == 0 {
+        println!("{ok} passed, {warn} warnings, {total} total.");
+    } else {
+        println!("{ok} passed, {warn} warnings, {fail} failed, {total} total.");
+    }
+
+    Ok(())
+}
+
 /// Preview a theme's ANSI colors (mirrors Go's `previewThemeColors`).
 fn preview_theme_colors(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let themes = termos::config::theme::list_theme_names();
@@ -3037,6 +3145,12 @@ fn preview_theme_colors(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn doctor_runs_without_panicking() {
+        let result = super::cmd_doctor();
+        assert!(result.is_ok(), "cmd_doctor failed: {:?}", result.err());
+    }
+
     #[test]
     fn completion_scripts_include_control_surface_commands() {
         for script in [
