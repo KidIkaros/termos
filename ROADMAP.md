@@ -326,6 +326,40 @@ ratatui-based multiplexers at scale.
 - ⬜ Structured fuzzing of the VT parser (fuzz/ targets) with the
   VTE/escape-test conformance suites expanded.
 
+## Phase 18 — Pixel canvas: GUI-like visual polish (Tier 2)
+
+The biggest visual gap between a terminal and a modern GUI is depth
+(shadows, elevation) and smoothness (gradients, anti-aliased edges).
+asciline-rust's pixel-mode mapper turns every terminal cell into a
+24-bit RGB pixel (`\x1b[48;2;R;G;Bm `), effectively creating a
+low-resolution framebuffer inside the terminal. Combined with ratatui
+for text, this bridges the gap without leaving the terminal.
+
+See `docs/ASCILINE_INTEGRATION.md` for the full analysis.
+
+Architecture: dual-layer rendering
+- Layer 1 (asciline pixel canvas): gradient backgrounds, shadow effects,
+  anti-aliased shapes via signed-distance-field (SDF), sparklines.
+- Layer 2 (ratatui text): content, borders, widgets rendered on top with
+  transparent backgrounds showing the canvas through.
+
+- ⬜ Add `asciline` dependency (default-features = false: just rayon +
+  flate2/miniz_oxide, pure Rust, no C deps).
+- ⬜ `src/render/pixel_canvas.rs`: BGR framebuffer (`Vec<u8>`) sized to
+  terminal area, flushed as colored cells each frame.
+- ⬜ Gradient backgrounds: horizontal/vertical/radial gradients for dock
+  bar, title bars, and pane backgrounds.
+- ⬜ Shadow rendering: Gaussian-falloff colored shadows for floating panes,
+  giving depth/elevation feel.
+- ⬜ Anti-aliased rounded corners: SDF-based corner masks that blend at
+  cell boundaries (replaces block-character `╭╮╰╯` with smooth edges).
+- ⬜ Gradient sparklines: smooth colored bar graphs for CPU/RAM widgets
+  in the dock.
+- ⬜ Integration with dirty-region rendering (Phase 17): only re-render
+  the pixel canvas when the background changes.
+- ⬜ Tests: gradient correctness, shadow falloff, SDF corner geometry,
+  end-to-end render pipeline.
+
 ## Priorities at a glance
 
 | Phase | Tier | Theme | Effort |
@@ -340,3 +374,4 @@ ratatui-based multiplexers at scale.
 | 15 | 3 | Plugin/extension story | Large (WASM: very large) |
 | 16 | 3 | Kitty animation protocol | Small |
 | 17 | 4 | Perf baselines, dirty regions, reflow, fuzzing | Large (ongoing) |
+| 18 | 2 | Pixel canvas: GUI-like visual polish | Medium (asciline-rust) |
