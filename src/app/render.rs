@@ -529,10 +529,17 @@ fn paint_pane(os: &Os, buf: &mut Buffer, window_id: usize, tui_rect: TuiRect) {
     }
 
     // Paint the pane content, selection highlight, and scrollbar.
+    // Skip expensive emulator render if the window has no new output.
+    let is_dirty = window.is_dirty();
     if let Ok(emu) = window.emulator.lock() {
-        paint_emulator(buf, &emu, tui_rect, os.theme.as_ref());
+        if is_dirty {
+            paint_emulator(buf, &emu, tui_rect, os.theme.as_ref());
+        }
         paint_selection(buf, &emu, tui_rect, selection);
         paint_scrollbar(buf, &emu, tui_rect, os, is_focused);
+    }
+    if is_dirty {
+        window.clear_dirty();
     }
 
     // Draw the border.

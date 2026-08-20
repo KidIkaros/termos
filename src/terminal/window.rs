@@ -153,6 +153,10 @@ pub struct Window {
     /// final size is stored here and announced once via `flush_resize`.
     /// `Some` means a resize is pending; `None` means nothing deferred.
     pending_resize: Mutex<Option<WinSize>>,
+    /// Dirty flag: set by the drain thread when PTY output arrives,
+    /// cleared by the render path after painting. Used for incremental
+    /// rendering — unchanged panes are skipped.
+    dirty: Arc<AtomicBool>,
 
     /// Cell pixel dimensions for XTWINOPS / TIOCGWINSZ pixel reporting.
     /// `0` means unknown — pixel size is not reported in that case.
@@ -210,7 +214,8 @@ impl Window {
         )));
 
         let emu_clone = Arc::clone(&emulator);
-        std::thread::spawn(move || drain_thread(reader.rx, emu_clone));
+        let dirty_clone = Arc::new(AtomicBool::new(true));
+        std::thread::spawn(move || drain_thread(reader.rx, emu_clone, dirty_clone));
 
         // A suspended command pane starts blank; write a hint into the
         // emulator so the pane explains itself until Enter triggers it.
@@ -254,6 +259,7 @@ impl Window {
             geometry: Mutex::new(None),
             output_buffer: Vec::new(),
             pending_resize: Mutex::new(None),
+            dirty: Arc::new(AtomicBool::new(true)),
             cell_pixel_width: 0,
             cell_pixel_height: 0,
             scrollback_mode: false,
@@ -290,7 +296,8 @@ impl Window {
             size.rows as i32,
         )));
         let emu_clone = Arc::clone(&emulator);
-        std::thread::spawn(move || drain_thread(output, emu_clone));
+        let dirty_clone = Arc::new(AtomicBool::new(true));
+        std::thread::spawn(move || drain_thread(output, emu_clone, dirty_clone));
         let win = Self {
             id: id.into(),
             title: title.into(),
@@ -320,6 +327,7 @@ impl Window {
             geometry: Mutex::new(None),
             output_buffer: Vec::new(),
             pending_resize: Mutex::new(None),
+            dirty: Arc::new(AtomicBool::new(true)),
             cell_pixel_width: 0,
             cell_pixel_height: 0,
             scrollback_mode: false,
@@ -373,6 +381,7 @@ impl Window {
             geometry: Mutex::new(None),
             output_buffer: Vec::new(),
             pending_resize: Mutex::new(None),
+            dirty: Arc::new(AtomicBool::new(true)),
             cell_pixel_width: 0,
             cell_pixel_height: 0,
             scrollback_mode: false,
@@ -397,6 +406,21 @@ impl Window {
         if let Some(writer) = &self.writer {
             writer.write(data);
         }
+    }
+
+    /// Check if the window has new content since the last render.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Relaxed)
+    }
+
+    /// Clear the dirty flag after rendering.
+    pub fn clear_dirty(&self) {
+        self.dirty.store(false, Ordering::Relaxed);
+    }
+
+    /// Get a clone of the dirty flag Arc (for sharing with drain threads).
+    fn dirty_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.dirty)
     }
 
     /// Resize the PTY and the emulator (a no-op when the size is unchanged).
@@ -532,7 +556,8 @@ impl Window {
             size.rows as i32,
         )));
         let emu_clone = Arc::clone(&emulator);
-        std::thread::spawn(move || drain_thread(reader.rx, emu_clone));
+        let dirty_clone = Arc::new(AtomicBool::new(true));
+        std::thread::spawn(move || drain_thread(reader.rx, emu_clone, dirty_clone));
 
         // Replacing `handle` drops the old one; its child already exited so
         // the reaped flag skips the kill.
@@ -1064,7 +1089,7 @@ impl Window {
 // PTY reader drain thread
 // ---------------------------------------------------------------------------
 
-fn drain_thread(rx: crossbeam_channel::Receiver<Vec<u8>>, emulator: Arc<Mutex<Emulator>>) {
+fn drain_thread(rx: crossbeam_channel::Receiver<Vec<u8>>, emulator: Arc<Mutex<Emulator>>, dirty: Arc<AtomicBool>) {
     // Batch coalescing on the reader side: collect multiple chunks into a
     // single buffer before taking the emulator lock, to reduce lock
     // acquisitions under high output rates.
@@ -1087,6 +1112,8 @@ fn drain_thread(rx: crossbeam_channel::Receiver<Vec<u8>>, emulator: Arc<Mutex<Em
                 emu.write(chunk);
             }
         }
+        // Mark the window as having new content.
+        dirty.store(true, Ordering::Relaxed);
         batch.clear();
     }
 }
@@ -1360,7 +1387,8 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
         let emulator = Arc::new(Mutex::new(Emulator::new(80, 24)));
         let emu_clone = Arc::clone(&emulator);
-        let handle = std::thread::spawn(move || drain_thread(rx, emu_clone));
+        let dirty_clone = Arc::new(AtomicBool::new(true));
+        let handle = std::thread::spawn(move || drain_thread(rx, emu_clone, dirty_clone));
 
         // Send several small chunks.
         tx.send(b"hello ".to_vec()).unwrap();

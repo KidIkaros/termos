@@ -2375,3 +2375,87 @@ mod kitty_keyboard_tests {
         assert_eq!(e2.kitty_keyboard_flags(), 2);
     }
 }
+
+#[cfg(test)]
+mod reflow_tests {
+    use super::*;
+
+    #[test]
+    fn long_line_reflows_on_narrower_resize() {
+        let mut e = Emulator::new(80, 24);
+        // Write a line that wraps at 80 columns.
+        e.write(b"0123456789"); // 10 chars
+        e.write(b"0123456789"); // 20 chars
+        e.write(b"0123456789"); // 30 chars
+        e.write(b"0123456789"); // 40 chars
+        e.write(b"0123456789"); // 50 chars
+        e.write(b"0123456789"); // 60 chars
+        e.write(b"0123456789"); // 70 chars
+        e.write(b"0123456789"); // 80 chars — fills first row
+        e.write(b"AB"); // wraps to row 2
+
+        // Content should span 2 rows.
+        let lines = e.render_view_lines();
+        let text: String = lines.iter().map(|row| {
+            row.iter().map(|(s, _)| s.as_str()).collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("0123456789"));
+        assert!(text.contains("AB"));
+
+        // Resize to 40 columns — the 80-char line should reflow.
+        e.resize(40, 24);
+        let lines = e.render_view_lines();
+        let all_text: String = lines.iter().map(|row| {
+            row.iter().map(|(s, _)| s.as_str()).collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        // The original 80 chars should still be present after reflow.
+        assert!(all_text.contains("01234567890123456789"));
+    }
+
+    #[test]
+    fn resize_preserves_content_within_viewport() {
+        let mut e = Emulator::new(40, 5);
+        e.write(b"line1\r\n");
+        e.write(b"line2\r\n");
+        e.write(b"line3\r\n");
+        e.write(b"line4\r\n");
+        e.write(b"line5\r\n");
+
+        // All 5 lines should be visible.
+        let lines = e.render_view_lines();
+        assert_eq!(lines.len(), 5);
+
+        // Resize to 3 rows — bottom lines scroll off but content is preserved.
+        e.resize(40, 3);
+        let lines = e.render_view_lines();
+        assert_eq!(lines.len(), 3);
+        // The last 3 lines should be visible.
+        let text: String = lines.iter().map(|row| {
+            row.iter().map(|(s, _)| s.as_str()).collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("line5"));
+    }
+
+    #[test]
+    fn resize_wider_preserves_line_content() {
+        let mut e = Emulator::new(20, 5);
+        e.write(b"hello world\r\n");
+        e.write(b"foo bar baz\r\n");
+
+        let lines = e.render_view_lines();
+        let text: String = lines.iter().map(|row| {
+            row.iter().map(|(s, _)| s.as_str()).collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("hello world"));
+        assert!(text.contains("foo bar baz"));
+
+        // Resize wider — content should still be there.
+        e.resize(80, 5);
+        let lines = e.render_view_lines();
+        let text: String = lines.iter().map(|row| {
+            row.iter().map(|(s, _)| s.as_str()).collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("hello world"));
+        assert!(text.contains("foo bar baz"));
+    }
+}

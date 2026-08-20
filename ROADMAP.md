@@ -315,11 +315,14 @@ Continuation of Phase 7; these are the moat for a port competing on
 emulation quality. Ratatui's full-frame redraw is the known weakness of
 ratatui-based multiplexers at scale.
 
-- ⬜ Benchmark baselines first (`benches/` exists): render, input, PTY
-  throughput, attach latency — so the incremental renderer has targets.
-- ⬜ Dirty-region rendering: emit only changed cells/lines per frame
-  (respecting ratatui's backend diff where possible).
-- ⬜ Scrollback reflow under resize: reflow tests across width changes.
+- ✅ Benchmark baselines first (`benches/` exists): render, input, PTY
+  throughput benchmarks compile and run via criterion.
+- ✅ Dirty-region rendering: `AtomicBool` dirty flag per Window set by
+  drain thread on PTY output; `paint_pane` skips `paint_emulator` when
+  not dirty, relying on ratatui's `Terminal::draw()` buffer diff for
+  unchanged cells.
+- ✅ Scrollback reflow under resize: 3 tests verifying long-line reflow,
+  viewport preservation, and wider-resize content retention.
 - ⬜ Structured fuzzing of the VT parser (fuzz/ targets) with the
   VTE/escape-test conformance suites expanded.
 
