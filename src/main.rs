@@ -139,7 +139,10 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
             print!("{}", SKILL_DOC);
             Ok(())
         }
-        "doctor" => cmd_doctor(),
+        "doctor" => {
+            let json = args.get(1).map(|s| s.as_str()) == Some("--json");
+            cmd_doctor(json)
+        }
         "--list-themes" => {
             let themes = termos::config::theme::list_theme_names();
             for t in themes {
@@ -3011,23 +3014,24 @@ fn generate_fish_completions() -> String {
 }
 
 /// `termos doctor` — health check for config, PTY, daemon, and theme.
-fn cmd_doctor() -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_doctor(json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let mut checks: Vec<(String, String, String)> = Vec::new(); // (name, status, detail)
     let mut ok = 0usize;
     let mut warn = 0usize;
     let mut fail = 0usize;
-
-    println!("termos doctor — checking environment");
-    println!();
 
     // --- 1. Config file existence ---
     {
         let path = termos::cli::config_path();
         if path.exists() {
-            println!("  ✓ Config file: {}", path.display());
+            checks.push(("config_file".into(), "ok".into(), path.display().to_string()));
             ok += 1;
         } else {
-            println!("  ✗ Config file: {} (not found)", path.display());
-            println!("    hint: run `termos config edit` to create one");
+            checks.push((
+                "config_file".into(),
+                "fail".into(),
+                format!("{} (not found)", path.display()),
+            ));
             fail += 1;
         }
     }
@@ -3037,15 +3041,15 @@ fn cmd_doctor() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = termos::config::userconfig::UserConfig::load();
         let result = termos::config::validation::validate_config(&cfg);
         if result.errors.is_empty() && result.warnings.is_empty() {
-            println!("  ✓ Config validation: OK");
+            checks.push(("config_validation".into(), "ok".into(), "valid".into()));
             ok += 1;
         } else {
             for e in &result.errors {
-                println!("  ✗ Config error [{}]: {}", e.key, e.message);
+                checks.push(("config_validation".into(), "fail".into(), format!("[{}] {}", e.key, e.message)));
                 fail += 1;
             }
             for w in &result.warnings {
-                println!("  ⚠ Config warning [{}]: {}", w.key, w.message);
+                checks.push(("config_validation".into(), "warn".into(), format!("[{}] {}", w.key, w.message)));
                 warn += 1;
             }
         }
@@ -3056,19 +3060,15 @@ fn cmd_doctor() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = termos::config::userconfig::UserConfig::load();
         let theme = &cfg.appearance.theme;
         if theme.is_empty() {
-            println!("  ⚠ Theme: not set (using built-in default)");
+            checks.push(("theme".into(), "warn".into(), "not set (using built-in default)".into()));
             warn += 1;
         } else {
             let themes = termos::config::theme::list_theme_names();
             if themes.iter().any(|t| t == theme) {
-                println!("  ✓ Theme: {theme}");
+                checks.push(("theme".into(), "ok".into(), theme.clone()));
                 ok += 1;
             } else {
-                println!("  ✗ Theme: '{theme}' not found");
-                println!(
-                    "    available: {}",
-                    themes.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
-                );
+                checks.push(("theme".into(), "fail".into(), format!("'{theme}' not found")));
                 fail += 1;
             }
         }
@@ -3077,11 +3077,10 @@ fn cmd_doctor() -> Result<(), Box<dyn std::error::Error>> {
     // --- 4. PTY availability ---
     {
         if termos::testutil::pty_is_available() {
-            println!("  ✓ PTY allocation: available");
+            checks.push(("pty".into(), "ok".into(), "available".into()));
             ok += 1;
         } else {
-            println!("  ✗ PTY allocation: exhausted (ENOSPC)");
-            println!("    hint: kill orphaned shell processes to free PTYs");
+            checks.push(("pty".into(), "fail".into(), "exhausted (ENOSPC)".into()));
             fail += 1;
         }
     }
@@ -3094,23 +3093,59 @@ fn cmd_doctor() -> Result<(), Box<dyn std::error::Error>> {
             UnixStream::connect(path).is_ok()
         };
         if running {
-            println!("  ✓ Daemon: running");
+            checks.push(("daemon".into(), "ok".into(), "running".into()));
             ok += 1;
         } else {
-            println!("  ⚠ Daemon: not running (start with `termos daemon`)");
+            checks.push(("daemon".into(), "warn".into(), "not running".into()));
             warn += 1;
         }
     }
 
-    // --- Summary ---
-    println!();
+    // --- Output ---
     let total = ok + warn + fail;
-    if fail == 0 && warn == 0 {
-        println!("All {total} checks passed.");
-    } else if fail == 0 {
-        println!("{ok} passed, {warn} warnings, {total} total.");
+    if json {
+        let report = serde_json::json!({
+            "ok": ok,
+            "warnings": warn,
+            "failed": fail,
+            "total": total,
+            "checks": checks.iter().map(|(name, status, detail)| {
+                serde_json::json!({
+                    "name": name,
+                    "status": status,
+                    "detail": detail,
+                })
+            }).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("{ok} passed, {warn} warnings, {fail} failed, {total} total.");
+        println!("termos doctor — checking environment");
+        println!();
+        for (name, status, detail) in &checks {
+            let icon = match status.as_str() {
+                "ok" => "✓",
+                "warn" => "⚠",
+                "fail" => "✗",
+                _ => "?",
+            };
+            let label = match name.as_str() {
+                "config_file" => "Config file",
+                "config_validation" => "Config validation",
+                "theme" => "Theme",
+                "pty" => "PTY allocation",
+                "daemon" => "Daemon",
+                _ => name,
+            };
+            println!("  {icon} {label}: {detail}");
+        }
+        println!();
+        if fail == 0 && warn == 0 {
+            println!("All {total} checks passed.");
+        } else if fail == 0 {
+            println!("{ok} passed, {warn} warnings, {total} total.");
+        } else {
+            println!("{ok} passed, {warn} warnings, {fail} failed, {total} total.");
+        }
     }
 
     Ok(())
@@ -3147,7 +3182,7 @@ fn preview_theme_colors(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     #[test]
     fn doctor_runs_without_panicking() {
-        let result = super::cmd_doctor();
+        let result = super::cmd_doctor(false);
         assert!(result.is_ok(), "cmd_doctor failed: {:?}", result.err());
     }
 
