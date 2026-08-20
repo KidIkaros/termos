@@ -3,78 +3,92 @@
 pub mod animation;
 pub mod overlay;
 pub mod perf;
-pub mod style_cache;
 
 use ratatui::style::{Color as TuiColor, Modifier, Style as TuiStyle};
 
-use crate::config::theme::Rgb;
+use crate::config::theme::{Rgb, Theme};
 
-/// Convert a `vt::Color` into a ratatui color. Default colors resolve to the
-/// theme's foreground/background when provided.
-pub fn to_tui_color(
-    color: crate::vt::Color,
-    theme: Option<&crate::config::theme::Theme>,
-) -> TuiColor {
-    match color {
-        crate::vt::Color::Default => {
-            if let Some(theme) = theme {
-                TuiColor::Rgb(theme.foreground.0, theme.foreground.1, theme.foreground.2)
-            } else {
-                TuiColor::Reset
+/// A precomputed color mapping from the VT color space to ratatui colors.
+///
+/// Built once per render frame from the active theme. This turns per-cell
+/// style conversion into array lookups instead of re-resolving
+/// `Color::Default`/`Color::Indexed` through an `Option<&Theme>` for every
+/// cell on screen.
+#[derive(Debug, Clone)]
+pub struct StylePalette {
+    /// What `Color::Default` foreground resolves to.
+    fg_default: TuiColor,
+    /// The 256 indexed-color slots: theme ANSI palette for 0–15, standard
+    /// xterm 256-color cube/grayscale for 16–255.
+    indexed: [TuiColor; 256],
+}
+
+impl StylePalette {
+    /// Build a palette from the active theme (or the xterm fallback when
+    /// `theme` is `None`).
+    pub fn new(theme: Option<&Theme>) -> Self {
+        let mut indexed = [TuiColor::Reset; 256];
+        for (i, slot) in indexed.iter_mut().enumerate() {
+            *slot = xterm_256_color(i as u8);
+        }
+        let fg_default = match theme {
+            Some(t) => TuiColor::Rgb(t.foreground.0, t.foreground.1, t.foreground.2),
+            None => TuiColor::Reset,
+        };
+        if let Some(t) = theme {
+            for (i, rgb) in t.ansi.iter().enumerate() {
+                indexed[i] = TuiColor::Rgb(rgb.0, rgb.1, rgb.2);
             }
         }
-        crate::vt::Color::Indexed(i) => {
-            if let Some(theme) = theme {
-                TuiColor::Rgb(
-                    theme.ansi[i as usize].0,
-                    theme.ansi[i as usize].1,
-                    theme.ansi[i as usize].2,
-                )
-            } else {
-                // Fall back to the standard xterm 256 palette for 0-15.
-                xterm_256(i)
-            }
+        Self { fg_default, indexed }
+    }
+
+    /// Resolve a `vt::Color` to its ratatui color. O(1), branch-minimal.
+    #[inline]
+    pub fn resolve(&self, color: crate::vt::Color) -> TuiColor {
+        match color {
+            crate::vt::Color::Default => self.fg_default,
+            crate::vt::Color::Indexed(i) => self.indexed[i as usize],
+            crate::vt::Color::Rgb(r, g, b) => TuiColor::Rgb(r, g, b),
         }
-        crate::vt::Color::Rgb(r, g, b) => TuiColor::Rgb(r, g, b),
+    }
+
+    /// Convert a `vt::Style` into a ratatui style.
+    #[inline]
+    pub fn style(&self, style: crate::vt::Style) -> TuiStyle {
+        let mut s = TuiStyle::default().fg(self.resolve(style.fg));
+        if !matches!(style.bg, crate::vt::Color::Default) {
+            s = s.bg(self.resolve(style.bg));
+        }
+        let d = style.decoration;
+        if d.bold {
+            s = s.add_modifier(Modifier::BOLD);
+        }
+        if d.dim {
+            s = s.add_modifier(Modifier::DIM);
+        }
+        if d.italic {
+            s = s.add_modifier(Modifier::ITALIC);
+        }
+        if d.underline || d.double_underline {
+            s = s.add_modifier(Modifier::UNDERLINED);
+        }
+        if d.reverse {
+            s = s.add_modifier(Modifier::REVERSED);
+        }
+        if d.hidden {
+            s = s.add_modifier(Modifier::HIDDEN);
+        }
+        if d.strikethrough {
+            s = s.add_modifier(Modifier::CROSSED_OUT);
+        }
+        s
     }
 }
 
-/// Convert a `vt::Style` into a ratatui style.
-pub fn to_tui_style(
-    style: crate::vt::Style,
-    theme: Option<&crate::config::theme::Theme>,
-) -> TuiStyle {
-    let mut s = TuiStyle::default().fg(to_tui_color(style.fg, theme));
-    if !matches!(style.bg, crate::vt::Color::Default) {
-        s = s.bg(to_tui_color(style.bg, theme));
-    }
-    let d = style.decoration;
-    if d.bold {
-        s = s.add_modifier(Modifier::BOLD);
-    }
-    if d.dim {
-        s = s.add_modifier(Modifier::DIM);
-    }
-    if d.italic {
-        s = s.add_modifier(Modifier::ITALIC);
-    }
-    if d.underline || d.double_underline {
-        s = s.add_modifier(Modifier::UNDERLINED);
-    }
-    if d.reverse {
-        s = s.add_modifier(Modifier::REVERSED);
-    }
-    if d.hidden {
-        s = s.add_modifier(Modifier::HIDDEN);
-    }
-    if d.strikethrough {
-        s = s.add_modifier(Modifier::CROSSED_OUT);
-    }
-    s
-}
-
-/// A minimal xterm-256 palette entry for the basic 16 colors.
-fn xterm_256(i: u8) -> TuiColor {
+/// The standard xterm 256-color palette: 16 basic colors, a 6×6×6 color cube
+/// (16–231), and a grayscale ramp (232–255).
+fn xterm_256_color(i: u8) -> TuiColor {
     const BASIC: [(u8, u8, u8); 16] = [
         (0, 0, 0),
         (205, 49, 49),
@@ -93,8 +107,21 @@ fn xterm_256(i: u8) -> TuiColor {
         (41, 184, 219),
         (255, 255, 255),
     ];
-    let (r, g, b) = BASIC[i as usize];
-    TuiColor::Rgb(r, g, b)
+    let i = i as usize;
+    if i < 16 {
+        let (r, g, b) = BASIC[i];
+        return TuiColor::Rgb(r, g, b);
+    }
+    if i < 232 {
+        let idx = i - 16;
+        let r = idx / 36;
+        let g = (idx % 36) / 6;
+        let b = idx % 6;
+        let level = |v: usize| if v == 0 { 0u8 } else { (55 + 40 * v) as u8 };
+        return TuiColor::Rgb(level(r), level(g), level(b));
+    }
+    let g = (8 + 10 * (i - 232)) as u8;
+    TuiColor::Rgb(g, g, g)
 }
 
 /// Parse a border style name into a ratatui border type.
@@ -145,129 +172,146 @@ mod tests {
     }
 
     #[test]
-    fn to_tui_color_default_no_theme() {
-        let c = to_tui_color(Color::Default, None);
-        assert_eq!(c, TuiColor::Reset);
+    fn palette_default_no_theme() {
+        let p = StylePalette::new(None);
+        assert_eq!(p.resolve(Color::Default), TuiColor::Reset);
     }
 
     #[test]
-    fn to_tui_color_default_with_theme() {
+    fn palette_default_with_theme() {
         let theme = test_theme();
-        let c = to_tui_color(Color::Default, Some(&theme));
-        match c {
+        let p = StylePalette::new(Some(&theme));
+        match p.resolve(Color::Default) {
             TuiColor::Rgb(_, _, _) => {}
             _ => panic!("expected Rgb"),
         }
     }
 
     #[test]
-    fn to_tui_color_indexed_no_theme() {
-        let c = to_tui_color(Color::Indexed(0), None);
-        match c {
+    fn palette_indexed_no_theme() {
+        let p = StylePalette::new(None);
+        match p.resolve(Color::Indexed(0)) {
             TuiColor::Rgb(r, g, b) => assert_eq!((r, g, b), (0, 0, 0)),
             _ => panic!("expected Rgb"),
         }
     }
 
     #[test]
-    fn to_tui_color_indexed_with_theme() {
+    fn palette_indexed_with_theme() {
         let theme = test_theme();
-        let c = to_tui_color(Color::Indexed(1), Some(&theme));
-        match c {
+        let p = StylePalette::new(Some(&theme));
+        match p.resolve(Color::Indexed(1)) {
             TuiColor::Rgb(_, _, _) => {}
             _ => panic!("expected Rgb"),
         }
     }
 
     #[test]
-    fn to_tui_color_rgb() {
-        let c = to_tui_color(Color::Rgb(100, 200, 50), None);
-        assert_eq!(c, TuiColor::Rgb(100, 200, 50));
+    fn palette_indexed_beyond_ansi_range() {
+        // Indices 16–255 previously indexed a 16-entry theme array and would
+        // panic; they must resolve to a concrete cube/grayscale color.
+        let theme = test_theme();
+        let p = StylePalette::new(Some(&theme));
+        for i in [16u8, 196, 232, 255] {
+            match p.resolve(Color::Indexed(i)) {
+                TuiColor::Rgb(_, _, _) => {}
+                other => panic!("expected Rgb for index {i}, got {other:?}"),
+            }
+        }
     }
 
     #[test]
-    fn to_tui_style_default() {
-        let style = Style::new();
-        let s = to_tui_style(style, None);
+    fn palette_rgb() {
+        let p = StylePalette::new(None);
+        assert_eq!(
+            p.resolve(Color::Rgb(100, 200, 50)),
+            TuiColor::Rgb(100, 200, 50)
+        );
+    }
+
+    #[test]
+    fn palette_style_default() {
+        let p = StylePalette::new(None);
+        let s = p.style(Style::new());
         assert_eq!(s.fg, Some(TuiColor::Reset));
     }
 
     #[test]
-    fn to_tui_style_bold() {
+    fn palette_style_bold() {
         let mut style = Style::new();
         style.decoration.bold = true;
-        let s = to_tui_style(style, None);
+        let s = StylePalette::new(None).style(style);
         assert!(s.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
-    fn to_tui_style_dim() {
+    fn palette_style_dim() {
         let mut style = Style::new();
         style.decoration.dim = true;
-        let s = to_tui_style(style, None);
+        let s = StylePalette::new(None).style(style);
         assert!(s.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]
-    fn to_tui_style_italic() {
+    fn palette_style_italic() {
         let mut style = Style::new();
         style.decoration.italic = true;
-        let s = to_tui_style(style, None);
+        let s = StylePalette::new(None).style(style);
         assert!(s.add_modifier.contains(Modifier::ITALIC));
     }
 
     #[test]
-    fn to_tui_style_underline() {
+    fn palette_style_underline() {
         let mut style = Style::new();
         style.decoration.underline = true;
-        let s = to_tui_style(style, None);
+        let s = StylePalette::new(None).style(style);
         assert!(s.add_modifier.contains(Modifier::UNDERLINED));
     }
 
     #[test]
-    fn to_tui_style_double_underline() {
+    fn palette_style_double_underline() {
         let mut style = Style::new();
         style.decoration.double_underline = true;
-        let s = to_tui_style(style, None);
+        let s = StylePalette::new(None).style(style);
         assert!(s.add_modifier.contains(Modifier::UNDERLINED));
     }
 
     #[test]
-    fn to_tui_style_reverse() {
+    fn palette_style_reverse() {
         let mut style = Style::new();
         style.decoration.reverse = true;
-        let s = to_tui_style(style, None);
+        let s = StylePalette::new(None).style(style);
         assert!(s.add_modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
-    fn to_tui_style_hidden() {
+    fn palette_style_hidden() {
         let mut style = Style::new();
         style.decoration.hidden = true;
-        let s = to_tui_style(style, None);
+        let s = StylePalette::new(None).style(style);
         assert!(s.add_modifier.contains(Modifier::HIDDEN));
     }
 
     #[test]
-    fn to_tui_style_strikethrough() {
+    fn palette_style_strikethrough() {
         let mut style = Style::new();
         style.decoration.strikethrough = true;
-        let s = to_tui_style(style, None);
+        let s = StylePalette::new(None).style(style);
         assert!(s.add_modifier.contains(Modifier::CROSSED_OUT));
     }
 
     #[test]
-    fn to_tui_style_with_bg() {
+    fn palette_style_with_bg() {
         let mut style = Style::new();
         style.bg = Color::Rgb(10, 20, 30);
-        let s = to_tui_style(style, None);
+        let s = StylePalette::new(None).style(style);
         assert!(s.bg.is_some());
     }
 
     #[test]
-    fn to_tui_style_default_bg_omitted() {
-        let style = Style::new();
-        let s = to_tui_style(style, None);
+    fn palette_style_default_bg_omitted() {
+        let p = StylePalette::new(None);
+        let s = p.style(Style::new());
         assert!(s.bg.is_none());
     }
 

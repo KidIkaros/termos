@@ -8,8 +8,6 @@
 //! host-sequence flushing, and the session switch/kill requests that the
 //! switcher sets as pending state).
 
-use std::time::Duration;
-
 use super::effect::Effect;
 use super::input::{handle_key, handle_mouse, KeyResult};
 use super::msg::Msg;
@@ -18,6 +16,9 @@ use super::Os;
 impl Os {
     /// Process one event, mutating the model and returning side effects.
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
+        if !matches!(&msg, Msg::Tick) {
+            self.request_render();
+        }
         match msg {
             Msg::Key(key) => {
                 let result = handle_key(self, &key);
@@ -57,9 +58,9 @@ impl Os {
                 self.tick_animations();
                 self.tick_tooltip();
                 self.tick_script();
-                self.flush_widget_threads();
+                // Widget commands are asynchronous; update_status_widgets()
+                // reaps completed jobs without waiting for unfinished ones.
                 self.update_status_widgets();
-                self.tick_stats.record_frame(Duration::ZERO);
                 self.sync_window_sizes();
                 self.flush_graphics();
                 let mut effects = Vec::new();

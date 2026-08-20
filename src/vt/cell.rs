@@ -75,8 +75,11 @@ pub struct Link {
 /// One grid cell.
 #[derive(Debug, Clone, Default)]
 pub struct Cell {
-    /// The character content (a grapheme cluster).
-    pub content: String,
+    /// The character content: a single `char` when occupied, `None` when
+    /// blank. Stored inline (no heap allocation) — the VT parser emits one
+    /// `char` per `print` call, so a cell never holds more than one code
+    /// point.
+    pub content: Option<char>,
     /// Display width in columns (1 for normal, 2 for wide CJK, 0 for
     /// continuation cells of a wide rune).
     pub width: u8,
@@ -89,9 +92,20 @@ pub struct Cell {
 }
 
 impl Cell {
-    pub fn new(content: impl Into<String>, width: u8, style: Style) -> Self {
+    pub fn new(content: char, width: u8, style: Style) -> Self {
         Self {
-            content: content.into(),
+            content: Some(content),
+            width,
+            style,
+            link: Link::default(),
+            dirty: true,
+        }
+    }
+
+    /// A blank cell with explicit width and style (empty content).
+    pub fn new_empty(width: u8, style: Style) -> Self {
+        Self {
+            content: None,
             width,
             style,
             link: Link::default(),
@@ -105,7 +119,7 @@ impl Cell {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.content.is_empty()
+        self.content.is_none()
     }
 
     /// Clear this cell back to a blank default cell.
@@ -199,8 +213,8 @@ mod tests {
 
     #[test]
     fn cell_new() {
-        let c = Cell::new("A", 1, Style::new());
-        assert_eq!(c.content, "A");
+        let c = Cell::new('A', 1, Style::new());
+        assert_eq!(c.content, Some('A'));
         assert_eq!(c.width, 1);
         assert!(c.dirty);
     }
@@ -208,7 +222,7 @@ mod tests {
     #[test]
     fn cell_blank() {
         let c = Cell::blank();
-        assert!(c.content.is_empty());
+        assert!(c.content.is_none());
         assert_eq!(c.width, 0);
     }
 
@@ -216,13 +230,13 @@ mod tests {
     fn cell_is_empty() {
         let c = Cell::default();
         assert!(c.is_empty());
-        let c2 = Cell::new("x", 1, Style::new());
+        let c2 = Cell::new('x', 1, Style::new());
         assert!(!c2.is_empty());
     }
 
     #[test]
     fn cell_clear() {
-        let mut c = Cell::new("A", 1, Style::new());
+        let mut c = Cell::new('A', 1, Style::new());
         c.clear();
         assert!(c.is_empty());
         assert!(c.dirty);

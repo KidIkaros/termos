@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Borders, Widget};
 use crate::app::pixel_canvas::PixelCanvas;
 use crate::app::{ContextMenu, Mode, Os, Prefix, Selection};
 use crate::layout::Rect;
-use crate::ui::{border_type, to_tui_style};
+use crate::ui::{border_type, StylePalette};
 
 /// Render the whole app into a ratatui buffer.
 pub fn render(os: &Os, buf: &mut Buffer) {
@@ -21,6 +21,10 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    // Precompute the theme→ratatui color palette once per frame so per-cell
+    // style conversion is an array lookup rather than re-resolving colors
+    // through an `Option<&Theme>` for every cell.
+    let palette = StylePalette::new(os.theme.as_ref());
     // Dock area: 2 rows — accent bar (top) + dock content (bottom).
     let dock_height = 2usize;
     let dock_area = TuiRect {
@@ -42,34 +46,30 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         .as_ref()
         .map(|t| (t.background.0, t.background.1, t.background.2))
         .unwrap_or((0, 0, 0));
-    let mut canvas = PixelCanvas::new(area.width as usize, area.height as usize);
-    canvas.clear(bg_rgb.0, bg_rgb.1, bg_rgb.2);
+    let mut canvas = os.pixel_canvas.lock().unwrap_or_else(|e| e.into_inner());
+    if canvas.width() != area.width as usize || canvas.height() != area.height as usize {
+        *canvas = PixelCanvas::new(area.width as usize, area.height as usize);
+    }
 
     // Accent bar: 1-row gradient strip above the dock, giving a "glass" effect.
     // Fades from content background to a dimmed version of the accent color.
-    if let Some(theme) = os.theme.as_ref() {
-        let dock_bg = theme.ansi[0]; // black = dock background
-        let accent = theme.ansi[4]; // blue = accent color
-        let accent_y = area.height as usize - 2; // row above the dock
-        // Dim the accent to 30% brightness for a subtle glass strip.
-        let dim_accent = (
-            (accent.0 as f64 * 0.3) as u8,
-            (accent.1 as f64 * 0.3) as u8,
-            (accent.2 as f64 * 0.3) as u8,
-        );
-        canvas.gradient_horizontal(
-            0,
-            accent_y,
-            area.width as usize,
-            1,
-            (bg_rgb.0, bg_rgb.1, bg_rgb.2),
-            dim_accent,
-        );
-        // Dock content row: solid dock background.
-        for x in 0..area.width as usize {
-            canvas.set_pixel(x, area.height as usize - 1, dock_bg.0, dock_bg.1, dock_bg.2);
-        }
-    }
+    // The computed background is cached so an unchanged theme only memcpys.
+    let (dock_bg, dim_accent) = os
+        .theme
+        .as_ref()
+        .map(|theme| {
+            let dock_bg = (theme.ansi[0].0, theme.ansi[0].1, theme.ansi[0].2);
+            let accent = theme.ansi[4];
+            // Dim the accent to 30% brightness for a subtle glass strip.
+            let dim_accent = (
+                (accent.0 as f64 * 0.3) as u8,
+                (accent.1 as f64 * 0.3) as u8,
+                (accent.2 as f64 * 0.3) as u8,
+            );
+            (dock_bg, dim_accent)
+        })
+        .unwrap_or((bg_rgb, bg_rgb));
+    canvas.fill_background(bg_rgb, dim_accent, dock_bg);
 
     // Drop shadows for floating panes.
     if !os.floats_hidden_by_zoom() {
@@ -95,15 +95,15 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     // Rounded corners for overlays.
     // (Applied later when overlays are rendered.)
 
-    // Flush the canvas to BGR and paint into the ratatui Buffer.
-    canvas.flush();
-    let bgr = canvas.bgr();
+    // Paint the RGB canvas directly into the ratatui Buffer. The previous
+    // mapper-backed BGR round trip duplicated this full-frame work.
+    let rgb = canvas.rgb();
     for y in 0..area.height {
         for x in 0..area.width {
             let idx = ((y as usize * area.width as usize) + x as usize) * 3;
             let cell = &mut buf[(x, y)];
             cell.set_char(' ');
-            cell.set_bg(TuiColor::Rgb(bgr[idx + 2], bgr[idx + 1], bgr[idx]));
+            cell.set_bg(TuiColor::Rgb(rgb[idx], rgb[idx + 1], rgb[idx + 2]));
         }
     }
 
@@ -157,7 +157,7 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         } else {
             rect_to_tui(*rect, content_area)
         };
-        paint_pane(os, buf, window_id as usize, tui_rect);
+        paint_pane(os, buf, &palette, window_id as usize, tui_rect);
     }
 
     // Render junction-aware border grid for shared borders.
@@ -200,7 +200,7 @@ pub fn render(os: &Os, buf: &mut Buffer) {
                 continue;
             }
             let tui_rect = rect_to_tui(*rect, content_area);
-            paint_pane(os, buf, window_id, tui_rect);
+            paint_pane(os, buf, &palette, window_id, tui_rect);
         }
     }
 
@@ -563,7 +563,7 @@ pub fn render_list_overlay(
 
 /// Paint one pane's content, selection highlight, scrollbar, and border at
 /// the given screen rect. Shared by the tiled and floating render passes.
-fn paint_pane(os: &Os, buf: &mut Buffer, window_id: usize, tui_rect: TuiRect) {
+fn paint_pane(os: &Os, buf: &mut Buffer, palette: &StylePalette, window_id: usize, tui_rect: TuiRect) {
     let Some(window) = os.windows.get(window_id) else {
         return;
     };
@@ -592,8 +592,26 @@ fn paint_pane(os: &Os, buf: &mut Buffer, window_id: usize, tui_rect: TuiRect) {
     // Skip expensive emulator render if the window has no new output.
     let is_dirty = window.is_dirty();
     if let Ok(emu) = window.emulator.lock() {
-        if is_dirty {
-            paint_emulator(buf, &emu, tui_rect, os.theme.as_ref());
+        let width = emu.width();
+        let height = emu.height();
+        let viewport = emu.viewport();
+        if let Ok(mut cache) = window.render_cache.lock() {
+            let refresh = is_dirty
+                || cache
+                    .as_ref()
+                    .map(|c| c.width != width || c.height != height || c.viewport != viewport)
+                    .unwrap_or(true);
+            if refresh {
+                *cache = Some(crate::terminal::window::RenderCache {
+                    width,
+                    height,
+                    viewport,
+                    lines: emu.render_view_lines(),
+                });
+            }
+            if let Some(cached) = cache.as_ref() {
+                paint_emulator(buf, &emu, &cached.lines, tui_rect, palette);
+            }
         }
         paint_selection(buf, &emu, tui_rect, selection);
         paint_scrollbar(buf, &emu, tui_rect, os, is_focused);
@@ -707,8 +725,9 @@ fn rect_to_tui(rect: Rect, content_area: TuiRect) -> TuiRect {
 fn paint_emulator(
     buf: &mut Buffer,
     emu: &crate::vt::Emulator,
+    lines: &[Vec<(char, crate::vt::Style)>],
     rect: TuiRect,
-    theme: Option<&crate::config::theme::Theme>,
+    palette: &StylePalette,
 ) {
     // The pane border consumes the outer ring; content lives one cell in.
     let inner_x = rect.x + 1;
@@ -719,7 +738,6 @@ fn paint_emulator(
         return;
     }
 
-    let lines = emu.render_view_lines();
     for (row_idx, row) in lines.iter().take(inner_h as usize).enumerate() {
         let y = inner_y + row_idx as u16;
         for (col, (content, style)) in row.iter().take(inner_w as usize).enumerate() {
@@ -728,9 +746,8 @@ fn paint_emulator(
                 break;
             }
             let cell = &mut buf[(x, y)];
-            let c = content.chars().next().unwrap_or(' ');
-            cell.set_char(c);
-            cell.set_style(to_tui_style(*style, theme));
+            cell.set_char(*content);
+            cell.set_style(palette.style(*style));
         }
     }
 
@@ -1952,14 +1969,13 @@ pub fn render_overlay(buf: &mut Buffer, area: TuiRect, lines: &[String], title: 
         (25, 25, 38),  // slightly lighter top
         (15, 15, 22),  // darker bottom
     );
-    overlay_canvas.flush();
-    let bgr = overlay_canvas.bgr();
+    let rgb = overlay_canvas.rgb();
     for yy in 0..height {
         for xx in 0..width {
             let idx = ((yy as usize * width as usize) + xx as usize) * 3;
             let cell = &mut buf[(rect.x + xx, rect.y + yy)];
             cell.set_char(' ');
-            cell.set_bg(TuiColor::Rgb(bgr[idx + 2], bgr[idx + 1], bgr[idx]));
+            cell.set_bg(TuiColor::Rgb(rgb[idx], rgb[idx + 1], rgb[idx + 2]));
         }
     }
 

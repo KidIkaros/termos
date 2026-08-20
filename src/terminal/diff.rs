@@ -178,7 +178,10 @@ pub fn diff_cell_to_cell(diff: &DiffCell) -> Cell {
         decoration: unpack_attrs(diff.attrs),
     };
     Cell {
-        content: diff.content.clone(),
+        // The wire content is a grapheme string; the emulator cell holds a
+        // single `char`, so keep the first code point (matching the renderer's
+        // `chars().next()` behaviour).
+        content: diff.content.chars().next(),
         width: diff.width,
         style,
         link: Default::default(),
@@ -191,7 +194,7 @@ pub fn cell_to_diff_cell(cell: &Cell, row: i32, col: i32) -> DiffCell {
     DiffCell {
         row,
         col,
-        content: cell.content.clone(),
+        content: cell.content.map(|c| c.to_string()).unwrap_or_default(),
         width: cell.width,
         fg: pack_color(cell.style.fg),
         bg: pack_color(cell.style.bg),
@@ -652,6 +655,6 @@ mod tests {
         // Verify the cell was set.
         let emu = win.emulator.lock().unwrap();
         let cell = emu.screen().cell(0, 0).unwrap();
-        assert_eq!(cell.content, "Z");
+        assert_eq!(cell.content, Some('Z'));
     }
 }

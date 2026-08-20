@@ -155,7 +155,7 @@ impl ScreenBuffer {
     /// A blank cell in the cursor's current pen.
     fn blank_with_pen(&self) -> Cell {
         Cell {
-            content: String::new(),
+            content: None,
             width: 1,
             style: self.cursor.pen.style,
             link: Default::default(),
@@ -336,16 +336,19 @@ impl ScreenBuffer {
         }
         let right = self.scroll.right;
         let n = n.min(right - x);
+        if n <= 0 {
+            return;
+        }
         let blank = self.blank_with_pen();
-        let row = self.lines[y as usize].clone();
-        let mut new_row = row.clone();
-        for i in (x as usize + n as usize)..right as usize {
-            new_row[i] = row[i - n as usize].clone();
-        }
-        for cell in new_row.iter_mut().take((x + n) as usize).skip(x as usize) {
-            *cell = blank.clone();
-        }
-        self.lines[y as usize] = new_row;
+        let row = &mut self.lines[y as usize];
+        // Drop the cells that fall off the right edge of the scroll region,
+        // then insert `n` blanks at `x`. `drain` + `splice` move cells in
+        // place instead of cloning the whole row twice.
+        row.drain((right - n) as usize..right as usize);
+        row.splice(
+            x as usize..x as usize,
+            std::iter::repeat_with(|| blank.clone()).take(n as usize),
+        );
         self.touch_line(y);
     }
 
@@ -360,20 +363,20 @@ impl ScreenBuffer {
             return;
         }
         let right = self.scroll.right;
+        let n = n.min(right - x);
+        if n <= 0 {
+            return;
+        }
         let blank = self.blank_with_pen();
-        let row = self.lines[y as usize].clone();
-        let mut new_row = row.clone();
-        for i in x as usize..(right - n) as usize {
-            new_row[i] = row[i + n as usize].clone();
-        }
-        for cell in new_row
-            .iter_mut()
-            .take(right as usize)
-            .skip((right - n) as usize)
-        {
-            *cell = blank.clone();
-        }
-        self.lines[y as usize] = new_row;
+        let row = &mut self.lines[y as usize];
+        // Remove `n` cells at `x`, pulling the rest left in place, then pad
+        // the scroll region's trailing edge with blanks.
+        row.drain(x as usize..(x + n) as usize);
+        let insert_at = (right - n) as usize;
+        row.splice(
+            insert_at..insert_at,
+            std::iter::repeat_with(|| blank.clone()).take(n as usize),
+        );
         self.touch_line(y);
     }
 
@@ -461,11 +464,17 @@ impl ScreenBuffer {
         let bottom = self.scroll.bottom;
         let n = n.min(bottom - top);
 
-        // Save the departing lines to scrollback.
+        // Save the departing lines to scrollback, collecting recycled blank
+        // buffers when the scrollback is at capacity.
+        let mut blank_bufs: Vec<Vec<Cell>> =
+            Vec::with_capacity(if save { n as usize } else { 0 });
         if save {
             for i in 0..n {
                 let line = self.lines[(top + i) as usize].clone();
-                self.scrollback.push_line(line);
+                match self.scrollback.push_line_recycle(line) {
+                    Some(recycled) => blank_bufs.push(recycled),
+                    None => blank_bufs.push(new_line(self.width as usize)),
+                }
             }
         }
 
@@ -473,9 +482,13 @@ impl ScreenBuffer {
         for y in top..(bottom - n) {
             self.lines[y as usize] = std::mem::take(&mut self.lines[(y + n) as usize]);
         }
-        // Blank the vacated bottom lines.
+        // Blank the vacated bottom lines, reusing recycled buffers when the
+        // departing lines were saved to scrollback.
+        let mut blanks = blank_bufs.into_iter();
         for y in (bottom - n)..bottom {
-            self.lines[y as usize] = new_line(self.width as usize);
+            self.lines[y as usize] = blanks
+                .next()
+                .unwrap_or_else(|| new_line(self.width as usize));
         }
         for y in top..bottom {
             self.touch_line(y);
@@ -534,8 +547,8 @@ impl ScreenBuffer {
             let row = &self.lines[y as usize];
             while col < self.width {
                 let cell = &row[col as usize];
-                if !cell.content.is_empty() {
-                    line.push_str(&cell.content);
+                if let Some(ch) = cell.content {
+                    line.push(ch);
                 } else {
                     line.push(' ');
                 }
@@ -559,8 +572,8 @@ impl ScreenBuffer {
         let row = &self.lines[y as usize];
         while col < self.width {
             let cell = &row[col as usize];
-            if !cell.content.is_empty() {
-                line.push_str(&cell.content);
+            if let Some(ch) = cell.content {
+                line.push(ch);
             } else {
                 line.push(' ');
             }
@@ -651,15 +664,15 @@ mod tests {
     #[test]
     fn screen_buffer_set_cell() {
         let mut s = ScreenBuffer::new(10, 5);
-        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
+        s.set_cell(5, 2, Cell::new('X', 1, Style::new()));
         let cell = s.cell(5, 2).unwrap();
-        assert_eq!(cell.content, "X");
+        assert_eq!(cell.content, Some('X'));
     }
 
     #[test]
     fn screen_buffer_blank_cell() {
         let mut s = ScreenBuffer::new(10, 5);
-        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
+        s.set_cell(5, 2, Cell::new('X', 1, Style::new()));
         s.blank_cell(5, 2);
         assert!(s.cell(5, 2).unwrap().is_empty());
     }
@@ -684,7 +697,7 @@ mod tests {
     #[test]
     fn screen_buffer_resize() {
         let mut s = ScreenBuffer::new(10, 5);
-        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
+        s.set_cell(5, 2, Cell::new('X', 1, Style::new()));
         s.resize(20, 10);
         assert_eq!(s.width(), 20);
         assert_eq!(s.height(), 10);
@@ -693,7 +706,7 @@ mod tests {
     #[test]
     fn screen_buffer_clear() {
         let mut s = ScreenBuffer::new(10, 5);
-        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
+        s.set_cell(5, 2, Cell::new('X', 1, Style::new()));
         s.clear();
         assert!(s.cell(5, 2).unwrap().is_empty());
     }
@@ -701,7 +714,7 @@ mod tests {
     #[test]
     fn screen_buffer_clear_area() {
         let mut s = ScreenBuffer::new(10, 5);
-        s.set_cell(3, 2, Cell::new("X", 1, Style::new()));
+        s.set_cell(3, 2, Cell::new('X', 1, Style::new()));
         s.clear_area(2, 1, 3, 3);
         assert!(s.cell(3, 2).unwrap().is_empty());
     }
@@ -709,8 +722,8 @@ mod tests {
     #[test]
     fn screen_buffer_clear_to_end_of_line() {
         let mut s = ScreenBuffer::new(10, 5);
-        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
-        s.set_cell(8, 2, Cell::new("Y", 1, Style::new()));
+        s.set_cell(5, 2, Cell::new('X', 1, Style::new()));
+        s.set_cell(8, 2, Cell::new('Y', 1, Style::new()));
         s.cursor.pos = Position { x: 3, y: 2 };
         s.clear_to_end_of_line();
         assert!(s.cell(3, 2).unwrap().is_empty());
@@ -720,7 +733,7 @@ mod tests {
     #[test]
     fn screen_buffer_clear_from_start_of_line() {
         let mut s = ScreenBuffer::new(10, 5);
-        s.set_cell(2, 2, Cell::new("X", 1, Style::new()));
+        s.set_cell(2, 2, Cell::new('X', 1, Style::new()));
         s.cursor.pos = Position { x: 5, y: 2 };
         s.clear_from_start_of_line();
         assert!(s.cell(2, 2).unwrap().is_empty());
@@ -729,7 +742,7 @@ mod tests {
     #[test]
     fn screen_buffer_clear_line() {
         let mut s = ScreenBuffer::new(10, 5);
-        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
+        s.set_cell(5, 2, Cell::new('X', 1, Style::new()));
         s.cursor.pos = Position { x: 0, y: 2 };
         s.clear_line();
         assert!(s.cell(5, 2).unwrap().is_empty());
@@ -738,7 +751,7 @@ mod tests {
     #[test]
     fn screen_buffer_clear_to_end_of_screen() {
         let mut s = ScreenBuffer::new(10, 5);
-        s.set_cell(5, 3, Cell::new("X", 1, Style::new()));
+        s.set_cell(5, 3, Cell::new('X', 1, Style::new()));
         s.cursor.pos = Position { x: 0, y: 2 };
         s.clear_to_end_of_screen();
         assert!(s.cell(5, 3).unwrap().is_empty());
@@ -747,7 +760,7 @@ mod tests {
     #[test]
     fn screen_buffer_clear_from_start_of_screen() {
         let mut s = ScreenBuffer::new(10, 5);
-        s.set_cell(5, 1, Cell::new("X", 1, Style::new()));
+        s.set_cell(5, 1, Cell::new('X', 1, Style::new()));
         s.cursor.pos = Position { x: 5, y: 2 };
         s.clear_from_start_of_screen();
         assert!(s.cell(5, 1).unwrap().is_empty());
@@ -803,17 +816,17 @@ mod tests {
     #[test]
     fn screen_buffer_insert_cell() {
         let mut s = ScreenBuffer::new(10, 5);
-        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
+        s.set_cell(5, 2, Cell::new('X', 1, Style::new()));
         s.cursor.pos = Position { x: 1, y: 2 };
         s.insert_cell(2);
         // "X" shifts right by 2, from col 5 to col 7.
-        assert_eq!(s.cell(7, 2).unwrap().content, "X");
+        assert_eq!(s.cell(7, 2).unwrap().content, Some('X'));
     }
 
     #[test]
     fn screen_buffer_delete_cell() {
         let mut s = ScreenBuffer::new(10, 5);
-        s.set_cell(5, 2, Cell::new("X", 1, Style::new()));
+        s.set_cell(5, 2, Cell::new('X', 1, Style::new()));
         s.cursor.pos = Position { x: 3, y: 2 };
         s.delete_cell(2);
         assert!(s.cell(5, 2).unwrap().is_empty());
@@ -822,7 +835,7 @@ mod tests {
     #[test]
     fn screen_buffer_scroll_up() {
         let mut s = ScreenBuffer::new(10, 5);
-        s.set_cell(5, 0, Cell::new("X", 1, Style::new()));
+        s.set_cell(5, 0, Cell::new('X', 1, Style::new()));
         s.scroll_up(1);
         assert!(s.cell(5, 0).unwrap().is_empty());
     }
@@ -830,7 +843,7 @@ mod tests {
     #[test]
     fn screen_buffer_scroll_down() {
         let mut s = ScreenBuffer::new(10, 5);
-        s.set_cell(5, 4, Cell::new("X", 1, Style::new()));
+        s.set_cell(5, 4, Cell::new('X', 1, Style::new()));
         s.scroll_down(1);
         assert!(s.cell(5, 4).unwrap().is_empty());
     }

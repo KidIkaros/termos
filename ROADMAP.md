@@ -329,36 +329,137 @@ ratatui-based multiplexers at scale.
 ## Phase 18 — Pixel canvas: GUI-like visual polish (Tier 2)
 
 The biggest visual gap between a terminal and a modern GUI is depth
-(shadows, elevation) and smoothness (gradients, anti-aliased edges).
-asciline-rust's pixel-mode mapper turns every terminal cell into a
-24-bit RGB pixel (`\x1b[48;2;R;G;Bm `), effectively creating a
-low-resolution framebuffer inside the terminal. Combined with ratatui
-for text, this bridges the gap without leaving the terminal.
+(shadows, elevation) and smoothness (gradients, anti-aliased edges). The
+`PixelCanvas` layer maps each terminal cell directly to a 24-bit RGB
+background, creating a low-resolution framebuffer inside the terminal.
+Combined with ratatui for text, this bridges the gap without leaving the
+terminal.
 
-See `docs/ASCILINE_INTEGRATION.md` for the full analysis.
+The asciline-rust integration was evaluated during this phase. Direct RGB
+cell painting was retained instead: it avoids an unnecessary mapper and
+RGB/BGR conversion on the hot path while preserving the visual effects.
+See `docs/ASCILINE_INTEGRATION.md` for the analysis.
 
 Architecture: dual-layer rendering
-- Layer 1 (asciline pixel canvas): gradient backgrounds, shadow effects,
-  anti-aliased shapes via signed-distance-field (SDF), sparklines.
-- Layer 2 (ratatui text): content, borders, widgets rendered on top with
+- Layer 1 (RGB pixel canvas): gradient backgrounds, shadow effects,
+  anti-aliased shape primitives, and sparklines.
+- Layer 2 (ratatui text): content, borders, and widgets rendered on top with
   transparent backgrounds showing the canvas through.
 
-- ✅ Add `asciline` dependency (default-features = false: just rayon +
-  flate2/miniz_oxide, pure Rust, no C deps).
-- ✅ `src/app/pixel_canvas.rs`: BGR framebuffer (`Vec<u8>`) sized to
-  terminal area, flushed as colored cells each frame.
+- ✅ Evaluate asciline-rust and select the direct-RGB path for ratatui.
+- ✅ `src/app/pixel_canvas.rs`: reusable RGB framebuffer (`Vec<u8>`) sized to
+  the terminal area and painted as colored cells.
 - ✅ Gradient backgrounds: horizontal/vertical/radial gradients for dock
   bar, title bars, and pane backgrounds.
 - ✅ Shadow rendering: Gaussian-falloff colored shadows for floating panes,
   giving depth/elevation feel.
-- ✅ Anti-aliased rounded corners: SDF-based corner masks that blend at
-  cell boundaries (replaces block-character `╭╮╰╯` with smooth edges).
+- ⬜ SDF rounded-corner integration for overlays (the primitives exist, but
+  current overlays still use ratatui cell borders).
 - ✅ Gradient sparklines: smooth colored bar graphs for CPU/RAM widgets
   in the dock.
-- ⬜ Integration with dirty-region rendering (Phase 17): only re-render
-  the pixel canvas when the background changes.
-- ✅ Tests: 9 tests covering canvas creation, gradients, shadows, SDF
-  corners, lerp/smoothstep correctness.
+- ✅ The reusable canvas and render invalidation are integrated in Phase 19.
+- ✅ Tests cover canvas creation, gradients, shadows, SDF primitives, and
+  interpolation edge cases.
+
+## Phase 19 — Interaction reliability & render efficiency (Tier 1: complete)
+
+The post-Phase-18 dogfood and optimization audit found that the remaining
+experience gap was less about feature count and more about keeping interaction
+responsive under load. This phase closes the reliability-critical portion of
+that work without changing the ratatui full-buffer composition model.
+
+- ✅ Status-widget jobs are bounded and non-blocking: completed workers are
+  reaped opportunistically, unfinished jobs never block a UI tick, one refresh
+  per widget is allowed at a time, the global worker cap is four, and child
+  commands have a ten-second timeout.
+- ✅ Retained pane render cache: styled VT rows are rebuilt on PTY output,
+  resize, or viewport changes, then composited into the current ratatui buffer
+  on every required frame.
+- ✅ Invalidation-driven rendering: local, remote, SSH, and web loops skip
+  idle terminal draws while still rendering input/output/state changes and
+  active animations.
+- ✅ Removed the pixel-canvas RGB → BGR → RGB round trip; the reusable RGB
+  canvas is painted directly into ratatui cells.
+- ✅ Cached layout results across `sync_window_sizes`, rendering, and graphics
+  placement, keyed by workspace bounds, gap, and serialized BSP tree.
+- ✅ Daemon output coalescing is signal-driven and bounded rather than waking
+  periodically while idle; graphics scans are skipped when passthrough is
+  inactive.
+- ✅ Closed the audited interaction gaps: settings tab stepping, coordinate-
+  based accent selection, asynchronous custom actions, and the
+  `signal_new_output` dirty contract.
+- ✅ Added regression coverage for PTY dirty propagation, persistent pane
+  rendering, widget worker bounds, direct-RGB edge cases, idle invalidation,
+  and overlay clicks. Existing VT render benchmarks remain the performance
+  baseline.
+
+Deferred follow-ups are deliberately narrow: cache stable gradient/shadow
+masks and wake every daemon response reader through a dedicated signal. Those
+are optimization opportunities for the next performance phase, not blockers
+for the interaction-reliability work completed here.
+
+## Phase 20 — Render hot path: inline cell content + per-frame palette
+
+The post-Phase-19 performance audit identified the two per-cell costs that
+dominate rendering. Tier 1 removed the structural one (a heap-allocated
+`String` per cell); Tier 2 removed the per-cell color-resolution branches.
+
+### Tier 1 — inline cell content
+
+`Cell.content` was a heap-allocated `String` per cell, even though the VT
+parser emits exactly one `char` per `print` call. A 207×55 pane snapshot
+cloned ~11k `String`s per dirty frame (~355 µs measured).
+
+- ✅ Store cell content inline as `Option<char>` (4 bytes, `Copy`, no
+  allocation) instead of `String` (24 bytes + heap per occupied cell).
+- ✅ Render snapshots return `(char, Style)` instead of `(String, Style)`,
+  removing per-cell string cloning from `render_view_lines`
+  (355 µs → 69 µs at 207×55; 118 µs → 13 µs at 80×24).
+- ✅ Updated screen/scrollback reflow, daemon diff conversion, copy-mode
+  extraction, and paint paths to the inline representation (multi-code-point
+  wire content is truncated to its first `char`, matching the existing
+  `chars().next()` render behaviour).
+
+### Tier 2 — per-frame style palette
+
+`paint_emulator` converted every cell's style through `to_tui_style`, which
+re-resolved `Color::Default`/`Color::Indexed` through an `Option<&Theme>`
+and a `match` for each cell. A `StyleCache` built for this purpose was dead
+code (and took a `Mutex` lock per lookup).
+
+- ✅ `StylePalette` (`src/ui/mod.rs`) precomputes the 256 indexed-color slots
+  and default foreground once per frame; `resolve`/`style` are O(1) lookups
+  (`vt_style` benchmark: 24 µs at 207×55, 4 µs at 80×24).
+- ✅ Fixed a latent panic: `Color::Indexed(16..=255)` previously indexed the
+  16-entry theme ANSI array and would panic; indices now resolve through the
+  standard xterm 256-color cube/grayscale.
+- ✅ Removed the unused `StyleCache` module (`src/ui/style_cache.rs`) and its
+  stale doc; `docs/THEMES.md` now describes the palette resolution.
+
+### Tier 3 — algorithmic
+
+- ✅ `ScreenBuffer::insert_cell`/`delete_cell` now shift cells in place with
+  `Vec::drain` + `Vec::splice` instead of cloning the entire row twice.
+- ✅ `scroll_up` recycles evicted scrollback buffers as fresh blank rows:
+  `push_line_recycle` now reclaims the evicted line's backing `Vec` (cleared)
+  rather than allocating a new one, removing a per-line allocation during
+  steady-state scrolling.
+- ⬜ `compute_diff` in `src/terminal/diff.rs` (and the whole screen-diff wire
+  protocol) turned out to have **no production callers** — only its own tests.
+  Optimizing it would be wasted effort; it is deferred for either wiring into
+  the daemon protocol or removal.
+
+### Tier 4 — pixel canvas caching
+
+- ✅ `PixelCanvas::fill_background` caches the solid fill + accent gradient +
+  dock row keyed by the three colors; an unchanged theme memcpys the cached
+  RGB buffer instead of recomputing gradients/lerps every frame. Also fixed a
+  latent underflow when rendering a 1-row terminal.
+- ✅ `drop_shadow` now compares squared distance and computes the Gaussian
+  falloff from `dist²`, eliminating a per-cell `sqrt`.
+- ⬜ Deferred: full shadow-mask caching (skip the per-cell `exp` too), skipping
+  the background fill under fully opaque panes, and the byte-by-byte parser
+  advance in `Emulator::write`.
 
 ## Priorities at a glance
 
@@ -375,3 +476,5 @@ Architecture: dual-layer rendering
 | 16 | 3 | Kitty animation protocol | Small |
 | 17 | 4 | Perf baselines, dirty regions, reflow, fuzzing | Large (ongoing) |
 | 18 | 2 | Pixel canvas: GUI-like visual polish | Medium (asciline-rust) |
+| 19 | 1 | Interaction reliability & render efficiency | Large (complete) |
+| 20 | 1 | Render hot path: content, palette, screen ops, canvas cache | Large |

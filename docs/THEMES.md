@@ -176,4 +176,8 @@ want. Define the bright variants explicitly.
 
 - [CONFIGURATION.md](CONFIGURATION.md) - the config file and every other option
 - [CLI_REFERENCE.md](CLI_REFERENCE.md) - `--theme`, `--list-themes`, `--preview-theme`
-- [STYLE_CACHE.md](STYLE_CACHE.md) - how TermOS caches `ratatui` styles derived from theme colors
+
+Theme colors are resolved once per render frame into a `StylePalette`
+(`src/ui/mod.rs`): ANSI slots 0–15 map to the theme's palette, indexed colors
+16–255 use the standard xterm 256-color cube/grayscale, and the default
+foreground resolves to the theme's foreground.

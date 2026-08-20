@@ -90,6 +90,15 @@ impl SpawnOptions<'_> {
     }
 }
 
+/// Retained raw VT lines used by the renderer between emulator updates.
+#[derive(Debug, Clone)]
+pub struct RenderCache {
+    pub width: i32,
+    pub height: i32,
+    pub viewport: usize,
+    pub lines: Vec<Vec<(char, crate::vt::Style)>>,
+}
+
 /// A terminal window: one shell session in a pane.
 pub struct Window {
     pub id: String,
@@ -154,9 +163,11 @@ pub struct Window {
     /// `Some` means a resize is pending; `None` means nothing deferred.
     pending_resize: Mutex<Option<WinSize>>,
     /// Dirty flag: set by the drain thread when PTY output arrives,
-    /// cleared by the render path after painting. Used for incremental
-    /// rendering — unchanged panes are skipped.
+    /// cleared by the render path after painting.
     dirty: Arc<AtomicBool>,
+    /// Retained raw VT lines. The renderer still composites them every frame,
+    /// but only rebuilds the styled line snapshot when content changes.
+    pub(crate) render_cache: Mutex<Option<RenderCache>>,
 
     /// Cell pixel dimensions for XTWINOPS / TIOCGWINSZ pixel reporting.
     /// `0` means unknown — pixel size is not reported in that case.
@@ -214,7 +225,8 @@ impl Window {
         )));
 
         let emu_clone = Arc::clone(&emulator);
-        let dirty_clone = Arc::new(AtomicBool::new(true));
+        let dirty = Arc::new(AtomicBool::new(true));
+        let dirty_clone = Arc::clone(&dirty);
         std::thread::spawn(move || drain_thread(reader.rx, emu_clone, dirty_clone));
 
         // A suspended command pane starts blank; write a hint into the
@@ -259,7 +271,8 @@ impl Window {
             geometry: Mutex::new(None),
             output_buffer: Vec::new(),
             pending_resize: Mutex::new(None),
-            dirty: Arc::new(AtomicBool::new(true)),
+            dirty,
+            render_cache: Mutex::new(None),
             cell_pixel_width: 0,
             cell_pixel_height: 0,
             scrollback_mode: false,
@@ -296,7 +309,8 @@ impl Window {
             size.rows as i32,
         )));
         let emu_clone = Arc::clone(&emulator);
-        let dirty_clone = Arc::new(AtomicBool::new(true));
+        let dirty = Arc::new(AtomicBool::new(true));
+        let dirty_clone = Arc::clone(&dirty);
         std::thread::spawn(move || drain_thread(output, emu_clone, dirty_clone));
         let win = Self {
             id: id.into(),
@@ -327,7 +341,8 @@ impl Window {
             geometry: Mutex::new(None),
             output_buffer: Vec::new(),
             pending_resize: Mutex::new(None),
-            dirty: Arc::new(AtomicBool::new(true)),
+            dirty,
+            render_cache: Mutex::new(None),
             cell_pixel_width: 0,
             cell_pixel_height: 0,
             scrollback_mode: false,
@@ -382,6 +397,7 @@ impl Window {
             output_buffer: Vec::new(),
             pending_resize: Mutex::new(None),
             dirty: Arc::new(AtomicBool::new(true)),
+            render_cache: Mutex::new(None),
             cell_pixel_width: 0,
             cell_pixel_height: 0,
             scrollback_mode: false,
@@ -439,6 +455,10 @@ impl Window {
         }
         if let Ok(mut emu) = self.emulator.lock() {
             emu.resize(size.cols as i32, size.rows as i32);
+        }
+        self.dirty.store(true, Ordering::Release);
+        if let Ok(mut cache) = self.render_cache.lock() {
+            *cache = None;
         }
         // Update the geometry snapshot with the new size.
         self.publish_geometry(
@@ -551,12 +571,17 @@ impl Window {
             size.rows as i32,
         )));
         let emu_clone = Arc::clone(&emulator);
-        let dirty_clone = Arc::new(AtomicBool::new(true));
+        let dirty = Arc::new(AtomicBool::new(true));
+        let dirty_clone = Arc::clone(&dirty);
         std::thread::spawn(move || drain_thread(reader.rx, emu_clone, dirty_clone));
 
         // Replacing `handle` drops the old one; its child already exited so
         // the reaped flag skips the kill.
         self.emulator = emulator;
+        self.dirty = dirty;
+        if let Ok(mut cache) = self.render_cache.lock() {
+            *cache = None;
+        }
         self.writer = Some(Box::new(writer));
         self.handle = Some(handle);
         self.exited = false;
@@ -1074,9 +1099,7 @@ impl Window {
     /// Signal that new output is available. Used by the diff protocol and
     /// the daemon output writer to wake the render path.
     pub fn signal_new_output(&self) {
-        // The render wake is handled by the coalescer's render_signal channel
-        // in daemon mode. For local mode, the PTY reader's wake callback
-        // handles this. This method is a no-op hook for future wiring.
+        self.dirty.store(true, Ordering::Release);
     }
 }
 
@@ -1396,6 +1419,52 @@ mod tests {
         let emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(emu.width(), 80);
         assert_eq!(emu.height(), 24);
+    }
+
+    #[test]
+    fn spawned_window_becomes_dirty_for_output_after_initial_frame() {
+        crate::skip_if_pty_exhausted!();
+        let opts = SpawnOptions {
+            command: Some("printf INITIAL; sleep 0.5; printf DIRTY_REPRO"),
+            suspended: false,
+        };
+        let wake = Box::new(|| {}) as Box<dyn Fn() + Send + 'static>;
+        let win = Window::spawn(
+            "dirty",
+            "Dirty flag",
+            WinSize { cols: 80, rows: 24 },
+            "/bin/sh",
+            opts,
+            wake,
+            &[],
+        )
+        .expect("PTY should spawn");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let text = win.emulator.lock().unwrap().render_text();
+            if text.contains("INITIAL") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "initial output never arrived");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // Simulate the renderer completing the initial frame.
+        win.clear_dirty();
+        assert!(!win.is_dirty());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let text = win.emulator.lock().unwrap().render_text();
+            if text.contains("DIRTY_REPRO") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "later output never arrived");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        assert!(win.is_dirty(), "new PTY output must invalidate the window");
     }
 
     // --- Phase G tests ---

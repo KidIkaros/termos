@@ -1134,14 +1134,14 @@ pub fn extract_styled_line(cells: &[crate::vt::cell::Cell]) -> Vec<StyledFragmen
         if cell.width == 0 {
             continue;
         }
-        if cell.content.is_empty() {
+        if cell.content.is_none() {
             out.push(StyledFragment {
                 text: " ".into(),
                 style: cell.style,
             });
         } else {
             out.push(StyledFragment {
-                text: cell.content.clone(),
+                text: cell.content.map(|c| c.to_string()).unwrap_or_default(),
                 style: cell.style,
             });
         }
@@ -1165,7 +1165,7 @@ pub fn extract_styled_range(
         if cell.width == 0 {
             continue;
         }
-        if cell.content.is_empty() {
+        if cell.content.is_none() {
             // Preserve internal spaces but not trailing empty cells.
             out.push(StyledFragment {
                 text: " ".into(),
@@ -1173,7 +1173,7 @@ pub fn extract_styled_range(
             });
         } else {
             out.push(StyledFragment {
-                text: cell.content.clone(),
+                text: cell.content.map(|c| c.to_string()).unwrap_or_default(),
                 style: cell.style,
             });
         }
@@ -2047,10 +2047,10 @@ mod styled_extraction_tests {
     #[test]
     fn extract_styled_line_basic() {
         let cells = [
-            Cell::new("h", 1, Style::default()),
-            Cell::new("i", 1, Style::default()),
-            Cell::new("", 1, Style::default()),
-            Cell::new("!", 1, Style::default()),
+            Cell::new('h', 1, Style::default()),
+            Cell::new('i', 1, Style::default()),
+            Cell::new_empty(1, Style::default()),
+            Cell::new('!', 1, Style::default()),
         ];
         let frags = extract_styled_line(&cells);
         assert_eq!(frags.len(), 4);
@@ -2061,10 +2061,10 @@ mod styled_extraction_tests {
 
     #[test]
     fn extract_styled_line_skips_wide_continuation() {
-        let mut wide = Cell::new("🎨", 2, Style::default());
-        let cont = Cell::new("", 0, Style::default());
+        let mut wide = Cell::new('🎨', 2, Style::default());
+        let cont = Cell::new_empty(0, Style::default());
         let _ = &mut wide;
-        let cells = [wide, cont, Cell::new("x", 1, Style::default())];
+        let cells = [wide, cont, Cell::new('x', 1, Style::default())];
         let frags = extract_styled_line(&cells);
         assert_eq!(frags.len(), 2);
         assert_eq!(frags[0].text, "🎨");
@@ -2074,10 +2074,10 @@ mod styled_extraction_tests {
     #[test]
     fn extract_styled_range_trims_trailing_spaces() {
         let cells = [
-            Cell::new("a", 1, Style::default()),
-            Cell::new("b", 1, Style::default()),
-            Cell::new("", 1, Style::default()),
-            Cell::new("", 1, Style::default()),
+            Cell::new('a', 1, Style::default()),
+            Cell::new('b', 1, Style::default()),
+            Cell::new_empty(1, Style::default()),
+            Cell::new_empty(1, Style::default()),
         ];
         let frags = extract_styled_range(&cells, 0, 3);
         assert_eq!(frags.len(), 2);

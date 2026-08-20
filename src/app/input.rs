@@ -137,10 +137,10 @@ pub fn encode_key(key: &KeyEvent) -> Vec<u8> {
 /// Whether a key is the configured leader key (e.g. Ctrl+B).
 fn is_leader_key(key: &KeyEvent, leader: &str) -> bool {
     match leader {
-        "ctrl+b" => {
+        "ctrl+b" | "ctrl-b" => {
             key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('b'))
         }
-        "ctrl+a" => {
+        "ctrl+a" | "ctrl-a" => {
             key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('a'))
         }
         _ => {
@@ -2223,11 +2223,104 @@ mod tests {
     }
 
     #[test]
+    fn terminal_mode_forwards_key_input_to_focused_pty() {
+        crate::skip_if_pty_exhausted!();
+        let mut os = test_os();
+        os.spawn_window("/bin/bash", Box::new(|| {}))
+            .expect("PTY should spawn");
+        os.enter_terminal_mode();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let text = os.windows[0].emulator.lock().unwrap().render_text();
+            if text.contains('$') || text.contains('#') {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "shell prompt never appeared");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        for ch in "printf INPUT_REPRO".chars() {
+            assert_eq!(
+                handle_key(&mut os, &key(KeyCode::Char(ch))),
+                KeyResult::Passthrough
+            );
+        }
+        assert_eq!(handle_key(&mut os, &key(KeyCode::Enter)), KeyResult::Passthrough);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let text = os.windows[0].emulator.lock().unwrap().render_text();
+            if text.contains("INPUT_REPRO") {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "typed command never produced output: {text:?}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
     fn quit_opens_quit_menu() {
         let mut os = test_os();
         let result = handle_key(&mut os, &key(KeyCode::Char('q')));
         assert_eq!(result, KeyResult::Consumed);
         assert!(os.quit_menu.is_some());
+    }
+
+    #[test]
+    fn terminal_output_is_visible_after_an_initial_render() {
+        crate::skip_if_pty_exhausted!();
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let mut os = test_os();
+        os.width = 80;
+        os.height = 24;
+        os.spawn_window("/bin/bash", Box::new(|| {}))
+            .expect("PTY should spawn");
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
+        os.update(crate::app::msg::Msg::Tick);
+        crate::app::render::render(&os, &mut buf);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let text = os.windows[0].emulator.lock().unwrap().render_text();
+            if text.contains('$') || text.contains('#') {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "shell prompt never appeared");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        os.enter_terminal_mode();
+        for ch in "printf RENDER_REPRO".chars() {
+            handle_key(&mut os, &key(KeyCode::Char(ch)));
+        }
+        handle_key(&mut os, &key(KeyCode::Enter));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            os.update(crate::app::msg::Msg::Tick);
+            crate::app::render::render(&os, &mut buf);
+            let rendered: String = buf.content().iter().map(|cell| cell.symbol()).collect();
+            if rendered.contains("RENDER_REPRO") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "command output never rendered: {rendered:?}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let rendered: String = buf.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(rendered.contains("RENDER_REPRO"), "rendered buffer omitted PTY output");
+
+        // A second frame with no new PTY data must retain the pane content.
+        crate::app::render::render(&os, &mut buf);
+        let rendered_again: String = buf.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(
+            rendered_again.contains("RENDER_REPRO"),
+            "unchanged PTY output disappeared on the next frame"
+        );
     }
 
     fn leader() -> KeyEvent {
@@ -2241,6 +2334,17 @@ mod tests {
         assert_eq!(os.prefix, Prefix::Leader);
         handle_key(&mut os, &key(KeyCode::Char('P')));
         assert!(os.palette_open);
+    }
+
+    #[test]
+    fn hyphenated_ctrl_b_leader_enters_prefix() {
+        let mut os = test_os();
+        os.config.keybindings.leader_key = "ctrl-b".to_string();
+
+        let result = handle_key(&mut os, &leader());
+
+        assert_eq!(result, KeyResult::Consumed);
+        assert_eq!(os.prefix, Prefix::Leader);
     }
 
     #[test]

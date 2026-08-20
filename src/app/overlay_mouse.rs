@@ -269,27 +269,40 @@ fn set_overlay_tab(os: &mut Os, kind: &str, _i: usize) {
 /// Move the overlay's active section by delta. Mirrors Go `stepOverlayTab`.
 fn step_overlay_tab(os: &mut Os, kind: &str, delta: i32) {
     match kind {
-        "help" | "settings" => {
-            // Tab stepping requires category state; delegate to set_overlay_tab
-            // with a clamped index. For now, this is a no-op stub that consumes
-            // the event correctly.
-            let _ = (os, kind, delta);
+        "settings" => {
+            let len = os.settings_rows().len() as i32;
+            if len > 0 {
+                os.settings_selected =
+                    (os.settings_selected as i32 + delta).rem_euclid(len) as usize;
+            }
+        }
+        "help" => {
+            // Help currently has one mode-aware section, so there is no
+            // secondary tab to switch. Keep the event consumed rather than
+            // letting it fall through to the pane beneath.
         }
         _ => {}
     }
 }
 
 /// Handle a click on the accent picker overlay. Returns true if handled.
-fn accent_picker_press(os: &mut Os, _hit: &OverlayPanelHit, _lx: i32, _ly: i32) -> bool {
-    // The accent picker is a grid of cells. A click selects and applies the
-    // accent. The Rust port uses accent_picker_selected as an index.
-    if os.accent_picker_open {
-        // For now, activate the currently selected accent on click.
-        // Full cell-hit testing would require accent_hit_at geometry.
-        os.apply_selected_accent();
-        return true;
+fn accent_picker_press(os: &mut Os, hit: &OverlayPanelHit, lx: i32, ly: i32) -> bool {
+    if !os.accent_picker_open {
+        return false;
     }
-    false
+    // Panel::render places body rows after top padding, title, and a blank
+    // row. Match that geometry so a click chooses the swatch under the mouse
+    // rather than applying whichever item was selected by the keyboard.
+    let row = ly - 3;
+    if row < 0 || row as usize >= os.accent_list.len() {
+        return false;
+    }
+    if lx < 0 || lx >= hit.geo.width {
+        return false;
+    }
+    os.accent_picker_selected = row as usize;
+    os.apply_selected_accent();
+    true
 }
 
 /// Close an overlay by kind, resetting the corresponding state field.
@@ -502,6 +515,16 @@ mod tests {
         os.overlay_z_order = vec!["palette".into()];
         os.overlay_hits = vec![make_hit("palette", 10, 10, 30, 10, 100)];
         assert!(overlay_mouse_wheel(&mut os, 20, 15, true));
+    }
+
+    #[test]
+    fn accent_click_selects_clicked_row() {
+        let mut os = make_os();
+        os.accent_picker_open = true;
+        let hit = make_hit("accent", 10, 10, 40, 20, 100);
+        assert!(accent_picker_press(&mut os, &hit, 5, 5));
+        assert_eq!(os.config.appearance.border_focused_color.as_deref(), Some("green"));
+        assert!(!os.accent_picker_open);
     }
 
     #[test]

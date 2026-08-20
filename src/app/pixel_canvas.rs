@@ -1,28 +1,36 @@
 //! Pixel canvas — a low-resolution framebuffer for GUI-like visual effects.
 //!
-//! Uses `asciline`'s pixel-mode mapper to render gradient backgrounds, soft
-//! shadows, anti-aliased shapes, and gradient sparklines.  Each terminal cell
-//! becomes a 24-bit RGB pixel via `\x1b[48;2;R;G;Bm `.
+//! Renders gradient backgrounds, soft shadows, anti-aliased shapes, and
+//! gradient sparklines directly as ratatui RGB cell backgrounds. Each
+//! terminal cell remains a 24-bit RGB pixel.
 //!
 //! Architecture: dual-layer rendering
 //! - Layer 1 (this module): gradient/shadow/shape backgrounds
 //! - Layer 2 (ratatui): text, borders, widgets with transparent backgrounds
 
-use asciline::mapper::Mapper;
-
-/// A pixel canvas backed by a BGR framebuffer (3 bytes per cell).
+/// A pixel canvas backed by an RGB framebuffer (3 bytes per cell).
 ///
-/// The canvas is sized to the terminal area and rendered as colored cells
-/// each frame.  ratatui paints text on top with transparent backgrounds
-/// showing the canvas through.
+/// The canvas is sized to the terminal area and rendered as colored cells.
+/// Ratatui paints text on top with transparent backgrounds showing the canvas
+/// through.
+/// The colors that fully determine the canvas background layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackgroundKey {
+    pub bg: (u8, u8, u8),
+    pub accent_end: (u8, u8, u8),
+    pub dock: (u8, u8, u8),
+}
+
 pub struct PixelCanvas {
-    /// BGR framebuffer: `[B, G, R]` per cell, `width * height * 3` bytes.
-    bgr: Vec<u8>,
-    /// RGB framebuffer for gradient computation (fed to the mapper).
+    /// RGB framebuffer: `[R, G, B]` per cell, `width * height * 3` bytes.
     rgb: Vec<u8>,
     width: usize,
     height: usize,
-    mapper: Mapper,
+    /// Cached background layer (solid fill + accent gradient + dock row) and
+    /// the color key that produced it, so an unchanged background is a memcpy
+    /// instead of recomputed gradients/lerps.
+    bg_cache_key: Option<BackgroundKey>,
+    bg_cache: Vec<u8>,
 }
 
 impl PixelCanvas {
@@ -30,12 +38,45 @@ impl PixelCanvas {
     pub fn new(width: usize, height: usize) -> Self {
         let pixels = width * height;
         Self {
-            bgr: vec![0u8; pixels * 3],
             rgb: vec![0u8; pixels * 3],
             width,
             height,
-            mapper: Mapper::new(&[' '], 0),
+            bg_cache_key: None,
+            bg_cache: Vec::new(),
         }
+    }
+
+    /// Fill the background layer: a solid fill, a one-row accent gradient
+    /// above the dock, and a solid dock row. The computed RGB buffer is cached
+    /// so a later call with the same colors is a memcpy rather than recomputed
+    /// gradient/lerp work.
+    pub fn fill_background(
+        &mut self,
+        bg: (u8, u8, u8),
+        accent_end: (u8, u8, u8),
+        dock: (u8, u8, u8),
+    ) {
+        let key = BackgroundKey {
+            bg,
+            accent_end,
+            dock,
+        };
+        if self.bg_cache_key == Some(key) && self.bg_cache.len() == self.rgb.len() {
+            self.rgb.copy_from_slice(&self.bg_cache);
+            return;
+        }
+        self.clear(bg.0, bg.1, bg.2);
+        if self.height >= 2 {
+            self.gradient_horizontal(0, self.height - 2, self.width, 1, bg, accent_end);
+        }
+        if self.height >= 1 {
+            for x in 0..self.width {
+                self.set_pixel(x, self.height - 1, dock.0, dock.1, dock.2);
+            }
+        }
+        self.bg_cache.clear();
+        self.bg_cache.extend_from_slice(&self.rgb);
+        self.bg_cache_key = Some(key);
     }
 
     /// Clear the canvas to a solid color.
@@ -67,15 +108,9 @@ impl PixelCanvas {
         }
     }
 
-    /// Flush the RGB framebuffer through the mapper to produce the BGR output.
-    pub fn flush(&mut self) {
-        self.mapper
-            .map_pixel(&self.rgb, self.width, self.height, &mut self.bgr);
-    }
-
-    /// Get the BGR framebuffer for rendering.
-    pub fn bgr(&self) -> &[u8] {
-        &self.bgr
+    /// Get the RGB framebuffer for rendering.
+    pub fn rgb(&self) -> &[u8] {
+        &self.rgb
     }
 
     /// Width in cells.
@@ -100,7 +135,7 @@ impl PixelCanvas {
         start: (u8, u8, u8),
         end: (u8, u8, u8),
     ) {
-        if w == 0 {
+        if w == 0 || h == 0 || self.width == 0 || self.height == 0 {
             return;
         }
         for dy in 0..h {
@@ -113,7 +148,11 @@ impl PixelCanvas {
                 if x >= self.width {
                     break;
                 }
-                let t = dx as f64 / (w - 1) as f64;
+                let t = if w <= 1 {
+                    0.0
+                } else {
+                    dx as f64 / (w - 1) as f64
+                };
                 let r = lerp(start.0, end.0, t);
                 let g = lerp(start.1, end.1, t);
                 let b = lerp(start.2, end.2, t);
@@ -163,6 +202,12 @@ impl PixelCanvas {
         center_color: (u8, u8, u8),
         edge_color: (u8, u8, u8),
     ) {
+        if radius <= 0.0 || self.width == 0 || self.height == 0 {
+            if radius <= 0.0 {
+                self.set_pixel(cx.max(0.0) as usize, cy.max(0.0) as usize, center_color.0, center_color.1, center_color.2);
+            }
+            return;
+        }
         let r2 = radius * radius;
         let min_x = (cx - radius).max(0.0) as usize;
         let max_x = (cx + radius).min(self.width as f64 - 1.0) as usize;
@@ -203,6 +248,9 @@ impl PixelCanvas {
         shadow_color: (u8, u8, u8),
         bg: (u8, u8, u8),
     ) {
+        if rect_w == 0 || rect_h == 0 || shadow_radius <= 0.0 || self.width == 0 || self.height == 0 {
+            return;
+        }
         // Shadow region: the rect + offset, expanded by shadow_radius.
         let sx = (rect_x as i32 + offset_x - shadow_radius as i32).max(0) as usize;
         let sy = (rect_y as i32 + offset_y - shadow_radius as i32).max(0) as usize;
@@ -238,15 +286,17 @@ impl PixelCanvas {
                 } else {
                     0.0
                 };
-                let dist = (dx * dx + dy * dy).sqrt();
+                // Squared distance avoids a per-cell `sqrt`; the falloff only
+                // needs `dist²` and the radius comparison is equivalent.
+                let dist2 = dx * dx + dy * dy;
 
-                if dist > shadow_radius {
+                if dist2 > shadow_radius * shadow_radius {
                     continue;
                 }
 
                 // Gaussian falloff: exp(-dist² / (2 * σ²))
                 let sigma = shadow_radius / 3.0; // 99.7% within radius
-                let intensity = (-dist * dist / (2.0 * sigma * sigma)).exp();
+                let intensity = (-dist2 / (2.0 * sigma * sigma)).exp();
 
                 let r = lerp(bg.0, shadow_color.0, intensity);
                 let g = lerp(bg.1, shadow_color.1, intensity);
@@ -416,7 +466,7 @@ mod tests {
         let c = PixelCanvas::new(10, 5);
         assert_eq!(c.width(), 10);
         assert_eq!(c.height(), 5);
-        assert_eq!(c.bgr().len(), 10 * 5 * 3);
+        assert_eq!(c.rgb().len(), 10 * 5 * 3);
     }
 
     #[test]
@@ -452,6 +502,20 @@ mod tests {
         assert!(r > 240, "right edge should be red, got r={r}");
         assert_eq!(g, 0);
         assert_eq!(b, 0);
+    }
+
+    #[test]
+    fn single_pixel_gradient_is_well_defined() {
+        let mut c = PixelCanvas::new(1, 1);
+        c.gradient_horizontal(0, 0, 1, 1, (10, 20, 30), (200, 210, 220));
+        assert_eq!(c.get_pixel(0, 0), (10, 20, 30));
+    }
+
+    #[test]
+    fn zero_radius_radial_gradient_is_safe() {
+        let mut c = PixelCanvas::new(4, 4);
+        c.gradient_radial(2.0, 2.0, 0.0, (10, 20, 30), (200, 210, 220));
+        assert_eq!(c.get_pixel(2, 2), (10, 20, 30));
     }
 
     #[test]
@@ -502,5 +566,39 @@ mod tests {
         assert!((smoothstep(0.0, 1.0, -1.0) - 0.0).abs() < 0.01);
         assert!((smoothstep(0.0, 1.0, 0.5) - 0.5).abs() < 0.01);
         assert!((smoothstep(0.0, 1.0, 2.0) - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn fill_background_sets_accent_gradient_and_dock() {
+        let mut c = PixelCanvas::new(10, 4);
+        c.fill_background((0, 0, 0), (255, 0, 0), (0, 0, 255));
+        // Dock row (y = 3) is solid blue.
+        assert_eq!(c.get_pixel(0, 3), (0, 0, 255));
+        assert_eq!(c.get_pixel(9, 3), (0, 0, 255));
+        // Accent row (y = 2) fades black → red left to right.
+        let (r0, _, _) = c.get_pixel(0, 2);
+        assert!(r0 < 30, "left edge near black, got {r0}");
+        let (r9, _, _) = c.get_pixel(9, 2);
+        assert!(r9 > 240, "right edge near red, got {r9}");
+        // Content rows (y < 2) are solid background.
+        assert_eq!(c.get_pixel(4, 0), (0, 0, 0));
+    }
+
+    #[test]
+    fn fill_background_updates_with_different_key() {
+        let mut c = PixelCanvas::new(10, 4);
+        c.fill_background((0, 0, 0), (255, 0, 0), (0, 0, 255));
+        c.fill_background((0, 0, 0), (255, 0, 0), (0, 255, 0));
+        // The dock row reflects the new key rather than the cached one.
+        assert_eq!(c.get_pixel(5, 3), (0, 255, 0));
+    }
+
+    #[test]
+    fn fill_background_single_row_is_safe() {
+        // A 1-row canvas has no accent row; only the dock row is painted.
+        let mut c = PixelCanvas::new(4, 1);
+        c.fill_background((10, 20, 30), (1, 2, 3), (200, 100, 50));
+        assert_eq!(c.get_pixel(0, 0), (200, 100, 50));
+        assert_eq!(c.get_pixel(3, 0), (200, 100, 50));
     }
 }

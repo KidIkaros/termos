@@ -444,7 +444,7 @@ impl TermosSshServer {
                     }
                 }
 
-                // Rate-limit rendering.
+                // Rate-limit rendering and skip idle frames.
                 if last_render.elapsed() < frame_budget {
                     tokio::time::sleep(Duration::from_millis(2)).await;
                     continue;
@@ -463,12 +463,15 @@ impl TermosSshServer {
 
                         // Create a terminal backend writing to our buffer.
                         let backend = CrosstermBackend::new(&mut buf);
-                        if let Ok(mut terminal) = Terminal::new(backend) {
-                            let _ = terminal.draw(|frame| {
-                                render(&cs.os, frame.buffer_mut());
-                            });
-                            // Force flush the backend to write to buf.
-                            let _ = terminal.backend_mut().flush();
+                        if cs.os.needs_render() {
+                            if let Ok(mut terminal) = Terminal::new(backend) {
+                                let _ = terminal.draw(|frame| {
+                                    render(&cs.os, frame.buffer_mut());
+                                });
+                                // Force flush the backend to write to buf.
+                                let _ = terminal.backend_mut().flush();
+                            }
+                            cs.os.mark_rendered();
                         }
 
                         // Send the rendered output.

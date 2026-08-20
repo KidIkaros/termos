@@ -1462,7 +1462,7 @@ impl BSPTree {
 }
 
 /// Serialized representation of a BSP tree node.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SerializedNode {
     pub window_id: i32,
     pub split_type: i32,
@@ -1473,7 +1473,7 @@ pub struct SerializedNode {
     pub right: Option<Box<SerializedNode>>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 pub struct SerializedBSPTree {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub root: Option<SerializedNode>,

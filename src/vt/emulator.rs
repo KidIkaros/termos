@@ -380,10 +380,10 @@ impl Emulator {
                 let w = cell.width.max(1) as i32;
                 let covered = col.max(c_lo) <= (col + w - 1).min(c_hi);
                 if covered {
-                    if cell.content.is_empty() {
-                        out.push(' ');
+                    if let Some(ch) = cell.content {
+                        out.push(ch);
                     } else {
-                        out.push_str(&cell.content);
+                        out.push(' ');
                     }
                 }
                 col += w;
@@ -413,7 +413,7 @@ impl Emulator {
 
     /// Render a full snapshot of the active screen as styled text lines,
     /// returning (content, style) pairs per cell for the renderer.
-    pub fn render_lines(&self) -> Vec<Vec<(String, Style)>> {
+    pub fn render_lines(&self) -> Vec<Vec<(char, Style)>> {
         let screen = self.screen();
         let mut out = Vec::with_capacity(screen.height() as usize);
         for y in 0..screen.height() {
@@ -425,7 +425,7 @@ impl Emulator {
     /// Render the visible viewport, scrolling back into the scrollback when
     /// `viewport` is non-zero: the last `viewport` scrollback lines are shown
     /// above the live screen rows, up to `height` lines total.
-    pub fn render_view_lines(&self) -> Vec<Vec<(String, Style)>> {
+    pub fn render_view_lines(&self) -> Vec<Vec<(char, Style)>> {
         let height = self.screens[self.active].height() as usize;
         if height == 0 {
             return Vec::new();
@@ -655,7 +655,7 @@ impl Emulator {
                 x,
                 y,
                 crate::vt::cell::Cell {
-                    content: c.to_string(),
+                    content: Some(c),
                     width: width as u8,
                     style,
                     link: Default::default(),
@@ -667,7 +667,7 @@ impl Emulator {
                     x + k,
                     y,
                     crate::vt::cell::Cell {
-                        content: String::new(),
+                        content: None,
                         width: 0,
                         style,
                         link: Default::default(),
@@ -699,8 +699,8 @@ fn line_text(line: &[crate::vt::cell::Cell]) -> String {
     let mut col = 0;
     while col < line.len() {
         let cell = &line[col];
-        if !cell.content.is_empty() {
-            text.push_str(&cell.content);
+        if let Some(ch) = cell.content {
+            text.push(ch);
         } else {
             text.push(' ');
         }
@@ -709,9 +709,10 @@ fn line_text(line: &[crate::vt::cell::Cell]) -> String {
     text.trim_end().to_string()
 }
 
-/// Convert a screen line of cells into `(content, style)` pairs, skipping
+/// Convert a screen line of cells into `(char, style)` pairs, skipping
 /// continuation cells of wide runes so each entry is one displayed column.
-fn row_to_styled(line: Option<&[crate::vt::cell::Cell]>) -> Vec<(String, Style)> {
+/// Blank cells become `' '` to match the renderer's on-screen padding.
+fn row_to_styled(line: Option<&[crate::vt::cell::Cell]>) -> Vec<(char, Style)> {
     let Some(row) = line else {
         return Vec::new();
     };
@@ -719,7 +720,7 @@ fn row_to_styled(line: Option<&[crate::vt::cell::Cell]>) -> Vec<(String, Style)>
     let mut col = 0;
     while col < row.len() {
         let cell = &row[col];
-        out.push((cell.content.clone(), cell.style));
+        out.push((cell.content.unwrap_or(' '), cell.style));
         col += cell.width.max(1) as usize;
     }
     out
@@ -2397,7 +2398,7 @@ mod reflow_tests {
         // Content should span 2 rows.
         let lines = e.render_view_lines();
         let text: String = lines.iter().map(|row| {
-            row.iter().map(|(s, _)| s.as_str()).collect::<String>()
+            row.iter().map(|(s, _)| *s).collect::<String>()
         }).collect::<Vec<_>>().join("\n");
         assert!(text.contains("0123456789"));
         assert!(text.contains("AB"));
@@ -2406,7 +2407,7 @@ mod reflow_tests {
         e.resize(40, 24);
         let lines = e.render_view_lines();
         let all_text: String = lines.iter().map(|row| {
-            row.iter().map(|(s, _)| s.as_str()).collect::<String>()
+            row.iter().map(|(s, _)| *s).collect::<String>()
         }).collect::<Vec<_>>().join("\n");
         // The original 80 chars should still be present after reflow.
         assert!(all_text.contains("01234567890123456789"));
@@ -2431,7 +2432,7 @@ mod reflow_tests {
         assert_eq!(lines.len(), 3);
         // The last 3 lines should be visible.
         let text: String = lines.iter().map(|row| {
-            row.iter().map(|(s, _)| s.as_str()).collect::<String>()
+            row.iter().map(|(s, _)| *s).collect::<String>()
         }).collect::<Vec<_>>().join("\n");
         assert!(text.contains("line5"));
     }
@@ -2444,7 +2445,7 @@ mod reflow_tests {
 
         let lines = e.render_view_lines();
         let text: String = lines.iter().map(|row| {
-            row.iter().map(|(s, _)| s.as_str()).collect::<String>()
+            row.iter().map(|(s, _)| *s).collect::<String>()
         }).collect::<Vec<_>>().join("\n");
         assert!(text.contains("hello world"));
         assert!(text.contains("foo bar baz"));
@@ -2453,7 +2454,7 @@ mod reflow_tests {
         e.resize(80, 5);
         let lines = e.render_view_lines();
         let text: String = lines.iter().map(|row| {
-            row.iter().map(|(s, _)| s.as_str()).collect::<String>()
+            row.iter().map(|(s, _)| *s).collect::<String>()
         }).collect::<Vec<_>>().join("\n");
         assert!(text.contains("hello world"));
         assert!(text.contains("foo bar baz"));

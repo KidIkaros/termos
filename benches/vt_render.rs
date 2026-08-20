@@ -43,5 +43,37 @@ fn bench_render(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_render);
+/// Per-cell style resolution through the per-frame `StylePalette`. This is
+/// the cost the palette approach replaced: previously each cell re-resolved
+/// `Color::Default`/`Color::Indexed` through an `Option<&Theme>` branch.
+fn bench_style_resolution(c: &mut Criterion) {
+    let mut group = c.benchmark_group("vt_style");
+
+    for (name, cols, rows) in &[("207x55", 207i32, 55i32), ("80x24", 80i32, 24i32)] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(name),
+            &(*cols, *rows),
+            |b, &(c, r)| {
+                let mut emu = Emulator::new(c, r);
+                fill_screen(&mut emu, c, r);
+                let lines = emu.render_view_lines();
+                let theme = termos::config::theme::Theme::catppuccin_mocha();
+                let palette = termos::ui::StylePalette::new(Some(&theme));
+                b.iter(|| {
+                    let mut acc = 0u64;
+                    for row in &lines {
+                        for (_, style) in row {
+                            acc = acc.wrapping_add(palette.style(*style).add_modifier.bits() as u64);
+                        }
+                    }
+                    black_box(acc);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_render, bench_style_resolution);
 criterion_main!(benches);

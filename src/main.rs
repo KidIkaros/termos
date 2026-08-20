@@ -1965,11 +1965,15 @@ fn run_remote_event_loop(
             return Ok(());
         }
 
-        // Render.
-        if last_render.elapsed() >= frame_budget {
+        // Render only when input, remote output, state, or animation work
+        // requires a frame.
+        if last_render.elapsed() >= frame_budget && os.needs_render() {
+            let render_started = Instant::now();
             terminal.draw(|frame| {
                 render(os, frame.buffer_mut());
             })?;
+            os.tick_stats.record_frame(render_started.elapsed());
+            os.mark_rendered();
             last_render = Instant::now();
         }
 
@@ -2289,11 +2293,15 @@ fn run_event_loop(
             break;
         }
 
-        // Render at most ~60 FPS.
-        if last_render.elapsed() >= frame_budget {
+        // Render at most ~60 FPS, but skip idle frames unless content,
+        // animation, or input state has requested one.
+        if last_render.elapsed() >= frame_budget && os.needs_render() {
+            let render_started = Instant::now();
             terminal.draw(|frame| {
                 render(os, frame.buffer_mut());
             })?;
+            os.tick_stats.record_frame(render_started.elapsed());
+            os.mark_rendered();
             last_render = Instant::now();
         }
 

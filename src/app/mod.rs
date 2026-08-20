@@ -395,6 +395,14 @@ impl Workspace {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct LayoutCacheKey {
+    workspace: i32,
+    bounds: Rect,
+    gap: i32,
+    tree: SerializedBSPTree,
+}
+
 /// The central window manager state.
 pub struct Os {
     /// All windows, global across workspaces.
@@ -581,6 +589,8 @@ pub struct Os {
     pub pending_float: bool,
     /// Saved layout templates: name → serialized BSP tree.
     pub layouts: HashMap<String, SerializedBSPTree>,
+    /// Cached current-workspace layout keyed by tree and geometry state.
+    layout_cache: Mutex<Option<(LayoutCacheKey, HashMap<i32, Rect>)>>,
     /// Lifecycle hooks, loaded from the `[hooks]` config section.
     pub hook_manager: hooks::Manager,
     /// Agent alerts parked in their settle window, keyed by window id.
@@ -603,6 +613,9 @@ pub struct Os {
     pub hold_mode: interaction::HoldMode,
     /// Frame timing statistics for the trace overlay.
     pub tick_stats: interaction::TickStats,
+    /// Whether a state/input change requires a new frame. PTY output is also
+    /// detected through each window's dirty flag.
+    render_requested: bool,
     /// Active window animations (minimize/restore/snap), keyed by window id.
     animations: HashMap<i32, crate::ui::animation::Animation>,
     /// Whether the client's pointer is a finger (per-session, set by the web
@@ -652,6 +665,8 @@ pub struct Os {
     pub sixel_passthrough: Option<crate::graphics::sixel::SixelPassthrough>,
     /// Host terminal capabilities (probed at startup).
     pub graphics_caps: crate::graphics::capability::Capabilities,
+    /// Reusable RGB background canvas; resized only when the terminal changes.
+    pub pixel_canvas: Mutex<crate::app::pixel_canvas::PixelCanvas>,
     /// The last time an alert sound was played (for cooldown).
     pub last_sound_played: Option<std::time::Instant>,
     /// Cached audio player command (None = not probed yet, Some(None) = none found).
@@ -661,8 +676,11 @@ pub struct Os {
     pub widget_cache: Arc<Mutex<HashMap<String, String>>>,
     /// When each widget was last refreshed: widget name → Instant.
     pub widget_last_run: HashMap<String, std::time::Instant>,
-    /// Background thread handles for widget refresh.
-    widget_threads: Vec<std::thread::JoinHandle<()>>,
+    /// Background thread handles for widget refresh, paired with widget names.
+    widget_threads: Vec<(String, std::thread::JoinHandle<()>)>,
+    /// Widgets currently being refreshed; prevents overlapping jobs when the
+    /// configured interval is shorter than the command runtime.
+    widget_inflight: std::collections::HashSet<String>,
 }
 
 /// A discovered `.tuios.tape` waiting on the trust review.
@@ -929,6 +947,7 @@ impl Os {
             float_drag: None,
             pending_float: false,
             layouts: HashMap::new(),
+            layout_cache: Mutex::new(None),
             hook_manager,
             pending_agent_alerts: HashMap::new(),
             agent_state_holds: HashMap::new(),
@@ -938,6 +957,7 @@ impl Os {
             last_mouse_pos: (0, 0),
             hold_mode: interaction::HoldMode::new(),
             tick_stats: interaction::TickStats::new(),
+            render_requested: true,
             animations: HashMap::new(),
             touch_client: false,
             read_only: false,
@@ -962,12 +982,32 @@ impl Os {
             kitty_passthrough: None,
             sixel_passthrough: None,
             graphics_caps: crate::graphics::capability::Capabilities::default(),
+            pixel_canvas: Mutex::new(crate::app::pixel_canvas::PixelCanvas::new(1, 1)),
             last_sound_played: None,
             sound_player: None,
             widget_cache: Arc::new(Mutex::new(HashMap::new())),
             widget_last_run: HashMap::new(),
             widget_threads: Vec::new(),
+            widget_inflight: std::collections::HashSet::new(),
         }
+    }
+
+    /// Request a frame after an input, state, or configuration change.
+    pub fn request_render(&mut self) {
+        self.render_requested = true;
+    }
+
+    /// Whether a frame is currently needed. PTY output and active animations
+    /// bypass the explicit request flag.
+    pub fn needs_render(&self) -> bool {
+        self.render_requested
+            || !self.animations.is_empty()
+            || self.windows.iter().any(|w| w.is_dirty())
+    }
+
+    /// Mark the current state as composited into a terminal buffer.
+    pub fn mark_rendered(&mut self) {
+        self.render_requested = false;
     }
 
     // -----------------------------------------------------------------------
@@ -1825,13 +1865,22 @@ impl Os {
         }
     }
 
-    /// Drain pending APC and Sixel sequences from all windows and forward
-    /// Refresh status widgets whose refresh interval has elapsed.
-    /// Spawns a background thread per stale widget so the tick is not blocked.
+    /// Refresh status widgets whose interval has elapsed.
+    ///
+    /// Refresh commands run outside the UI thread. Completed jobs are joined
+    /// opportunistically; unfinished jobs remain in the registry and never
+    /// block a maintenance tick. At most one job per widget may be in flight.
     pub fn update_status_widgets(&mut self) {
+        const MAX_WIDGET_WORKERS: usize = 4;
+        if self.reap_widget_threads() {
+            self.request_render();
+        }
         let now = std::time::Instant::now();
         for widget in &self.config.status_widgets {
-            if widget.command.is_empty() {
+            if self.widget_inflight.len() >= MAX_WIDGET_WORKERS {
+                break;
+            }
+            if widget.command.is_empty() || self.widget_inflight.contains(&widget.name) {
                 continue;
             }
             let last = self.widget_last_run.get(&widget.name).copied()
@@ -1843,53 +1892,119 @@ impl Os {
             let name = widget.name.clone();
             let cmd = widget.command.clone();
             let cache = Arc::clone(&self.widget_cache);
-            self.widget_threads.push(std::thread::spawn(move || {
-                let output = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(&cmd)
-                    .output();
-                let text = match output {
-                    Ok(out) => String::from_utf8_lossy(&out.stdout)
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                        .trim()
-                        .to_string(),
-                    Err(_) => "err".into(),
-                };
-                cache.lock().unwrap().insert(name, text);
-            }));
-            self.widget_last_run.insert(widget.name.clone(), now);
+            let thread_name = name.clone();
+            let handle = std::thread::spawn(move || {
+                let text = Self::run_widget_command(&cmd);
+                cache.lock().unwrap().insert(thread_name, text);
+            });
+            self.widget_threads.push((name.clone(), handle));
+            self.widget_inflight.insert(name.clone());
+            self.widget_last_run.insert(name, now);
         }
-        // Reap finished threads.
-        self.widget_threads.retain(|t| !t.is_finished());
     }
 
-    /// Block until all pending widget refresh threads have finished.
+    /// Run a widget command with a bounded lifetime so a broken external
+    /// command cannot leave a worker alive forever.
+    fn run_widget_command(command: &str) -> String {
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+        let mut child = match std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => return "err".into(),
+        };
+        let deadline = std::time::Instant::now() + TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    return child
+                        .wait_with_output()
+                        .ok()
+                        .map(|out| {
+                            String::from_utf8_lossy(&out.stdout)
+                                .lines()
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .to_string()
+                        })
+                        .unwrap_or_else(|| "err".into());
+                }
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return "timeout".into();
+                }
+                Err(_) => return "err".into(),
+            }
+        }
+    }
+
+    /// Join only workers that have already finished, never blocking the UI.
+    fn reap_widget_threads(&mut self) -> bool {
+        let threads = std::mem::take(&mut self.widget_threads);
+        let mut pending = Vec::with_capacity(threads.len());
+        let mut completed = false;
+        for (name, handle) in threads {
+            if handle.is_finished() {
+                let _ = handle.join();
+                self.widget_inflight.remove(&name);
+                completed = true;
+            } else {
+                pending.push((name, handle));
+            }
+        }
+        self.widget_threads = pending;
+        completed
+    }
+
+    /// Explicitly wait for all pending widget refreshes. This is intended for
+    /// shutdown and tests, not for the UI maintenance tick.
     pub fn flush_widget_threads(&mut self) {
-        for t in self.widget_threads.drain(..) {
-            let _ = t.join();
+        for (name, handle) in self.widget_threads.drain(..) {
+            let _ = handle.join();
+            self.widget_inflight.remove(&name);
         }
     }
 
-    /// Execute a custom action by name (from the palette).
-    pub fn run_custom_action(&self, name: &str) {
-        let Some(action) = self.config.custom_actions.iter()
-            .find(|a| a.name == name) else {
-                return;
-            };
+    /// Execute a custom action asynchronously so a long-running command
+    /// cannot freeze input or rendering. The child inherits the host stdio,
+    /// matching the previous command behavior while returning immediately.
+    pub fn run_custom_action(&mut self, name: &str) {
+        let Some(action) = self
+            .config
+            .custom_actions
+            .iter()
+            .find(|a| a.name == name)
+            .cloned()
+        else {
+            return;
+        };
         let ctx = self.window_hook_ctx(self.focused_window.unwrap_or(0));
         let mut cmd = std::process::Command::new("sh");
         cmd.arg("-c").arg(&action.command);
         for (key, value) in ctx.env_pairs() {
             cmd.env(key, value);
         }
-        let _ = cmd.status();
+        match cmd.spawn() {
+            Ok(_) => self.notify(format!("started custom action: {}", action.name), "info"),
+            Err(e) => self.notify(format!("custom action failed to start: {e}"), "error"),
+        }
     }
 
     /// them to the host terminal. Called once per render tick, before
     /// drawing, so images appear in the right pane.
     pub fn flush_graphics(&mut self) {
+        if self.kitty_passthrough.is_none() && self.sixel_passthrough.is_none() {
+            return;
+        }
         // Precompute pane origins for the current workspace layout so we
         // don't borrow self while iterating windows.
         let origins = self.compute_pane_origins();
@@ -1934,11 +2049,10 @@ impl Os {
     /// on the current workspace.
     fn compute_pane_origins(&self) -> Vec<(u32, u32)> {
         let ws = self.current_workspace;
-        let Some(workspace) = self.workspaces.get(&ws) else {
+        if !self.workspaces.contains_key(&ws) {
             return Vec::new();
-        };
-        let bounds = self.workspace_bounds(ws);
-        let rects = workspace.tree.apply_layout(bounds, 1);
+        }
+        let rects = self.current_layout();
         self.windows
             .iter()
             .enumerate()
@@ -1993,8 +2107,7 @@ impl Os {
         &self,
     ) -> HashMap<u32, crate::graphics::placement::WindowPositionInfo> {
         let ws = self.current_workspace;
-        let bounds = self.workspace_bounds(ws);
-        let rects = self.workspace(ws).tree.apply_layout(bounds, self.gap);
+        let rects = self.current_layout();
         let mut result = HashMap::new();
         for (i, w) in self.windows.iter().enumerate() {
             let Some(rect) = rects.get(&(i as i32)) else {
@@ -3323,9 +3436,7 @@ impl Os {
     /// (floating). Windows whose size actually changed fire the after-resize
     /// hook.
     pub fn sync_window_sizes(&mut self) {
-        let ws = self.current_workspace;
-        let bounds = self.workspace_bounds(ws);
-        let layout = self.workspace(ws).tree.apply_layout(bounds, self.gap);
+        let layout = self.current_layout();
         let mut resized = Vec::new();
         for (window_id, rect) in layout {
             if let Some(window) = self.windows.get_mut(window_id as usize) {
@@ -3351,7 +3462,24 @@ impl Os {
     pub fn current_layout(&self) -> HashMap<i32, Rect> {
         let ws = self.current_workspace;
         let bounds = self.workspace_bounds(ws);
-        self.workspace(ws).tree.apply_layout(bounds, self.gap)
+        let key = LayoutCacheKey {
+            workspace: ws,
+            bounds,
+            gap: self.gap,
+            tree: self.workspace(ws).tree.serialize(),
+        };
+        if let Ok(cache) = self.layout_cache.lock() {
+            if let Some((cached_key, layout)) = cache.as_ref() {
+                if cached_key == &key {
+                    return layout.clone();
+                }
+            }
+        }
+        let layout = self.workspace(ws).tree.apply_layout(bounds, self.gap);
+        if let Ok(mut cache) = self.layout_cache.lock() {
+            *cache = Some((key, layout.clone()));
+        }
+        layout
     }
 
     // -----------------------------------------------------------------------
@@ -6796,6 +6924,13 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(80, 25)).unwrap();
         terminal.draw(|f| render(&os, f.buffer_mut())).unwrap();
+        assert!(os.windows[0]
+            .render_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some());
+        terminal.draw(|f| render(&os, f.buffer_mut())).unwrap();
         let buf = terminal.backend().buffer();
         // The border ring: row 0 is the top edge, column 0/79 are the sides.
         assert_eq!(buf[(0, 0)].symbol(), "╭");
@@ -8812,6 +8947,47 @@ mod extension_tests {
     }
 
     #[test]
+    fn status_widget_refresh_does_not_wait_for_slow_command() {
+        let mut os = os();
+        os.config.status_widgets.clear();
+        os.config.status_widgets.push(StatusWidgetConfig {
+            name: "slow".into(),
+            command: "sleep 1; echo SLOW_WIDGET".into(),
+            refresh_ms: 0,
+            alignment: "right".into(),
+        });
+
+        let started = std::time::Instant::now();
+        os.update_status_widgets();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "widget refresh blocked the caller"
+        );
+        assert_eq!(os.widget_inflight.len(), 1);
+        os.flush_widget_threads();
+        assert_eq!(
+            os.widget_cache.lock().unwrap().get("slow").unwrap(),
+            "SLOW_WIDGET"
+        );
+    }
+
+    #[test]
+    fn status_widgets_respect_global_worker_cap() {
+        let mut os = os();
+        os.config.status_widgets = (0..6)
+            .map(|i| StatusWidgetConfig {
+                name: format!("slow-{i}"),
+                command: "sleep 1; echo done".into(),
+                refresh_ms: 0,
+                alignment: "right".into(),
+            })
+            .collect();
+        os.update_status_widgets();
+        assert!(os.widget_inflight.len() <= 4);
+        os.flush_widget_threads();
+    }
+
+    #[test]
     fn status_widget_respects_refresh_interval() {
         let mut os = os();
         os.config.status_widgets.clear(); // isolate from built-in widgets
@@ -8844,6 +9020,10 @@ mod extension_tests {
             category: "Custom".into(),
         });
         os.run_custom_action("Test action");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(marker.exists(), "custom action did not fire");
         let _ = std::fs::remove_file(&marker);
     }

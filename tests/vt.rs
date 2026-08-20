@@ -157,7 +157,7 @@ fn view_line_text(emu: &Emulator, row: usize) -> String {
         .get(row)
         .map(|r| {
             r.iter()
-                .map(|(s, _)| s.as_str())
+                .map(|(s, _)| *s)
                 .collect::<String>()
                 .trim_end()
                 .to_string()
@@ -416,7 +416,7 @@ fn narrowing_resize_blanks_cut_wide_rune() {
     emu.resize(5, 3);
     let last = emu.screen().cell(4, 0).expect("last cell exists");
     assert!(
-        last.content.is_empty() || last.content == " ",
+        last.content.is_none() || last.content == Some(' '),
         "dangling wide-rune lead at last col: {:?}",
         last.content
     );
@@ -432,7 +432,7 @@ fn narrowing_resize_preserves_clean_edge() {
     // The 2nd 世 occupies cols 2-3, so col 3 is its continuation (empty content).
     // The lead at col 2 should still be 世.
     let lead = emu.screen().cell(2, 0).expect("cell at col 2");
-    assert_eq!(lead.content, "世", "clean-edge lead should survive");
+    assert_eq!(lead.content, Some('世'), "clean-edge lead should survive");
 }
 
 #[test]

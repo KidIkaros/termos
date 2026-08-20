@@ -49,18 +49,33 @@ impl Scrollback {
         self.trim();
     }
 
-    /// Push a line and, if it was trimmed, return a recycled line of the same
-    /// width to be reused as a fresh blank line (the Go code's
-    /// `PushLineOwnedRecycle` optimization).
+    /// Push a line and, when the buffer is at capacity, reclaim the evicted
+    /// line's backing `Vec` (cleared) so the caller can reuse it as a fresh
+    /// blank line instead of allocating a new one (the Go code's
+    /// `PushLineOwnedRecycle` optimization). The returned buffer is always
+    /// `width` cells long.
     pub fn push_line_recycle(&mut self, line: Vec<Cell>) -> Option<Vec<Cell>> {
         let width = line.len();
         self.lines.push(std::sync::Arc::new(line));
-        if self.lines.len() > self.max_lines {
-            let excess = self.lines.len() - self.max_lines;
-            self.lines.drain(..excess);
-            return Some(new_line(width));
+        if self.lines.len() <= self.max_lines {
+            return None;
         }
-        None
+        let excess = self.lines.len() - self.max_lines;
+        let reclaimed = self
+            .lines
+            .drain(..excess)
+            .next()
+            .and_then(|evicted| std::sync::Arc::try_unwrap(evicted).ok())
+            .map(|mut buf| {
+                for cell in buf.iter_mut() {
+                    *cell = Cell::default();
+                }
+                if buf.len() != width {
+                    buf.resize(width, Cell::default());
+                }
+                buf
+            });
+        reclaimed.or_else(|| Some(new_line(width)))
     }
 
     fn trim(&mut self) {
@@ -108,7 +123,7 @@ impl Scrollback {
                 // Fill continuation slots for wide runes.
                 for k in 1..w {
                     if current_col + k < new_width {
-                        current[current_col + k].content.clear();
+                        current[current_col + k].content = None;
                         current[current_col + k].width = 0;
                         current[current_col + k].style = cell.style;
                     }
@@ -151,7 +166,7 @@ mod tests {
         let mut sb = Scrollback::new(10);
         let mut line = new_line(4);
         for (i, cell) in line.iter_mut().enumerate() {
-            cell.content = ((b'a' + i as u8) as char).to_string();
+            cell.content = Some((b'a' + i as u8) as char);
             cell.width = 1;
         }
         sb.push_line(line);
@@ -201,11 +216,24 @@ mod tests {
     #[test]
     fn push_line_recycle_with_trim() {
         let mut sb = Scrollback::new(2);
-        sb.push_line(new_line(1));
-        sb.push_line(new_line(1));
+        sb.push_line(new_line(3));
+        sb.push_line(new_line(3));
         let recycled = sb.push_line_recycle(new_line(3));
         assert!(recycled.is_some());
         assert_eq!(recycled.unwrap().len(), 3);
+    }
+
+    #[test]
+    fn push_line_recycle_clears_reclaimed_buffer() {
+        let mut sb = Scrollback::new(2);
+        let mut first = new_line(2);
+        first[0].content = Some('x');
+        sb.push_line(first);
+        sb.push_line(new_line(2));
+        // The reclaimed buffer is the evicted (first) line, cleared to blanks.
+        let recycled = sb.push_line_recycle(new_line(2)).unwrap();
+        assert_eq!(recycled.len(), 2);
+        assert!(recycled.iter().all(|c| c.is_empty()));
     }
 
     #[test]
@@ -221,9 +249,9 @@ mod tests {
     fn reflow_widens_lines() {
         let mut sb = Scrollback::new(10);
         let mut line = new_line(2);
-        line[0].content = "a".into();
+        line[0].content = Some('a');
         line[0].width = 1;
-        line[1].content = "b".into();
+        line[1].content = Some('b');
         line[1].width = 1;
         sb.push_line(line);
         sb.reflow(4);

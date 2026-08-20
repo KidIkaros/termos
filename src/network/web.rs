@@ -677,11 +677,14 @@ async fn handle_ws(
 
                 // Create a terminal backend writing to our buffer.
                 let backend = CrosstermBackend::new(&mut buf);
-                if let Ok(mut terminal) = Terminal::new(backend) {
-                    let _ = terminal.draw(|frame| {
-                        render(&os, frame.buffer_mut());
-                    });
-                    let _ = terminal.backend_mut().flush();
+                if os.needs_render() {
+                    if let Ok(mut terminal) = Terminal::new(backend) {
+                        let _ = terminal.draw(|frame| {
+                            render(&os, frame.buffer_mut());
+                        });
+                        let _ = terminal.backend_mut().flush();
+                    }
+                    os.mark_rendered();
                 }
 
                 // Send host sequences (OSC 9, BEL, etc.) if any.

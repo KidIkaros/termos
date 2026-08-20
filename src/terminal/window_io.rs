@@ -106,8 +106,8 @@ pub struct DaemonOutputWriter {
     /// The render signal sender. The coalescer fires this at a capped rate
     /// when new output is available.
     _render_signal: Option<Sender<()>>,
-    /// Whether new output has arrived since the last coalescer tick.
-    _coalesce_signal: Arc<AtomicBool>,
+    /// Wake channel for the render coalescer; idle workers block on it.
+    _coalesce_tx: Sender<()>,
     /// Join handles for the background threads.
     _writer_handle: Option<std::thread::JoinHandle<()>>,
     _coalescer_handle: Option<std::thread::JoinHandle<()>>,
@@ -126,12 +126,12 @@ impl DaemonOutputWriter {
         let done = Arc::new(AtomicBool::new(false));
         let output_epoch = Arc::new(AtomicU64::new(0));
         let stream_owns_size = Arc::new(AtomicBool::new(false));
-        let coalesce_signal = Arc::new(AtomicBool::new(false));
+        let (coalesce_tx, coalesce_rx) = bounded::<()>(1);
 
         // Spawn the writer thread.
         let writer_done = Arc::clone(&done);
         let writer_epoch = Arc::clone(&output_epoch);
-        let writer_coalesce = Arc::clone(&coalesce_signal);
+        let writer_coalesce = coalesce_tx.clone();
         let writer_handle = std::thread::Builder::new()
             .name("daemon-output-writer".to_string())
             .spawn(move || {
@@ -141,12 +141,11 @@ impl DaemonOutputWriter {
 
         // Spawn the render coalescer thread.
         let coalescer_done = Arc::clone(&done);
-        let coalescer_signal = Arc::clone(&coalesce_signal);
         let coalescer_render = render_signal.clone();
         let coalescer_handle = std::thread::Builder::new()
             .name("daemon-render-coalescer".to_string())
             .spawn(move || {
-                coalescer_thread(coalescer_done, coalescer_signal, coalescer_render);
+                coalescer_thread(coalescer_done, coalesce_rx, coalescer_render);
             })
             .ok();
 
@@ -156,7 +155,7 @@ impl DaemonOutputWriter {
             output_epoch,
             stream_owns_size,
             _render_signal: render_signal,
-            _coalesce_signal: coalesce_signal,
+            _coalesce_tx: coalesce_tx,
             _writer_handle: writer_handle,
             _coalescer_handle: coalescer_handle,
         }
@@ -257,7 +256,7 @@ fn writer_thread(
     emulator: Arc<Mutex<Emulator>>,
     done: Arc<AtomicBool>,
     output_epoch: Arc<AtomicU64>,
-    coalesce_signal: Arc<AtomicBool>,
+    coalesce_signal: Sender<()>,
 ) {
     let mut batch: Vec<u8> = Vec::with_capacity(MAX_BATCH);
 
@@ -307,8 +306,9 @@ fn writer_thread(
                         emu.write(chunk);
                     }
                 }
-                // Signal the coalescer that new output is available.
-                coalesce_signal.store(true, Ordering::Release);
+                // Wake the coalescer only when output arrives; the bounded
+                // channel naturally coalesces bursts.
+                let _ = coalesce_signal.try_send(());
             }
             batch.clear();
         }
@@ -322,7 +322,7 @@ fn writer_thread(
                         emu.resize(w, h);
                     }
                 }
-                coalesce_signal.store(true, Ordering::Release);
+                let _ = coalesce_signal.try_send(());
             }
         }
     }
@@ -339,20 +339,27 @@ fn writer_thread(
 /// Ported from Go `renderCoalescer`.
 fn coalescer_thread(
     done: Arc<AtomicBool>,
-    coalesce_signal: Arc<AtomicBool>,
+    coalesce_rx: Receiver<()>,
     render_signal: Option<Sender<()>>,
 ) {
+    let mut next_emit: Option<std::time::Instant> = None;
     while !done.load(Ordering::Acquire) {
-        std::thread::sleep(COALESCE_INTERVAL);
-
-        // Consume the coalescer's own flag.
-        if coalesce_signal
-            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            if let Some(ref tx) = render_signal {
-                let _ = tx.try_send(());
+        let wait = next_emit
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap_or(Duration::from_secs(3600));
+        match coalesce_rx.recv_timeout(wait) {
+            Ok(()) => {
+                if next_emit.is_none() {
+                    next_emit = Some(std::time::Instant::now() + COALESCE_INTERVAL);
+                }
             }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if let Some(ref tx) = render_signal {
+                    let _ = tx.try_send(());
+                }
+                next_emit = None;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
     }
 }
