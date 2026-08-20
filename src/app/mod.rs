@@ -2643,7 +2643,8 @@ impl Os {
 
     /// The usable bounds of a workspace, minus the dock bar.
     pub fn workspace_bounds(&self, _ws: i32) -> Rect {
-        let dock_height = 1;
+        // 2 rows: accent bar + dock content.
+        let dock_height = 2;
         Rect {
             x: 0,
             y: 0,
@@ -7288,7 +7289,7 @@ mod tests {
         assert_eq!(zoomed.x, 0);
         assert_eq!(zoomed.y, 0);
         assert_eq!(zoomed.w, 80);
-        assert_eq!(zoomed.h, 24);
+        assert_eq!(zoomed.h, 23); // 25 - 2 (accent bar + dock)
         os.toggle_zoom_internal().unwrap();
         let restored = os.float_rect(0).unwrap();
         assert_eq!(restored, r);
@@ -7465,11 +7466,12 @@ mod animation_tests {
         assert!(pos.is_some());
         let (x, y, w, h) = pos.unwrap();
         // At progress ~0 the position is the start rect; it interpolates
-        // toward the workspace bounds (80x24) as the animation runs.
+        // toward the workspace bounds (80x23, accounting for 2-row dock) as
+        // the animation runs.
         assert_eq!(x, 0);
         assert_eq!(w, 80);
         assert!((0..=12).contains(&y));
-        assert!((12..=24).contains(&h));
+        assert!((11..=23).contains(&h));
     }
 }
 

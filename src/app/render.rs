@@ -21,12 +21,13 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let dock_height = 1usize;
+    // Dock area: 2 rows — accent bar (top) + dock content (bottom).
+    let dock_height = 2usize;
     let dock_area = TuiRect {
         x: 0,
-        y: area.height.saturating_sub(dock_height as u16),
+        y: area.height.saturating_sub(1),
         width: area.width,
-        height: dock_height as u16,
+        height: 1,
     };
     let content_area = TuiRect {
         x: 0,
@@ -44,17 +45,30 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     let mut canvas = PixelCanvas::new(area.width as usize, area.height as usize);
     canvas.clear(bg_rgb.0, bg_rgb.1, bg_rgb.2);
 
-    // Gradient dock bar (bottom 1 row): subtle horizontal fade from bg to bright black.
+    // Accent bar: 1-row gradient strip above the dock, giving a "glass" effect.
+    // Fades from content background to a dimmed version of the accent color.
     if let Some(theme) = os.theme.as_ref() {
-        let bright_black = theme.ansi[8];
+        let dock_bg = theme.ansi[0]; // black = dock background
+        let accent = theme.ansi[4]; // blue = accent color
+        let accent_y = area.height as usize - 2; // row above the dock
+        // Dim the accent to 30% brightness for a subtle glass strip.
+        let dim_accent = (
+            (accent.0 as f64 * 0.3) as u8,
+            (accent.1 as f64 * 0.3) as u8,
+            (accent.2 as f64 * 0.3) as u8,
+        );
         canvas.gradient_horizontal(
             0,
-            area.height as usize - 1,
+            accent_y,
             area.width as usize,
             1,
             (bg_rgb.0, bg_rgb.1, bg_rgb.2),
-            (bright_black.0, bright_black.1, bright_black.2),
+            dim_accent,
         );
+        // Dock content row: solid dock background.
+        for x in 0..area.width as usize {
+            canvas.set_pixel(x, area.height as usize - 1, dock_bg.0, dock_bg.1, dock_bg.2);
+        }
     }
 
     // Drop shadows for floating panes.
