@@ -8,7 +8,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::vt::cell::{Color, Style};
 use crate::vt::charset::CharSet;
-use crate::vt::parser::{CsiSequence, DcsSequence, Handler, OscSequence, Parser, StringSequence};
+use crate::vt::parser::{CsiSequence, DcsSequence, Handler, OscSequence, Parser, State, StringSequence};
 use crate::vt::screen::{Position, ScreenBuffer, ScrollRegion};
 
 /// A mode bit — DEC and ANSI modes share a keyspace.
@@ -466,10 +466,45 @@ impl Emulator {
         // Take the parser out so we can borrow `self` mutably as the handler
         // without aliasing the parser field.
         let mut parser = std::mem::take(&mut self.parser);
-        for &b in data {
+
+        // Fast path: while the parser is in the Ground state, contiguous runs
+        // of printable ASCII (0x20..=0x7E) are written straight to the screen
+        // in a batch, skipping the per-byte state-machine dispatch.  Control
+        // bytes, ESC/CSI/OSC, and UTF-8 leads still go through the parser so
+        // their semantics are untouched.
+        let mut run_start: Option<usize> = None;
+        let mut i = 0;
+        while i < data.len() {
+            let b = data[i];
+            let printable = parser.state() == State::Ground && (0x20..=0x7e).contains(&b);
+            if printable {
+                if run_start.is_none() {
+                    run_start = Some(i);
+                }
+                i += 1;
+                continue;
+            }
+            if let Some(s) = run_start.take() {
+                self.print_ascii_run(&data[s..i]);
+            }
             parser.advance(b, self);
+            i += 1;
         }
+        if let Some(s) = run_start.take() {
+            self.print_ascii_run(&data[s..i]);
+        }
+
         self.parser = parser;
+    }
+
+    /// Write a run of printable ASCII bytes (no control chars, all width 1)
+    /// directly into the screen, skipping the per-byte parser dispatch.
+    /// Each character is written through [`Self::write_cell`], the same core
+    /// the parser path uses.
+    fn print_ascii_run(&mut self, run: &[u8]) {
+        for &b in run {
+            self.write_cell(b as char, 1);
+        }
     }
 
     /// Take any response bytes the emulator queued (DA/DSR answers).
@@ -609,9 +644,17 @@ impl Emulator {
             self.screen_mut().cursor.pos.x = (self.screen_mut().cursor.pos.x - 1).max(0);
             return;
         }
-        self.last_printed_char = Some(c);
+        self.write_cell(c, UnicodeWidthChar::width(c).unwrap_or(1) as i32);
+    }
 
-        let width = UnicodeWidthChar::width(c).unwrap_or(1) as i32;
+    /// Write `c` (display width `width`) into the cell at the cursor, with
+    /// pending-wrap, insert-mode, wide-char pre-wrap, and phantom handling.
+    ///
+    /// Shared by [`Self::print_char`] (the parser path) and
+    /// [`Self::print_ascii_run`] (the printable-run fast path) so the two
+    /// paths cannot drift apart.
+    fn write_cell(&mut self, c: char, width: i32) {
+        self.last_printed_char = Some(c);
         let auto_wrap = self.is_mode_set(MODE_AUTO_WRAP);
         let insert_mode = self.is_mode_set(MODE_INSERT);
 
@@ -2458,5 +2501,94 @@ mod reflow_tests {
         }).collect::<Vec<_>>().join("\n");
         assert!(text.contains("hello world"));
         assert!(text.contains("foo bar baz"));
+    }
+}
+
+#[cfg(test)]
+mod write_fast_path_tests {
+    use super::*;
+
+    /// Feed `data` through the parser byte-by-byte — the pre-fast-path
+    /// `write` behavior — as a reference implementation.
+    fn write_slow(emu: &mut Emulator, data: &[u8]) {
+        let mut parser = std::mem::take(&mut emu.parser);
+        for &b in data {
+            parser.advance(b, emu);
+        }
+        emu.parser = parser;
+    }
+
+    fn assert_equivalent(data: &[u8]) {
+        let mut fast = Emulator::new(80, 24);
+        fast.write(data);
+        let mut slow = Emulator::new(80, 24);
+        write_slow(&mut slow, data);
+
+        assert_eq!(
+            fast.render_view_lines(),
+            slow.render_view_lines(),
+            "screen mismatch for {:?}",
+            String::from_utf8_lossy(data)
+        );
+        assert_eq!(fast.screen().cursor.pos, slow.screen().cursor.pos);
+        assert_eq!(fast.at_phantom, slow.at_phantom);
+        assert_eq!(fast.last_printed_char, slow.last_printed_char);
+        assert_eq!(fast.scrollback_len(), slow.scrollback_len());
+        for i in 0..fast.scrollback_len() {
+            assert_eq!(
+                fast.scrollback_line_text(i),
+                slow.scrollback_line_text(i),
+                "scrollback line {i} mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_ascii_matches_parser_path() {
+        assert_equivalent(b"hello world");
+        assert_equivalent(b"a");
+    }
+
+    #[test]
+    fn runs_around_escapes_match() {
+        assert_equivalent(b"hello \x1b[1mworld\x1b[0m\r\n");
+        assert_equivalent(b"\x1b[31mred\x1b[0m \x1b[32mgreen\x1b[0m");
+        assert_equivalent(b"plain\x1b]0;title\x07after osc");
+        assert_equivalent(b"\x1b[38;5;196mcolored\x1b[39m text");
+    }
+
+    #[test]
+    fn utf8_and_controls_around_runs_match() {
+        // UTF-8 lead bytes break the ASCII run and go through the parser.
+        assert_equivalent("café \u{1F600} world".as_bytes());
+        assert_equivalent(b"tab\there\r\nback\x08space");
+        assert_equivalent(b"nul\x00after");
+        assert_equivalent(b"\x01\x02\x03");
+    }
+
+    #[test]
+    fn wraps_and_scroll_match() {
+        // Enough text to wrap lines and scroll the screen into scrollback.
+        let mut line = Vec::new();
+        for i in 0..500u32 {
+            line.push(b'a' + (i % 26) as u8);
+            if i % 70 == 0 {
+                line.extend_from_slice(b"\x1b[1m"); // escape mid-stream
+            }
+        }
+        assert_equivalent(&line);
+    }
+
+    #[test]
+    fn insert_mode_run_matches() {
+        let mut fast = Emulator::new(80, 24);
+        fast.write(b"\x1b[4h"); // insert mode on
+        let mut slow = Emulator::new(80, 24);
+        write_slow(&mut slow, b"\x1b[4h");
+        let data = b"inserted text";
+        fast.write(data);
+        write_slow(&mut slow, data);
+        assert_eq!(fast.render_view_lines(), slow.render_view_lines());
+        assert_eq!(fast.screen().cursor.pos, slow.screen().cursor.pos);
     }
 }

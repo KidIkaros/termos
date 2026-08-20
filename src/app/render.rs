@@ -337,8 +337,10 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         render_tooltip(buf, content_area, text, *x, *y);
     }
 
-    // Showkeys: always show the last pressed chord at the bottom.
-    if !os.last_key_chord.is_empty()
+    // Showkeys: show the last pressed chord at the bottom, only when the
+    // `[debug] show_key_events` diagnostic is enabled (default off).
+    if os.config.debug.show_key_events
+        && !os.last_key_chord.is_empty()
         && !os.help_open
         && !os.palette_open
         && !os.switcher_open
@@ -2306,11 +2308,34 @@ mod tests {
     }
 
     #[test]
-    fn render_showkeys() {
+    fn render_showkeys_requires_debug_flag() {
         let mut os = test_os();
         os.last_key_chord = "Ctrl+A".into();
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        // Disabled by default: the chord must not be drawn.
         render(&os, &mut buf);
+        let drawn: String = buf
+            .content
+            .iter()
+            .filter(|c| c.symbol() != " ")
+            .map(|c| c.symbol())
+            .collect();
+        assert!(!drawn.contains('A'), "showkeys must be off by default");
+
+        // Enabled via `[debug] show_key_events`: the chord is drawn.
+        os.config.debug.show_key_events = true;
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        render(&os, &mut buf);
+        let drawn: String = buf
+            .content
+            .iter()
+            .filter(|c| c.symbol() != " ")
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            drawn.contains("Ctrl+A"),
+            "showkeys should draw the chord when enabled, got: {drawn:?}"
+        );
     }
 
     #[test]

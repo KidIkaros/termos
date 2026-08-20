@@ -1086,6 +1086,20 @@ fn handle_debug_prefix(os: &mut Os, key: &KeyEvent) -> KeyResult {
             os.prefix = Prefix::None;
             KeyResult::Consumed
         }
+        // `k` — toggle the showkeys overlay.
+        KeyCode::Char('k') => {
+            os.config.debug.show_key_events = !os.config.debug.show_key_events;
+            os.notify(
+                if os.config.debug.show_key_events {
+                    "showkeys enabled"
+                } else {
+                    "showkeys disabled"
+                },
+                "info",
+            );
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
         // `q` / Esc — cancel.
         KeyCode::Char('q') | KeyCode::Esc => {
             os.prefix = Prefix::None;
@@ -3858,6 +3872,20 @@ mod debug_prefix_tests {
         assert!(!os.debug_overlay_open);
         // The event log ring captured the notification.
         assert!(os.event_log.iter().any(|e| e.contains("hello")));
+    }
+
+    #[test]
+    fn debug_k_toggles_showkeys() {
+        let mut os = test_os();
+        assert!(!os.config.debug.show_key_events);
+        os.prefix = Prefix::Debug;
+        handle_key(&mut os, &key(KeyCode::Char('k')));
+        assert!(os.config.debug.show_key_events);
+        assert_eq!(os.prefix, Prefix::None);
+        // Toggle back off.
+        os.prefix = Prefix::Debug;
+        handle_key(&mut os, &key(KeyCode::Char('k')));
+        assert!(!os.config.debug.show_key_events);
     }
 
     #[test]

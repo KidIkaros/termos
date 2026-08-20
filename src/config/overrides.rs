@@ -296,9 +296,7 @@ pub fn apply_overrides(config: &mut UserConfig, overrides: &Overrides) {
 
     // Show Keys — enable the showkeys overlay.
     if let Some(true) = overrides.show_keys {
-        // The showkeys overlay is a runtime toggle; the config field may not
-        // exist yet, so we set it on the appearance if present.
-        // This is a no-op if the field doesn't exist in the config struct.
+        config.debug.show_key_events = true;
     }
 }
 
@@ -520,6 +518,15 @@ mod tests {
         let (ov, remaining) = Overrides::parse(&args);
         assert_eq!(ov.show_keys, Some(true));
         assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn show_keys_override_enables_debug_flag() {
+        let mut cfg = crate::config::UserConfig::default();
+        assert!(!cfg.debug.show_key_events);
+        let (ov, _) = Overrides::parse(&["--show-keys".into()]);
+        ov.apply(&mut cfg);
+        assert!(cfg.debug.show_key_events);
     }
 
     #[test]

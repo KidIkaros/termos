@@ -457,9 +457,62 @@ code (and took a `Mutex` lock per lookup).
   latent underflow when rendering a 1-row terminal.
 - ✅ `drop_shadow` now compares squared distance and computes the Gaussian
   falloff from `dist²`, eliminating a per-cell `sqrt`.
-- ⬜ Deferred: full shadow-mask caching (skip the per-cell `exp` too), skipping
-  the background fill under fully opaque panes, and the byte-by-byte parser
-  advance in `Emulator::write`.
+- ✅ `drop_shadow` shadow masks are now cached per `(rect_w, rect_h, radius)`
+  (bounded at 64 entries), so the per-cell `exp` runs once per rect size
+  instead of every frame; the mask is position-independent and shared across
+  frames and float positions.
+- ✅ `Emulator::write` now batches runs of printable ASCII straight into the
+  screen (`print_ascii_run`), skipping the per-byte parser dispatch.  Both
+  paths share the `write_cell` core so they cannot drift; equivalence is
+  locked in by fast-vs-slow tests and the VT conformance/proptest suites.
+  Measured: plain 1 MiB ingest ~89→94 ms vs ~123 ms for escape-heavy input
+  (~25% faster on printable streams).
+- ⬜ Assessed & rejected: skipping the background fill under "fully opaque"
+  panes.  `StylePalette::style` deliberately omits the bg for `Color::Default`
+  cells (`src/ui/mod.rs`), so most pane cells are transparent and the canvas
+  shows through — the dual-layer design is load-bearing.  Making those cells
+  opaque would break the transparency contract, and the fill is already a
+  cached memcpy, so the saving is negligible.
+
+### Follow-up fixes from the daemon-mode dogfood
+
+- ✅ **Config silent-discard bug (major):** any partial `[keybindings]`,
+  `[startup]`, `[debug]`, `[tape]`, `[notifications]`, `[appearance.scrollbar]`,
+  `[appearance.sidebar]`, or `[daemon]` section made the **entire config**
+  silently fall back to defaults (`toml::from_str` failed on missing inner
+  fields and `parse_str` swallowed the error).  So a user who set
+  `leader = "ctrl-b"` in `[keybindings]` lost their theme, widgets, and every
+  other setting.  Fixed: added the `#[serde(default)]` container attribute to
+  all of those structs (matching `AppearanceConfig`, which already had it);
+  partial sections now merge with defaults.  Regression test:
+  `parses_partial_sections_without_discarding`.
+- ✅ **`[startup] start_in_terminal_mode` was dead config** — `Os::new`
+  hardcoded `Mode::WindowManagement` and the flag was never read, so the TUI
+  always launched in window-management mode and the first keystrokes a user
+  typed were swallowed as window commands (the "first input drop" seen in
+  dogfood).  The mode now honors the flag; regression test
+  `start_mode_follows_startup_config`.
+- ✅ **Showkeys overlay rendered unconditionally** — `render_showkeys` drew the
+  last key chord at the pane's bottom-right on every keypress, ignoring the
+  `[debug] show_key_events` opt-in (default off).  Now gated on the flag, the
+  debug-prefix `k` toggles it, and `--show-keys` actually enables it.
+
+### Config reload-path audit
+
+- ✅ **Hot-reload keeps the last good config on a broken edit.**  The watcher
+  (`UserConfig::watch` → `load_from`) previously fell back to **defaults** on
+  any read/parse failure, so a typo while editing the config reset the running
+  session's theme and keybindings.  New `try_load_from`/`parse_str_checked`
+  report errors; the watcher skips the update (keeps the old config) on
+  failure.  Startup `load()` still falls back to defaults for a missing file.
+- ✅ **Hot-reload now applies theme changes.**  `Msg::ConfigReloaded` only
+  swapped `os.config`; the resolved `os.theme`/`auto_theme` stayed stale until
+  restart.  The handler now re-resolves the theme exactly as `Os::new` does.
+- ✅ Audited every `Deserialize` struct: all config sections now carry the
+  `#[serde(default)]` container attribute (`StatusWidgetConfig`/
+  `CustomActionConfig` intentionally remain strict — they are `Vec` elements
+  that should be fully specified).  Custom theme files (`ThemeJson`) and tape
+  types already report errors properly.
 
 ## Priorities at a glance
 

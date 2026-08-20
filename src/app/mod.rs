@@ -848,7 +848,11 @@ impl Os {
         Self {
             windows: Vec::new(),
             focused_window: None,
-            mode: Mode::WindowManagement,
+            mode: if config.startup.start_in_terminal_mode {
+                Mode::Terminal
+            } else {
+                Mode::WindowManagement
+            },
             prefix: Prefix::None,
             workspaces,
             current_workspace: 1,
@@ -6487,6 +6491,20 @@ mod tests {
         os.width = 80;
         os.height = 25;
         os
+    }
+
+    #[test]
+    fn start_mode_follows_startup_config() {
+        // Default: window-management mode (keystrokes are commands).
+        let os = Os::new(UserConfig::default_config());
+        assert_eq!(os.mode, Mode::WindowManagement);
+
+        // `[startup] start_in_terminal_mode = true`: keystrokes reach the
+        // shell immediately after launch.
+        let mut cfg = UserConfig::default_config();
+        cfg.startup.start_in_terminal_mode = true;
+        let os = Os::new(cfg);
+        assert_eq!(os.mode, Mode::Terminal);
     }
 
     #[test]

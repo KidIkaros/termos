@@ -69,6 +69,22 @@ impl Os {
             }
             Msg::ConfigReloaded(config) => {
                 self.config = *config;
+                // Re-resolve the theme exactly as `Os::new` does at startup,
+                // so a hot-reloaded `theme` takes effect immediately.
+                self.auto_theme = self.config.appearance.theme == "auto";
+                if self.config.appearance.theme.is_empty() {
+                    self.theme = None;
+                } else if self.auto_theme {
+                    let mode = crate::util::theme_detect::detect_from_env();
+                    let name = crate::util::theme_detect::resolve_auto_theme_name(
+                        mode,
+                        &self.config.appearance.theme_auto_light,
+                        &self.config.appearance.theme_auto_dark,
+                    );
+                    self.theme = crate::config::Theme::built_in(&name);
+                } else {
+                    self.theme = crate::config::Theme::built_in(&self.config.appearance.theme);
+                }
                 self.notify("config reloaded", "info");
                 Vec::new()
             }
@@ -147,6 +163,36 @@ mod tests {
 
     fn key(code: crossterm::event::KeyCode, modifiers: crossterm::event::KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn config_reload_applies_theme_and_startup_config() {
+        let mut os = test_os();
+        assert!(os.theme.is_none()); // default config has no theme
+
+        let mut cfg = UserConfig::default_config();
+        cfg.appearance.theme = "nord".into();
+        cfg.appearance.animations_enabled = true;
+        os.update(Msg::ConfigReloaded(Box::new(cfg)));
+
+        // The new theme is resolved immediately, matching `Os::new` startup.
+        let theme = os.theme.as_ref().expect("reload should resolve the theme");
+        assert_eq!(theme.name, "nord");
+        // The rest of the config is swapped in too.
+        assert!(os.config.appearance.animations_enabled);
+    }
+
+    #[test]
+    fn config_reload_clears_theme_when_empty() {
+        let mut os = test_os();
+        let mut cfg = UserConfig::default_config();
+        cfg.appearance.theme = "nord".into();
+        os.update(Msg::ConfigReloaded(Box::new(cfg)));
+        assert!(os.theme.is_some());
+
+        let cfg = UserConfig::default_config();
+        os.update(Msg::ConfigReloaded(Box::new(cfg)));
+        assert!(os.theme.is_none(), "reload with empty theme clears it");
     }
 
     #[test]

@@ -8,6 +8,31 @@
 //! - Layer 1 (this module): gradient/shadow/shape backgrounds
 //! - Layer 2 (ratatui): text, borders, widgets with transparent backgrounds
 
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+
+/// Cache of computed drop-shadow intensity masks.
+///
+/// The Gaussian falloff at a cell depends only on its distance from the
+/// shadow-casting rectangle's edges, so the intensity grid for a given
+/// `(rect_w, rect_h, radius)` is identical for every frame and float
+/// position.  Computing it once and sharing it across frames skips the
+/// per-cell `exp()` (and the distance math) on every render.
+///
+/// Bounded: once the cache exceeds [`SHADOW_MASK_CACHE_MAX`] entries the
+/// whole cache is cleared, so a session with many transient float sizes
+/// cannot accumulate stale masks.
+static SHADOW_MASK_CACHE: LazyLock<Mutex<HashMap<ShadowMaskKey, ShadowMask>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Maximum number of cached shadow masks before the cache is reset.
+const SHADOW_MASK_CACHE_MAX: usize = 64;
+
+/// The cached intensity grid for one `(rect_w, rect_h, radius)` key.
+type ShadowMask = Arc<Vec<f32>>;
+/// Mask lookup key: rectangle size plus the radius' raw bits.
+type ShadowMaskKey = (usize, usize, u64);
+
 /// A pixel canvas backed by an RGB framebuffer (3 bytes per cell).
 ///
 /// The canvas is sized to the terminal area and rendered as colored cells.
@@ -251,57 +276,47 @@ impl PixelCanvas {
         if rect_w == 0 || rect_h == 0 || shadow_radius <= 0.0 || self.width == 0 || self.height == 0 {
             return;
         }
-        // Shadow region: the rect + offset, expanded by shadow_radius.
-        let sx = (rect_x as i32 + offset_x - shadow_radius as i32).max(0) as usize;
-        let sy = (rect_y as i32 + offset_y - shadow_radius as i32).max(0) as usize;
-        let ex = (rect_x as i32 + offset_x + rect_w as i32 + shadow_radius as i32)
-            .min(self.width as i32 - 1) as usize;
-        let ey = (rect_y as i32 + offset_y + rect_h as i32 + shadow_radius as i32)
-            .min(self.height as i32 - 1) as usize;
 
-        // The shadow is only cast below and to the right of the rectangle.
-        // Cells inside the rectangle itself are not shadowed.
-        let rect_ex = rect_x + rect_w;
-        let rect_ey = rect_y + rect_h;
+        // The intensity mask depends only on the rect size and the radius;
+        // the offset and absolute position only shift where it is applied.
+        let mask = shadow_mask(rect_w, rect_h, shadow_radius);
+        let r = shadow_radius.ceil() as i32;
+        let gw = rect_w as i32 + 2 * r; // grid columns (px ∈ [-r, rect_w + r))
+
+        // Shadow region: the rect + offset, expanded by shadow_radius
+        // (identical range to the original implementation).  The intensity
+        // for a cell at canvas (x, y) is read from the mask at the cell's
+        // position relative to the rect: px = x - rect_x, py = y - rect_y.
+        let sx = (rect_x as i32 + offset_x - r).max(0) as usize;
+        let sy = (rect_y as i32 + offset_y - r).max(0) as usize;
+        let ex = (rect_x as i32 + offset_x + rect_w as i32 + r).min(self.width as i32 - 1) as usize;
+        let ey = (rect_y as i32 + offset_y + rect_h as i32 + r).min(self.height as i32 - 1) as usize;
 
         for y in sy..=ey {
             for x in sx..=ex {
-                // Skip cells that are inside the source rectangle.
-                if x >= rect_x && x < rect_ex && y >= rect_y && y < rect_ey {
+                let px = x as i32 - rect_x as i32;
+                let py = y as i32 - rect_y as i32;
+
+                // Cells inside the source rectangle are not shadowed.
+                if px >= 0 && px < rect_w as i32 && py >= 0 && py < rect_h as i32 {
                     continue;
                 }
 
-                // Distance from the nearest edge of the shadow-casting rect.
-                let dx = if x < rect_x {
-                    (rect_x - x) as f64
-                } else if x >= rect_ex {
-                    (x - rect_ex + 1) as f64
-                } else {
-                    0.0
-                };
-                let dy = if y < rect_y {
-                    (rect_y - y) as f64
-                } else if y >= rect_ey {
-                    (y - rect_ey + 1) as f64
-                } else {
-                    0.0
-                };
-                // Squared distance avoids a per-cell `sqrt`; the falloff only
-                // needs `dist²` and the radius comparison is equivalent.
-                let dist2 = dx * dx + dy * dy;
-
-                if dist2 > shadow_radius * shadow_radius {
+                // Cells farther than the radius from the rect edges have
+                // zero intensity; they are outside the mask grid entirely.
+                let gi = (py + r) as isize;
+                let gj = (px + r) as isize;
+                if gi < 0 || gj < 0 || gi >= (rect_h as i32 + 2 * r) as isize || gj >= gw as isize {
                     continue;
                 }
 
-                // Gaussian falloff: exp(-dist² / (2 * σ²))
-                let sigma = shadow_radius / 3.0; // 99.7% within radius
-                let intensity = (-dist2 / (2.0 * sigma * sigma)).exp();
-
-                let r = lerp(bg.0, shadow_color.0, intensity);
-                let g = lerp(bg.1, shadow_color.1, intensity);
-                let b = lerp(bg.2, shadow_color.2, intensity);
-                self.set_pixel(x, y, r, g, b);
+                let intensity = mask[gi as usize * gw as usize + gj as usize];
+                if intensity > 0.0 {
+                    let r = lerp(bg.0, shadow_color.0, intensity as f64);
+                    let g = lerp(bg.1, shadow_color.1, intensity as f64);
+                    let b = lerp(bg.2, shadow_color.2, intensity as f64);
+                    self.set_pixel(x, y, r, g, b);
+                }
             }
         }
     }
@@ -444,6 +459,60 @@ impl PixelCanvas {
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
+/// Compute (or fetch from the cache) the shadow intensity mask for a
+/// rectangle of `rect_w` × `rect_h` with the given Gaussian `radius`.
+///
+/// The returned grid is row-major over `py` then `px`, with `px`/`py`
+/// measured relative to the rectangle origin, covering `px ∈ [-r, rect_w + r)`
+/// and `py ∈ [-r, rect_h + r)` where `r = ceil(radius)`.  Cells farther than
+/// `radius` from the rectangle edges store `0.0` (no shadow).
+fn shadow_mask(rect_w: usize, rect_h: usize, radius: f64) -> ShadowMask {
+    let key = (rect_w, rect_h, radius.to_bits());
+    if let Some(mask) = SHADOW_MASK_CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return Arc::clone(mask);
+    }
+
+    let r = radius.ceil() as i32;
+    let gw = rect_w as i32 + 2 * r;
+    let gh = rect_h as i32 + 2 * r;
+    let radius2 = radius * radius;
+    let sigma2 = 2.0 * (radius / 3.0) * (radius / 3.0);
+
+    let mut mask = vec![0f32; (gw * gh) as usize];
+    for py in -r..(rect_h as i32 + r) {
+        for px in -r..(rect_w as i32 + r) {
+            let dx = if px < 0 {
+                (-px) as f64
+            } else if px >= rect_w as i32 {
+                (px - rect_w as i32 + 1) as f64
+            } else {
+                0.0
+            };
+            let dy = if py < 0 {
+                (-py) as f64
+            } else if py >= rect_h as i32 {
+                (py - rect_h as i32 + 1) as f64
+            } else {
+                0.0
+            };
+            let dist2 = dx * dx + dy * dy;
+            if dist2 <= radius2 {
+                let gi = (py + r) as usize;
+                let gj = (px + r) as usize;
+                mask[gi * gw as usize + gj] = (-dist2 / sigma2).exp() as f32;
+            }
+        }
+    }
+
+    let mask = Arc::new(mask);
+    let mut cache = SHADOW_MASK_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= SHADOW_MASK_CACHE_MAX {
+        cache.clear();
+    }
+    cache.insert(key, Arc::clone(&mask));
+    mask
+}
+
 /// Linear interpolation between two u8 values.
 fn lerp(a: u8, b: u8, t: f64) -> u8 {
     let t = t.clamp(0.0, 1.0);
@@ -552,6 +621,60 @@ mod tests {
         // Just outside should be darker.
         let (r, _, _) = c.get_pixel(12, 6);
         assert!(r < 200, "shadow should darken, got r={r}");
+    }
+
+    #[test]
+    fn shadow_mask_is_cached_and_position_independent() {
+        // The mask cache is global; clear it so the test measures its own work.
+        SHADOW_MASK_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+
+        let key_a = (6usize, 4usize, 3.0f64.to_bits());
+        let mask_a = shadow_mask(6, 4, 3.0);
+        assert!(!mask_a.is_empty());
+
+        // A second request for the same size returns the cached Arc (same ptr).
+        let mask_b = shadow_mask(6, 4, 3.0);
+        assert!(Arc::ptr_eq(&mask_a, &mask_b), "mask should be cached and shared");
+
+        // A different size produces a distinct mask, and the cache holds both.
+        let mask_c = shadow_mask(10, 2, 3.0);
+        assert!(!Arc::ptr_eq(&mask_a, &mask_c));
+        let cache = SHADOW_MASK_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains_key(&key_a));
+        drop(cache);
+
+        // Applying the same cached mask at different positions yields the
+        // same relative shadow (identical pixel values at equal offsets).
+        let mut c1 = PixelCanvas::new(30, 20);
+        c1.clear(200, 200, 200);
+        c1.drop_shadow(5, 5, 6, 4, 1, 1, 3.0, (0, 0, 0), (200, 200, 200));
+        let mut c2 = PixelCanvas::new(30, 20);
+        c2.clear(200, 200, 200);
+        c2.drop_shadow(15, 8, 6, 4, 1, 1, 3.0, (0, 0, 0), (200, 200, 200));
+        // Cell at rect_x+10, rect_y+1 sits right of both rects.
+        assert_eq!(
+            c1.get_pixel(5 + 10, 5 + 1),
+            c2.get_pixel(15 + 10, 8 + 1),
+            "shadow shape must not depend on position"
+        );
+    }
+
+    #[test]
+    fn shadow_mask_cache_is_bounded() {
+        SHADOW_MASK_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        // Exceed the cap; the cache must reset rather than grow unbounded.
+        for w in 1..=(SHADOW_MASK_CACHE_MAX + 4) {
+            shadow_mask(w, 3, 3.0);
+        }
+        let len = SHADOW_MASK_CACHE.lock().unwrap_or_else(|e| e.into_inner()).len();
+        assert!(len <= SHADOW_MASK_CACHE_MAX, "cache must stay bounded, len={len}");
     }
 
     #[test]

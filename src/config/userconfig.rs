@@ -86,6 +86,7 @@ fn default_action_category() -> String {
 
 /// Tape (project automation) settings (`[tape]`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct TapeConfig {
     /// `"off"`, `"ask"`, or `"auto"`.
     #[serde(default)]
@@ -97,6 +98,7 @@ pub struct TapeConfig {
 
 /// Diagnostic settings (`[debug]`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct DebugConfig {
     /// Show the on-screen showkeys overlay.
     #[serde(default)]
@@ -105,6 +107,7 @@ pub struct DebugConfig {
 
 /// The `[notifications]` table.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NotificationsConfig {
     /// What tuios does when a pane's agent state changes.
     #[serde(default)]
@@ -133,6 +136,7 @@ pub struct NotificationsConfig {
 /// can mean "unset, use the default" and an explicit `false` survives a
 /// reload, matching the Go pointer-field design.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AgentAlertsConfig {
     /// Master switch; false silences every sink including the command.
     /// Default: true.
@@ -211,6 +215,7 @@ pub struct AgentAlertSounds {
 
 /// Scrollbar configuration (`[appearance.scrollbar]`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct ScrollbarConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -223,6 +228,7 @@ pub struct ScrollbarConfig {
 
 /// Sidebar configuration (`[appearance.sidebar]`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct SidebarConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -384,6 +390,7 @@ impl Default for AppearanceConfig {
 
 /// Keybinding configuration tables.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct KeybindingsConfig {
     #[serde(default = "default_leader")]
     pub leader_key: String,
@@ -453,6 +460,7 @@ impl KeybindingsConfig {
 
 /// Startup preferences.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StartupConfig {
     pub open_default_window: bool,
     pub tiled: bool,
@@ -461,6 +469,7 @@ pub struct StartupConfig {
 
 /// Daemon settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DaemonConfig {
     /// `"debug"`, `"info"`, `"warn"`, `"error"`.
     #[serde(default)]
@@ -596,12 +605,16 @@ impl UserConfig {
 
     /// Parse config from a TOML string. Returns defaults on parse error.
     pub fn parse_str(data: &str) -> Self {
-        let mut cfg: UserConfig = match toml::from_str(data) {
-            Ok(cfg) => cfg,
-            Err(_) => return Self::default_config(),
-        };
+        Self::parse_str_checked(data).unwrap_or_else(|_| Self::default_config())
+    }
+
+    /// Parse config from a TOML string, reporting errors instead of silently
+    /// falling back to defaults.  Used by the hot-reload watcher so a broken
+    /// edit keeps the last good config rather than resetting the session.
+    pub fn parse_str_checked(data: &str) -> Result<UserConfig, String> {
+        let mut cfg: UserConfig = toml::from_str(data).map_err(|e| e.to_string())?;
         cfg.keybindings.fill_missing();
-        cfg
+        Ok(cfg)
     }
 
     /// Save the config to the XDG config path, creating directories as needed.
@@ -629,8 +642,12 @@ impl UserConfig {
             move |res: Result<Vec<notify_debouncer_mini::DebouncedEvent>, _>| {
                 if let Ok(events) = res {
                     if events.iter().any(|e| e.kind == DebouncedEventKind::Any) {
-                        let cfg = UserConfig::load_from(&path);
-                        let _ = tx_clone.send(cfg);
+                        // On a broken edit (unreadable or parse error), keep
+                        // the last good config instead of resetting the
+                        // running session to defaults.
+                        if let Ok(cfg) = UserConfig::try_load_from(&path) {
+                            let _ = tx_clone.send(cfg);
+                        }
                     }
                 }
             },
@@ -647,16 +664,14 @@ impl UserConfig {
 
     /// Load config from a specific path (used by the watcher).
     pub fn load_from(path: &Path) -> Self {
-        let data = match std::fs::read_to_string(path) {
-            Ok(data) => data,
-            Err(_) => return Self::default_config(),
-        };
-        let mut cfg: UserConfig = match toml::from_str(&data) {
-            Ok(cfg) => cfg,
-            Err(_) => return Self::default_config(),
-        };
-        cfg.keybindings.fill_missing();
-        cfg
+        Self::try_load_from(path).unwrap_or_else(|_| Self::default_config())
+    }
+
+    /// Load config from a specific path, reporting errors instead of silently
+    /// falling back to defaults (used by the hot-reload watcher).
+    pub fn try_load_from(path: &Path) -> Result<UserConfig, String> {
+        let data = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        Self::parse_str_checked(&data)
     }
 }
 
@@ -981,6 +996,93 @@ mod tests {
         let loaded = UserConfig::load_from(&path);
         assert_eq!(loaded.appearance.border_style, "thick");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_startup_and_debug_sections() {
+        let cfg = UserConfig::parse_str(
+            "[appearance]\ntheme = \"catppuccin-mocha\"\n\n[startup]\nstart_in_terminal_mode = true\n\n[debug]\nshow_key_events = true\n",
+        );
+        assert!(cfg.startup.start_in_terminal_mode);
+        assert!(cfg.debug.show_key_events);
+        assert_eq!(cfg.appearance.theme, "catppuccin-mocha");
+    }
+
+    #[test]
+    fn parses_partial_sections_without_discarding() {
+        // Partial `[appearance]` must not nuke the whole config.
+        let raw: Result<UserConfig, _> =
+            toml::from_str("[appearance]\ntheme = \"catppuccin-mocha\"\n");
+        match raw {
+            Ok(c) => assert_eq!(c.appearance.theme, "catppuccin-mocha"),
+            Err(e) => panic!("partial [appearance] deserialize failed: {e}"),
+        }
+
+        // Partial `[startup]` must not nuke the whole config.
+        let raw: Result<UserConfig, _> =
+            toml::from_str("[startup]\nstart_in_terminal_mode = true\n");
+        match raw {
+            Ok(c) => assert!(c.startup.start_in_terminal_mode),
+            Err(e) => panic!("partial [startup] deserialize failed: {e}"),
+        }
+
+        // Partial `[keybindings]` must not nuke the whole config either.
+        let raw: Result<UserConfig, _> = toml::from_str("[keybindings]\nleader_key = \"ctrl-a\"\n");
+        match raw {
+            Ok(c) => assert_eq!(c.keybindings.leader_key, "ctrl-a"),
+            Err(e) => panic!("partial [keybindings] deserialize failed: {e}"),
+        }
+
+        // Partial `[daemon]` must not nuke the whole config.
+        let raw: Result<UserConfig, _> = toml::from_str("[daemon]\nlog_level = \"debug\"\n");
+        match raw {
+            Ok(c) => assert_eq!(c.daemon.log_level, "debug"),
+            Err(e) => panic!("partial [daemon] deserialize failed: {e}"),
+        }
+
+        // End-to-end through `parse_str`.
+        let cfg = UserConfig::parse_str(
+            "[appearance]\ntheme = \"catppuccin-mocha\"\n\n[startup]\nstart_in_terminal_mode = true\n\n[debug]\nshow_key_events = true\n",
+        );
+        assert!(cfg.startup.start_in_terminal_mode);
+        assert!(cfg.debug.show_key_events);
+        assert_eq!(cfg.appearance.theme, "catppuccin-mocha");
+    }
+
+    #[test]
+    fn checked_parse_reports_errors_instead_of_defaults() {
+        // Syntax error: reported, not silently discarded.
+        assert!(UserConfig::parse_str_checked("not [ valid").is_err());
+        // Unknown section is fine (serde ignores unknown tables); missing
+        // required inner fields without defaults is not.
+        assert!(UserConfig::parse_str_checked("[bogus]\nx = 1\n").is_ok());
+        // A valid partial config parses and keeps its values.
+        let ok = UserConfig::parse_str_checked("[startup]\nstart_in_terminal_mode = true\n")
+            .expect("valid partial config should parse");
+        assert!(ok.startup.start_in_terminal_mode);
+    }
+
+    #[test]
+    fn try_load_from_rejects_missing_and_broken_files() {
+        let dir = std::env::temp_dir().join(format!("termos-cfg-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Missing file → Err.
+        assert!(UserConfig::try_load_from(&dir.join("missing.toml")).is_err());
+
+        // Broken file → Err.
+        let broken = dir.join("broken.toml");
+        std::fs::write(&broken, "not [ valid").unwrap();
+        assert!(UserConfig::try_load_from(&broken).is_err());
+
+        // Valid file → Ok with values.
+        let good = dir.join("good.toml");
+        std::fs::write(&good, "[startup]\nstart_in_terminal_mode = true\n").unwrap();
+        let cfg = UserConfig::try_load_from(&good).expect("valid file should load");
+        assert!(cfg.startup.start_in_terminal_mode);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
