@@ -3012,6 +3012,7 @@ mod tests {
 
     #[test]
     fn window_ids_are_monotonic_across_closes() {
+        crate::skip_if_pty_exhausted!();
         // Regression: ids were `w{live-count}`, so closing a window reused
         // its id for the next spawn (two live windows sharing `w2` broke
         // scripting targets). They must be monotonic per session.
@@ -3040,6 +3041,7 @@ mod tests {
 
     #[test]
     fn window_ids_are_unique_per_session() {
+        crate::skip_if_pty_exhausted!();
         // Two sessions allocate independently — both get `w0` first, and
         // neither collides within itself.
         let d = Daemon::new();
@@ -3190,6 +3192,7 @@ mod tests {
 
     #[test]
     fn daemon_diagnose_with_sessions() {
+        crate::skip_if_pty_exhausted!();
         let d = Daemon::new();
         d.create_session("work", "/bin/sh").unwrap();
         d.create_session("play", "/bin/sh").unwrap();
@@ -3208,6 +3211,7 @@ mod tests {
 
     #[test]
     fn daemon_headless_list_sessions() {
+        crate::skip_if_pty_exhausted!();
         let d = Daemon::new();
         d.create_session("work", "/bin/sh").unwrap();
         let result = d.headless_command("list-sessions", &[], None).unwrap();
@@ -3224,6 +3228,7 @@ mod tests {
 
     #[test]
     fn daemon_headless_diagnose() {
+        crate::skip_if_pty_exhausted!();
         let d = Daemon::new();
         d.create_session("work", "/bin/sh").unwrap();
         let result = d.headless_command("diagnose", &[], None).unwrap();
@@ -3412,6 +3417,7 @@ mod verb_tests {
 
     #[test]
     fn diagnose_verb_returns_report() {
+        crate::skip_if_pty_exhausted!();
         let d = Daemon::new();
         d.create_session("work", "/bin/sh").unwrap();
         let resp = call(&d, "diagnose", serde_json::json!({}));
@@ -3423,6 +3429,7 @@ mod verb_tests {
 
     #[test]
     fn headless_command_verb_list_sessions() {
+        crate::skip_if_pty_exhausted!();
         let d = Daemon::new();
         d.create_session("work", "/bin/sh").unwrap();
         let resp = call(

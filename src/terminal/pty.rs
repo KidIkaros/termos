@@ -560,6 +560,7 @@ mod tests {
 
     #[test]
     fn pty_writes_spaces_and_enter_execute_command() {
+        crate::skip_if_pty_exhausted!();
         use crate::terminal::window::Window;
         let size = WinSize { cols: 80, rows: 24 };
         let wake = Box::new(|| {}) as Box<dyn Fn() + Send + 'static>;
@@ -614,6 +615,7 @@ mod tests {
 
     #[test]
     fn spawn_pty_delivers_output() {
+        crate::skip_if_pty_exhausted!();
         let size = WinSize { cols: 80, rows: 24 };
         let argv = vec![
             "/bin/sh".to_string(),

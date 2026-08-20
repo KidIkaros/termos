@@ -1549,6 +1549,7 @@ mod tests {
 
     #[test]
     fn command_pane_captures_exit_code_and_reruns() {
+        crate::skip_if_pty_exhausted!();
         let mut win = spawn_cmd("echo FIRST_RUN; exit 7", false);
         wait_text(&win, "FIRST_RUN", std::time::Duration::from_secs(10));
 
@@ -1586,6 +1587,7 @@ mod tests {
 
     #[test]
     fn suspended_command_pane_waits_for_trigger() {
+        crate::skip_if_pty_exhausted!();
         let mut win = spawn_cmd("echo SUSPENDED_OUTPUT", true);
         // The pane explains itself, and the child is genuinely stopped.
         wait_text(&win, "[suspended]", std::time::Duration::from_secs(5));
