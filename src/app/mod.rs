@@ -566,6 +566,7 @@ pub struct Os {
     pub show_welcome: bool,
     /// Whether the persistent key-hints bar is visible.
     pub hints_visible: bool,
+
     /// Cached list of available theme names.
     pub theme_list: Vec<String>,
     /// Available accent colors for the accent picker.
@@ -1493,8 +1494,22 @@ impl Os {
     }
 
     /// Resolve the hover target for a mouse position: the title bar of the
-    /// window under the cursor (title + agent state), else None.
+    /// Return the hover target text for the cursor position (title + agent
+    /// state), or a dock pill tooltip if hovering the dock bar.
     pub fn hover_target_at(&self, x: i32, y: i32) -> Option<String> {
+        // Dock bar hover: show window title for the pill under cursor.
+        if self.config.appearance.mouse_friendly && y >= self.height - 1 {
+            if let Some(idx) = self.dock_item_at(x, y) {
+                let window = self.windows.get(idx)?;
+                let mut text = window.title.clone();
+                if !window.agent_state.is_empty() && window.agent_state != "none" {
+                    text.push_str(&format!(" — {}", window.agent_state));
+                }
+                return Some(text);
+            }
+            return None;
+        }
+        // Pane title bar hover.
         let idx = self.window_at(x, y)?;
         let layout = self.current_layout();
         let rect = layout.get(&(idx as i32))?;
@@ -5751,6 +5766,24 @@ impl Os {
             }
         }
         best.map(|(idx, _)| idx)
+    }
+
+    /// Hit-test the dock bar: returns the window index if the click lands
+    /// on a dock pill, or `None` otherwise.  Computes layout on demand.
+    pub fn dock_item_at(&self, column: i32, row: i32) -> Option<usize> {
+        // Only the bottom row is the dock.
+        if row < self.height - 1 {
+            return None;
+        }
+        let layout = crate::app::dock::calculate_dock_layout(self);
+        for (i, item) in layout.visible_items.iter().enumerate() {
+            let pill_x = layout.item_positions.get(i).copied().unwrap_or(0);
+            let pill_w = item.width as i32;
+            if column >= pill_x && column < pill_x + pill_w {
+                return Some(item.window_index as usize);
+            }
+        }
+        None
     }
 
     /// Detect if a screen coordinate is on a pane border (within 1 cell slop).

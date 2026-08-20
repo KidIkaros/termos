@@ -276,6 +276,9 @@ pub struct AppearanceConfig {
     /// Powerline caps on the dock's pills.
     #[serde(default)]
     pub dock_pill_caps: bool,
+    /// Enable mouse-friendly dock: clickable pills, hover tooltips, right-click context menus.
+    #[serde(default = "default_true")]
+    pub mouse_friendly: bool,
     /// Pane scrollbar configuration.
     #[serde(default)]
     pub scrollbar: ScrollbarConfig,
@@ -367,6 +370,7 @@ impl Default for AppearanceConfig {
             dock_workspace_tabs: true,
             dock_workspace_tooltip: true,
             dock_pill_caps: false,
+            mouse_friendly: true,
             scrollbar: ScrollbarConfig::default(),
             sidebar: SidebarConfig {
                 position: "left".into(),

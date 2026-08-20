@@ -898,4 +898,18 @@ mod tests {
         os.copy_visual_line = true;
         assert_eq!(copy_mode_state_from_os(&os), CopyModeState::VisualLine);
     }
+
+    #[test]
+    fn dock_item_at_returns_none_above_dock() {
+        let os = Os::new(UserConfig::default());
+        // Row above the dock row should return None.
+        assert!(os.dock_item_at(10, os.height - 2).is_none());
+    }
+
+    #[test]
+    fn dock_item_at_returns_none_on_empty_dock() {
+        let os = Os::new(UserConfig::default());
+        // No windows → no dock pills → no hit.
+        assert!(os.dock_item_at(10, os.height - 1).is_none());
+    }
 }

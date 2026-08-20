@@ -1830,8 +1830,29 @@ fn handle_switcher(os: &mut Os, key: &KeyEvent) -> KeyResult {
 pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
     let column = mouse.column as i32;
     let row = mouse.row as i32;
-    // The dock bar occupies the bottom row; it never scrolls or focuses.
+    // The dock bar occupies the bottom row.
     if row >= os.height - 1 {
+        if !os.config.appearance.mouse_friendly {
+            return false;
+        }
+        // Mouse-friendly dock: left-click switches window, right-click opens context menu.
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(idx) = os.dock_item_at(column, row) {
+                    os.focus_window(idx);
+                    os.prefix = Prefix::None;
+                    return true;
+                }
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                if let Some(idx) = os.dock_item_at(column, row) {
+                    os.focus_window(idx);
+                    os.open_context_menu_at(column, row);
+                    return true;
+                }
+            }
+            _ => {}
+        }
         return false;
     }
 

@@ -723,6 +723,16 @@ terminal users and GUI power users.  Based on `docs/RESEARCH_TUI_APPROACHABILITY
 - ✅ **Toggle with `Ctrl+B H`.** `hints_visible` field on `Os`.
 - ✅ Hints bar hidden when welcome overlay is active (no overlap).
 
+### Mouse-friendly dock
+
+- ✅ **Left-click on dock pill switches window.** `dock_item_at` hit-tests
+  visible dock pills by computing layout on demand.
+- ✅ **Right-click on dock pill opens context menu** for that window.
+- ✅ **Hover tooltips on dock pills** show window title + agent state.
+- ✅ **Config option** `[appearance] mouse_friendly = true` (default on).
+  Set to `false` to disable dock mouse interaction.
+- ✅ **Unit tests** for `dock_item_at` edge cases.
+
 ## Priorities at a glance
 
 | Phase | Tier | Theme | Effort |
