@@ -727,7 +727,7 @@ fn rect_to_tui(rect: Rect, content_area: TuiRect) -> TuiRect {
 fn paint_emulator(
     buf: &mut Buffer,
     emu: &crate::vt::Emulator,
-    lines: &[Vec<(char, crate::vt::Style)>],
+    lines: &[Vec<crate::vt::cell::StyledChar>],
     rect: TuiRect,
     palette: &StylePalette,
 ) {
@@ -742,14 +742,34 @@ fn paint_emulator(
 
     for (row_idx, row) in lines.iter().take(inner_h as usize).enumerate() {
         let y = inner_y + row_idx as u16;
-        for (col, (content, style)) in row.iter().take(inner_w as usize).enumerate() {
-            let x = inner_x + col as u16;
+        let mut col_pos = 0u16;
+        for sc in row.iter() {
+            let x = inner_x + col_pos;
             if x >= inner_x + inner_w {
                 break;
             }
             let cell = &mut buf[(x, y)];
-            cell.set_char(*content);
-            cell.set_style(palette.style(*style));
+            if sc.has_combining() {
+                // Base + zero-width marks render as one grapheme in a single
+                // terminal cell (e.g. `e` + U+0301 → `é`).
+                let mut symbol = String::with_capacity(1 + sc.combining_len as usize);
+                symbol.push(sc.content);
+                sc.for_each_combining(|m| symbol.push(m));
+                cell.set_symbol(&symbol);
+            } else {
+                cell.set_char(sc.content);
+            }
+            cell.set_style(palette.style(sc.style));
+            col_pos += u16::from(sc.width);
+            if sc.width > 1 {
+                // Mark the continuation cell skipped: ratatui's buffer diff
+                // never emits skipped cells, so the terminal's wide glyph
+                // keeps its right half instead of being overwritten by the
+                // next column. `Cell::reset` clears `skip` every frame.
+                if x + 1 < inner_x + inner_w {
+                    buf[(x + 1, y)].skip = true;
+                }
+            }
         }
     }
 
@@ -1972,6 +1992,25 @@ pub fn render_overlay(buf: &mut Buffer, area: TuiRect, lines: &[String], title: 
         (15, 15, 22),  // darker bottom
     );
     let rgb = overlay_canvas.rgb();
+
+    // Capture the content behind the four corners before painting, so the
+    // SDF blend below can fade the overlay's corners out (rounded-corner
+    // look instead of square ratatui corners).
+    let corners = [
+        (0usize, 0usize),
+        ((width - 1) as usize, 0usize),
+        (0usize, (height - 1) as usize),
+        ((width - 1) as usize, (height - 1) as usize),
+    ];
+    let mut underlying = [(0u8, 0u8, 0u8); 4];
+    for (i, &(cx, cy)) in corners.iter().enumerate() {
+        let cell = &buf[(rect.x + cx as u16, rect.y + cy as u16)];
+        underlying[i] = match cell.bg {
+            TuiColor::Rgb(r, g, b) => (r, g, b),
+            _ => (20, 20, 30),
+        };
+    }
+
     for yy in 0..height {
         for xx in 0..width {
             let idx = ((yy as usize * width as usize) + xx as usize) * 3;
@@ -1991,6 +2030,35 @@ pub fn render_overlay(buf: &mut Buffer, area: TuiRect, lines: &[String], title: 
     for yy in 0..height {
         for xx in 0..width {
             buf[(rect.x + xx, rect.y + yy)] = block_buf[(rect.x + xx, rect.y + yy)].clone();
+        }
+    }
+
+    // SDF rounded corners: blend each corner cell toward the content behind
+    // it and drop the square corner glyph, so overlays read as rounded panels.
+    if width >= 3 && height >= 3 {
+        let radius = 1.0f64;
+        for (i, &(cx, cy)) in corners.iter().enumerate() {
+            let alpha = crate::app::pixel_canvas::rounded_corner_alpha(
+                cx,
+                cy,
+                width as usize,
+                height as usize,
+                radius,
+            );
+            if alpha >= 1.0 {
+                continue;
+            }
+            let idx = ((cy * width as usize) + cx) * 3;
+            let grad = (rgb[idx], rgb[idx + 1], rgb[idx + 2]);
+            let (u, v, wcol) = underlying[i];
+            let blended = (
+                crate::app::pixel_canvas::lerp(u, grad.0, alpha),
+                crate::app::pixel_canvas::lerp(v, grad.1, alpha),
+                crate::app::pixel_canvas::lerp(wcol, grad.2, alpha),
+            );
+            let cell = &mut buf[(rect.x + cx as u16, rect.y + cy as u16)];
+            cell.set_char(' ');
+            cell.set_bg(TuiColor::Rgb(blended.0, blended.1, blended.2));
         }
     }
 
@@ -2037,6 +2105,179 @@ mod tests {
         let os = test_os();
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 0, 0));
         render(&os, &mut buf);
+    }
+
+    #[test]
+    fn paint_emulator_writes_combining_grapheme_into_one_cell() {
+        // A decomposed `e` + U+0301 must land in a single ratatui cell as the
+        // composed symbol `é`, not as two separate columns.
+        use crate::vt::Emulator;
+        let palette = StylePalette::new(None);
+        let mut emu = Emulator::new(10, 3);
+        emu.write("e\u{301}x".as_bytes());
+
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 14, 5));
+        let rect = TuiRect::new(0, 0, 14, 5);
+        let lines = emu.render_view_lines();
+        paint_emulator(&mut buf, &emu, &lines, rect, &palette);
+
+        // Content is inset one cell by the pane border: base at (1,1).
+        let cell = &buf[(1, 1)];
+        assert_eq!(cell.symbol(), "e\u{301}");
+        let next = &buf[(2, 1)];
+        assert_eq!(next.symbol(), "x");
+        // The combining mark must not consume a column of its own.
+        assert_eq!(buf[(3, 1)].symbol(), " ");
+    }
+
+    #[test]
+    fn paint_emulator_writes_spilled_combining_run() {
+        // Marks beyond the inline budget (5+ on one base) must still render
+        // as a single composed symbol in one cell.
+        use crate::vt::Emulator;
+        let palette = StylePalette::new(None);
+        let mut emu = Emulator::new(10, 3);
+        let mut s = String::from("q");
+        for _ in 0..crate::vt::cell::MAX_COMBINING + 2 {
+            s.push('\u{301}');
+        }
+        emu.write(s.as_bytes());
+
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 14, 5));
+        let lines = emu.render_view_lines();
+        paint_emulator(&mut buf, &emu, &lines, TuiRect::new(0, 0, 14, 5), &palette);
+
+        let cell = &buf[(1, 1)];
+        assert_eq!(
+            cell.symbol().chars().count(),
+            1 + crate::vt::cell::MAX_COMBINING + 2
+        );
+        assert_eq!(cell.symbol().chars().next(), Some('q'));
+    }
+
+    #[test]
+    fn paint_emulator_spaces_wide_glyphs_and_trailing_text() {
+        // Wide CJK glyphs occupy two terminal columns each; the buffer must
+        // advance by the glyph width and skip the continuation cell, so
+        // trailing text lines up. Regression for the live dogfood finding
+        // where `你你XX` collapsed to `你X` and shifted the pane border.
+        use crate::vt::Emulator;
+        let palette = StylePalette::new(None);
+        let mut emu = Emulator::new(10, 3);
+        emu.write("\u{4f60}\u{4f60}XX".as_bytes());
+
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 14, 5));
+        let lines = emu.render_view_lines();
+        paint_emulator(&mut buf, &emu, &lines, TuiRect::new(0, 0, 14, 5), &palette);
+
+        // Content is inset one cell by the border ring.
+        assert_eq!(buf[(1, 1)].symbol(), "\u{4f60}");
+        assert!(buf[(2, 1)].skip, "wide continuation must be skipped");
+        assert_eq!(buf[(3, 1)].symbol(), "\u{4f60}");
+        assert!(buf[(4, 1)].skip, "wide continuation must be skipped");
+        assert_eq!(buf[(5, 1)].symbol(), "X");
+        assert_eq!(buf[(6, 1)].symbol(), "X");
+    }
+
+    #[test]
+    fn paint_emulator_spaces_hangul_jamo_run() {
+        // A Hangul jamo cluster: lead (width 2) + zero-width vowel + final
+        // all pack into one wide cell; the char after must land two columns
+        // past the lead.
+        use crate::vt::Emulator;
+        let palette = StylePalette::new(None);
+        let mut emu = Emulator::new(10, 3);
+        emu.write("|\u{1112}\u{1161}\u{11ab}|".as_bytes());
+
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 14, 5));
+        let lines = emu.render_view_lines();
+        paint_emulator(&mut buf, &emu, &lines, TuiRect::new(0, 0, 14, 5), &palette);
+
+        assert_eq!(buf[(1, 1)].symbol(), "|");
+        let run = &buf[(2, 1)];
+        assert_eq!(run.symbol(), "\u{1112}\u{1161}\u{11ab}");
+        assert!(buf[(3, 1)].skip, "wide continuation must be skipped");
+        assert_eq!(buf[(4, 1)].symbol(), "|");
+    }
+
+    #[test]
+    fn paint_selection_reverses_wide_lead_cells_at_correct_columns() {
+        // Selection coordinates are emulator columns; buffer leads must sit
+        // at those columns (continuations skipped), so the highlight lands on
+        // the wide glyphs and the text after them, not drifting left.
+        use crate::app::Selection;
+        use crate::vt::Emulator;
+        let palette = StylePalette::new(None);
+        let mut emu = Emulator::new(10, 3);
+        emu.write("\u{4f60}\u{4f60}XX".as_bytes()); // cols: 你 0, 你 2, X 4, X 5
+
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 14, 5));
+        let rect = TuiRect::new(0, 0, 14, 5);
+        let lines = emu.render_view_lines();
+        paint_emulator(&mut buf, &emu, &lines, rect, &palette);
+
+        let sel = Selection {
+            window: 0,
+            anchor_line: 0,
+            anchor_col: 0,
+            cursor_line: 0,
+            cursor_col: 5,
+        };
+        paint_selection(&mut buf, &emu, rect, Some(&sel));
+
+        let reversed = |x: u16| {
+            buf[(x, 1)]
+                .style()
+                .add_modifier
+                .intersects(ratatui::style::Modifier::REVERSED)
+        };
+        // The two wide leads and both X's are highlighted at their emulator
+        // columns (1, 3, 5, 6) — no drift.
+        assert!(reversed(1), "first wide lead not reversed");
+        assert!(reversed(3), "second wide lead not reversed");
+        assert!(reversed(5), "first X not reversed");
+        assert!(reversed(6), "second X not reversed");
+        // The continuation cells stay skipped; nothing past the selection
+        // (col 8) is highlighted. Col 7 is the cursor cell, reversed by the
+        // cursor drawing in paint_emulator, landing one column past the last
+        // char — cursor math also tracks the wide layout.
+        assert!(buf[(2, 1)].skip);
+        assert!(buf[(4, 1)].skip);
+        assert!(!reversed(8));
+    }
+
+    #[test]
+    fn paint_scrollback_rows_keep_wide_spacing() {
+        // Content scrolled into scrollback renders through the same
+        // width-aware row path: leads spaced by width, continuation skipped,
+        // trailing text intact.
+        use crate::vt::Emulator;
+        let palette = StylePalette::new(None);
+        let mut emu = Emulator::new(10, 3);
+        // Fill past the 3 rows so wide-char lines scroll off the top.
+        for _ in 0..5 {
+            emu.write("\u{4f60}\u{4f60}XX\r\n".as_bytes());
+        }
+        assert!(emu.scrollback_len() >= 2, "expected scrolled lines");
+        emu.scroll_viewport(2);
+
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 14, 5));
+        let rect = TuiRect::new(0, 0, 14, 5);
+        let lines = emu.render_view_lines();
+        // The scrolled-back rows carry width so the painter spaces them.
+        for row in &lines {
+            let widths: Vec<u8> = row.iter().map(|sc| sc.width).collect();
+            assert_eq!(&widths[..2], &[2, 2], "wide leads must carry width 2");
+        }
+        paint_emulator(&mut buf, &emu, &lines, rect, &palette);
+        // First scrolled-back row: 你 at col 1, continuation skipped, second
+        // 你 at col 3, X at 5 and 6.
+        assert_eq!(buf[(1, 1)].symbol(), "\u{4f60}");
+        assert!(buf[(2, 1)].skip);
+        assert_eq!(buf[(3, 1)].symbol(), "\u{4f60}");
+        assert!(buf[(4, 1)].skip);
+        assert_eq!(buf[(5, 1)].symbol(), "X");
+        assert_eq!(buf[(6, 1)].symbol(), "X");
     }
 
     #[test]
@@ -2172,6 +2413,41 @@ mod tests {
         let lines = vec!["line1".into(), "line2".into()];
         render_overlay(&mut buf, area, &lines, "Test Title");
         // Should not panic.
+    }
+
+    #[test]
+    fn render_overlay_has_rounded_corners() {
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
+        let area = TuiRect::new(0, 0, 80, 24);
+        // Underlying content: bright red, so the SDF corner fade target is
+        // unambiguous.
+        for cell in buf.content.iter_mut() {
+            cell.set_bg(TuiColor::Rgb(200, 0, 0));
+        }
+        let lines = vec!["line1".into(), "line2".into()];
+        render_overlay(&mut buf, area, &lines, "Test Title");
+
+        // Overlay is centered; width = 5 + 4 = 9, height = 2 + 4 = 6.
+        let x = area.x + area.width.saturating_sub(9) / 2;
+        let y = area.y + area.height.saturating_sub(6) / 2;
+
+        // The top-left corner must not carry the square `╭` glyph.
+        assert_ne!(buf[(x, y)].symbol(), "╭", "corner glyph should be dropped");
+
+        // Its background must blend toward the underlying red (the SDF fade
+        // ran) rather than the interior gradient color (~25,25,38).
+        let (r, _, _) = match buf[(x, y)].bg {
+            TuiColor::Rgb(r, g, b) => (r, g, b),
+            _ => (0, 0, 0),
+        };
+        assert!(r > 80, "corner should fade toward the underlying red, got r={r}");
+
+        // An interior cell keeps the opaque gradient background.
+        let (ri, _, _) = match buf[(x + 3, y + 2)].bg {
+            TuiColor::Rgb(r, g, b) => (r, g, b),
+            _ => (0, 0, 0),
+        };
+        assert!(ri < 40, "interior should stay dark, got r={ri}");
     }
 
     #[test]

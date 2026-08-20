@@ -157,7 +157,12 @@ fn view_line_text(emu: &Emulator, row: usize) -> String {
         .get(row)
         .map(|r| {
             r.iter()
-                .map(|(s, _)| *s)
+                .map(|sc| {
+                    let mut s = String::new();
+                    s.push(sc.content);
+                    sc.for_each_combining(|m| s.push(m));
+                    s
+                })
                 .collect::<String>()
                 .trim_end()
                 .to_string()

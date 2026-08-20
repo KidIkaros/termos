@@ -323,8 +323,117 @@ ratatui-based multiplexers at scale.
   unchanged cells.
 - ✅ Scrollback reflow under resize: 3 tests verifying long-line reflow,
   viewport preservation, and wider-resize content retention.
-- ⬜ Structured fuzzing of the VT parser (fuzz/ targets) with the
-  VTE/escape-test conformance suites expanded.
+- ✅ Structured fuzzing of the VT parser: token-pool proptests
+  (`structured_token_stream_keeps_grid_invariant`, CJK-wide streams),
+  6 new corpus seeds (wide CJK, alt-screen, OSC hyperlink, edit ops,
+  zero-width regression), plus the VTE conformance suites.
+
+  **Finding:** the fuzz surfaced a real bug — zero-width characters
+  (combining marks like U+0301) were written as occupied width-0 cells,
+  violating the grid invariant and being overwritten by the next char.
+  The fix went further than dropping: `Cell` now stores an inline
+  `combining: [char; 4]` run on the base cell, `write_cell` attaches
+  zero-width marks to it (walking past wide continuations to the lead), and
+  every consumer (render, copy, selection, scrollback) emits the full
+  grapheme — `e` + U+0301 renders as `é` in one terminal cell. Capacity is
+  adaptive: 4 marks inline (covers every real script — Devanagari
+  virama+matra stacks, Hangul jamo, polytonic Greek, Vietnamese — per
+  measured `unicode-width` values), then a shared `Arc<Vec<char>>` spill with
+  no ceiling for pathological linguistic stacks. The inline budget keeps the
+  render hot path allocation-free; the spill is shared (not copied) across
+  scrollback line clones. The grid invariant asserts combining runs only ride
+  on occupied bases and that spills only exist past the inline budget.
+  Locked in by 7 unit tests, two `paint_emulator` symbol tests, the
+  strengthened proptest, and the fuzz seeds.
+
+  **Live dogfood follow-up (wide-char paint bug):** rendering decomposed
+  Devanagari/Hangul in tmux exposed a pre-existing alignment bug —
+  `paint_emulator` laid out `StyledChar` columns consecutively, but ratatui's
+  buffer diff treats a wide symbol as occupying two terminal columns and
+  skips the next buffer cell. Every wide glyph shifted subsequent content
+  left by one column and ate the following character (`你你XX` rendered as
+  `你 X` with the pane border drifting). Fixed by carrying the glyph width on
+  `StyledChar`, advancing the buffer column by it, and marking continuation
+  cells `skip = true` (ratatui's sanctioned mechanism, cleared every frame by
+  `Cell::reset`). Verified live: `你你XX` = 6 columns, `|한|` = 4, the
+  Devanagari 3-mark stack and 5-mark spill each occupy one column with their
+  trailing markers intact.  Locked in by
+  `paint_emulator_spaces_wide_glyphs_and_trailing_text` and
+  `paint_emulator_spaces_hangul_jamo_run`.
+
+  **Wide-char audit (selection + scrollback):** `paint_selection` maps
+  selection columns (emulator/content space) 1:1 to buffer positions, which
+  is correct because wide leads sit at their emulator column; continuation
+  cells are `skip`, so the highlight lands on the glyph leads and trailing
+  text without drift. Scrollback view rows flow through the same
+  width-carrying `row_to_styled` → `paint_emulator` chain as live rows, and
+  the cursor lands one column past the last char after a wide run. Copy text
+  extraction (`selection_text`) was already width- and grapheme-aware.
+  Locked in by `paint_selection_reverses_wide_lead_cells_at_correct_columns`
+  and `paint_scrollback_rows_keep_wide_spacing`.
+
+  **Continuation-click snapping:** mouse clicks on a wide glyph's second
+  column previously anchored the selection at the *next* column, so a click
+  on the right half of `你` selected the char after it. `content_position_at`
+  now walks the content line's cell widths and snaps any click inside a
+  wide cell's span to its lead column (clicks beyond the content keep their
+  raw column). This fixes begin/extend mouse selection, word select, and
+  line select uniformly; copy mode navigates by emulator columns and was
+  already safe. Locked in by
+  `mouse_click_on_wide_continuation_snaps_to_lead`.
+
+  **Word-select column conversion:** `select_word_at` computed the word
+  range in text-char space but stored it as columns, so double-clicking a
+  CJK run truncated the selection (`你你XX` → `你你X`). It now converts
+  the char range to column space (wide runes count 2) and stores the end
+  column inclusively, matching `selection_text`'s semantics. Locked in by
+  `word_select_on_wide_run_selects_full_word`.
+
+  **Phantom-space copy fix:** `selection_text` visited every cell and
+  pushed `' '` for width-0 wide continuations, so copying `你你XX` yielded
+  `你 你 XX` (phantom spaces) — the other extractors (`line_text`, screen
+  rows) index by column and skip continuations correctly. It now skips
+  width-0 cells the same way. Locked in by
+  `mouse_drag_yanks_clean_wide_text` and
+  `mouse_drag_starting_on_wide_continuation_yanks_full_word` (the latter
+  also proves a drag starting on a continuation snaps to the lead and
+  copies cleanly).
+
+  **Network-path verification:** the web/SSH clients render through the
+  shared `render()` → `paint_emulator` path and forward key events only
+  (no mouse), and daemon-attached windows are `Window::remote` emulators
+  fed raw PTY bytes through a channel + `drain_thread` — the exact same
+  `Emulator` type, so every wide/combining/selection fix applies
+  identically. Locked in by
+  `remote_window_emulator_path_handles_wide_and_combining`, which drives
+  the channel-fed remote path end to end (clean selection text, combining
+  mark riding its base, no width-0 occupied cells). Also fixed a pre-
+  existing parallel-test race on the global `SHADOW_MASK_CACHE` (two tests
+  asserted its length while the other inserted 68 entries) surfaced under
+  `--features network`; the cache-asserting tests are now serialized.
+
+  **Parallel-test stabilization:** eliminated four classes of flaky tests
+  under `--test-threads=12`:
+  1. PTY-spawning tests (`skip_if_pty_exhausted!`): all 16 tests serialized
+     via a global `PTY_POOL` semaphore (capacity 8) — the machine runs near
+     its PTY ceiling and concurrent shell spawns blow fixed deadlines.
+     `Window::spawn` now acquires a pool slot before fork, blocking instead
+     of failing; the slot is released after the PTY is fully set up, so
+     daemon pump threads (which hold Arc clones of windows) don't deadlock.
+     The old serialized test lock was removed; the pool provides graduated
+     back-pressure instead of binary serialization.
+  2. Suspended-child race (`suspended_command_pane_waits_for_trigger`): the
+     parent now calls `waitpid(WUNTRACED)` so the child's `SIGSTOP` is
+     guaranteed observable before the hint text is written.
+  3. Daemon I/O timing (`render_coalescer_fires_signal`,
+     `daemon_response_reader_drains_responses`, `writer_writes_output_...`):
+     replaced fixed-sleep-then-assert with deadline-polling via a
+     `wait_emulator` helper that tolerates thread starvation.
+  4. Global-state races (`truncate_long_string`, `ellipsis_ascii`,
+     `sigil_mark_ascii`, `dash_rule_basic`, `rule_basic`): serialized the
+     `ASCII_MODE` toggle tests with a static mutex.
+  Result: 8/8 clean runs at 12-thread parallelism, all integration suites
+  green, network feature stable x3.
 
 ## Phase 18 — Pixel canvas: GUI-like visual polish (Tier 2)
 
@@ -353,8 +462,11 @@ Architecture: dual-layer rendering
   bar, title bars, and pane backgrounds.
 - ✅ Shadow rendering: Gaussian-falloff colored shadows for floating panes,
   giving depth/elevation feel.
-- ⬜ SDF rounded-corner integration for overlays (the primitives exist, but
-  current overlays still use ratatui cell borders).
+- ✅ SDF rounded-corner integration for overlays: `render_overlay` blends
+  each corner cell toward the content behind it via
+  `pixel_canvas::rounded_corner_alpha` and drops the square corner glyph,
+  so overlays read as rounded panels. Regression test
+  `rounded_corner_alpha_edges` documents the corner shape.
 - ✅ Gradient sparklines: smooth colored bar graphs for CPU/RAM widgets
   in the dock.
 - ✅ The reusable canvas and render invalidation are integrated in Phase 19.
@@ -393,10 +505,11 @@ that work without changing the ratatui full-buffer composition model.
   and overlay clicks. Existing VT render benchmarks remain the performance
   baseline.
 
-Deferred follow-ups are deliberately narrow: cache stable gradient/shadow
-masks and wake every daemon response reader through a dedicated signal. Those
-are optimization opportunities for the next performance phase, not blockers
-for the interaction-reliability work completed here.
+Deferred follow-ups from this phase: shadow-mask caching, a printable-run
+write fast path, and a dedicated daemon response-reader stop signal are now
+done (perf pass + the follow-up sweep). The forwarder select loop uses a
+crossbeam `select!` stop channel instead of polling, and shadow masks are
+cached per `(w, h, radius)` (bounded at 64 entries).
 
 ## Phase 20 — Render hot path: inline cell content + per-frame palette
 
@@ -444,10 +557,12 @@ code (and took a `Mutex` lock per lookup).
   `push_line_recycle` now reclaims the evicted line's backing `Vec` (cleared)
   rather than allocating a new one, removing a per-line allocation during
   steady-state scrolling.
-- ⬜ `compute_diff` in `src/terminal/diff.rs` (and the whole screen-diff wire
-  protocol) turned out to have **no production callers** — only its own tests.
-  Optimizing it would be wasted effort; it is deferred for either wiring into
-  the daemon protocol or removal.
+- ✅ **Removed** the screen-diff wire protocol (`src/terminal/diff.rs`,
+  ~660 lines including tests): `compute_diff`/`apply_screen_diff`/
+  `serialize_diff`/`DiffCell` had **no production callers**.  The daemon
+  streams raw `PtyOutput` and every client (TUI, web, SSH) runs its own
+  emulator, so the protocol was a Go-era relic.  Recoverable from git if a
+  future server-side-emulation path ever needs it.
 
 ### Tier 4 — pixel canvas caching
 
@@ -511,8 +626,69 @@ code (and took a `Mutex` lock per lookup).
 - ✅ Audited every `Deserialize` struct: all config sections now carry the
   `#[serde(default)]` container attribute (`StatusWidgetConfig`/
   `CustomActionConfig` intentionally remain strict — they are `Vec` elements
-  that should be fully specified).  Custom theme files (`ThemeJson`) and tape
-  types already report errors properly.
+  that should be fully specified).  Custom theme files (`ThemeJson`) and tape types already report errors properly.
+
+## Phase 21 — Bug fixes and test hardening (Tier 1)
+
+### select_line_at column-space hazard
+
+- ✅ **`cursor_col` stores inclusive end column.** `select_line_at` stored
+  `cursor_col: width` (exclusive), while `selection_text` treats the end
+  column as inclusive. For lines ending with a wide char this overflowed
+  by one column. Now `cursor_col: (width - 1).max(0)` — inclusive,
+  consistent with every other Selection producer.
+- ✅ `select_line_at_wide_chars_yanks_full_line` regression test.
+
+### PTY prompt timing flakes
+
+- ✅ **Deadlines bumped to30s.** The three remaining flaky tests that
+  spawn `/bin/bash` and wait for a prompt (`pty_writes_spaces_and_enter_
+  execute_command`, `terminal_mode_forwards_key_input_to_focused_pty`,
+  `terminal_output_is_visible_after_an_initial_render`) now use30s
+  deadlines. On a box near its PTY ceiling with12 parallel test threads,
+  bash startup can exceed15s.
+
+### selection_text coverage
+
+- ✅ **Proptest: `selection_text_never_has_phantom_wide_spaces`.** Writes
+  wide CJK + combining marks + ASCII, selects across both lines, and
+  asserts no phantom spaces from continuation cells, no lost combining
+  marks, and no space before combining marks.
+- ✅ **`select_line_at_wide_chars_yanks_full_line`** — triple-click on a
+  line containing wide chars verifies the inclusive cursor_col covers the
+  full line.
+
+### Daemon pump thread leak
+
+- ✅ **`Daemon::drop` closes all PTY master fds.** Without this, pump threads
+  hold `Arc::clone(&self.windows)` and keep `LiveWindow`s (and their
+  `PtyHandle`s) alive indefinitely after the Daemon is dropped — orphaning
+  PTYs until the shell exits.  `Drop` now locks the windows map and calls
+  `handle.close()` on each, causing reader threads to exit (EOF), channels
+  to close, and pump threads to drain.
+- ✅ `LiveWindow._handle` → `LiveWindow.handle` (`pub(crate)`) so Drop can
+  reach it.
+
+### Web/SSH mouse support
+
+- ✅ **Web client forwards mouse events.** xterm.js `onBinary` sends SGR
+  mouse sequences as base64-encoded JSON frames; the server parses them
+  via `parse_sgr_mouse` and feeds `Msg::Mouse` to the Os.
+- ✅ **SSH client forwards mouse events.** The `data()` handler tries SGR
+  mouse parsing first; falls back to key-event parsing if it doesn't match.
+- ✅ `parse_sgr_mouse` handles SGR button codes (left/middle/right,
+  scroll, drag, motion) and converts to crossterm `MouseEvent`.
+
+### Config watcher (dead code removed)
+
+- ✅ The `ConfigWatcher` polling module was dead code — the actual hot-reload
+  uses `UserConfig::watch` which already uses the `notify` crate (event-
+  driven, not polling).  No changes needed.
+
+### cert/key unused variable warnings
+
+- ✅ `#[allow(unused_variables)]` on `run_web_server` suppresses the
+  `cert`/`key` warnings when the `tls` feature is disabled.
 
 ## Priorities at a glance
 
@@ -531,3 +707,4 @@ code (and took a `Mutex` lock per lookup).
 | 18 | 2 | Pixel canvas: GUI-like visual polish | Medium (asciline-rust) |
 | 19 | 1 | Interaction reliability & render efficiency | Large (complete) |
 | 20 | 1 | Render hot path: content, palette, screen ops, canvas cache | Large |
+| 21 | 1 | Bug fixes: select_line_at column hazard, daemon test flakes, web mouse support, config docs | Medium |

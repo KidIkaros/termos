@@ -158,8 +158,7 @@ impl ScreenBuffer {
             content: None,
             width: 1,
             style: self.cursor.pen.style,
-            link: Default::default(),
-            dirty: true,
+            ..Default::default()
         }
     }
 
@@ -547,11 +546,7 @@ impl ScreenBuffer {
             let row = &self.lines[y as usize];
             while col < self.width {
                 let cell = &row[col as usize];
-                if let Some(ch) = cell.content {
-                    line.push(ch);
-                } else {
-                    line.push(' ');
-                }
+                cell.push_grapheme_into(&mut line);
                 col += cell.width.max(1) as i32;
             }
             out.push_str(line.trim_end());
@@ -572,11 +567,7 @@ impl ScreenBuffer {
         let row = &self.lines[y as usize];
         while col < self.width {
             let cell = &row[col as usize];
-            if let Some(ch) = cell.content {
-                line.push(ch);
-            } else {
-                line.push(' ');
-            }
+            cell.push_grapheme_into(&mut line);
             col += cell.width.max(1) as i32;
         }
         line.trim_end().to_string()

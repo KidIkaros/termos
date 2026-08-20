@@ -427,17 +427,41 @@ pub fn resize_emulator_to_snapshot(
 mod tests {
     use super::*;
 
+    /// Poll a predicate against the emulator until it holds or the deadline
+    /// passes, replacing fixed-sleep-then-assert patterns that flake under
+    /// parallel test load (the writer thread can be starved past any fixed
+    /// sleep).
+    fn wait_emulator(
+        emulator: &Arc<Mutex<Emulator>>,
+        mut pred: impl FnMut(&Emulator) -> bool,
+        what: &str,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let ok = {
+                let e = emulator.lock().unwrap_or_else(|e| e.into_inner());
+                pred(&e)
+            };
+            if ok {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn writer_writes_output_to_emulator() {
         let emulator = Arc::new(Mutex::new(Emulator::new(80, 24)));
         let writer = DaemonOutputWriter::new(Arc::clone(&emulator), None);
 
         writer.write_output_async(b"hello world");
-        // Give the writer thread time to process.
-        std::thread::sleep(Duration::from_millis(50));
+        wait_emulator(&emulator, |e| e.render_text().contains("hello world"), "writer output");
 
         writer.stop();
-        std::thread::sleep(Duration::from_millis(20));
 
         // The emulator should have received the data.
         let emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
@@ -451,10 +475,9 @@ mod tests {
         let writer = DaemonOutputWriter::new(Arc::clone(&emulator), None);
 
         writer.resize_from_stream(100, 30);
-        std::thread::sleep(Duration::from_millis(50));
+        wait_emulator(&emulator, |e| e.width() == 100 && e.height() == 30, "stream resize");
 
         writer.stop();
-        std::thread::sleep(Duration::from_millis(20));
 
         let emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(emu.width(), 100);
@@ -469,10 +492,10 @@ mod tests {
         // Queue some output, then bump the epoch before it's processed.
         writer.write_output_async(b"stale data");
         writer.discard_pending();
+        // Give the writer a chance to drain (it must drop the stale chunk).
         std::thread::sleep(Duration::from_millis(50));
 
         writer.stop();
-        std::thread::sleep(Duration::from_millis(20));
 
         // The stale data should have been dropped.
         let emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
@@ -549,13 +572,23 @@ mod tests {
             emu.write(b"\x1b[c");
         }
 
-        std::thread::sleep(Duration::from_millis(50));
-
-        // The response should have been drained.
-        {
-            let mut emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
-            let resp = emu.take_response();
-            assert!(resp.is_empty(), "response was not drained");
+        // Wait for the response to be drained with a deadline instead of a
+        // fixed sleep: under parallel test load the reader thread can be
+        // starved past 50ms.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let drained = {
+                let mut emu = emulator.lock().unwrap_or_else(|e| e.into_inner());
+                emu.take_response().is_empty()
+            };
+            if drained {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "response was not drained"
+            );
+            std::thread::sleep(Duration::from_millis(5));
         }
 
         done.store(true, Ordering::Release);
@@ -588,12 +621,19 @@ mod tests {
         let emulator = Arc::new(Mutex::new(Emulator::new(80, 24)));
         let writer = DaemonOutputWriter::new(Arc::clone(&emulator), Some(tx));
 
-        // Write output to trigger the coalesce signal.
+        // Write output to trigger the coalesce signal, then wait for it with
+        // a deadline rather than a fixed sleep: under parallel test load the
+        // coalescer thread can be starved well past one interval.
         writer.write_output_async(b"test");
-        std::thread::sleep(Duration::from_millis(100));
-
-        // The coalescer should have fired at least one render signal.
-        let got_signal = rx.try_recv().is_ok();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut got_signal = false;
+        while std::time::Instant::now() < deadline {
+            if rx.try_recv().is_ok() {
+                got_signal = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(got_signal, "render coalescer did not fire");
 
         writer.stop();

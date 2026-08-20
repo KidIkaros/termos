@@ -2244,7 +2244,7 @@ mod tests {
             .expect("PTY should spawn");
         os.enter_terminal_mode();
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             let text = os.windows[0].emulator.lock().unwrap().render_text();
             if text.contains('$') || text.contains('#') {
@@ -2262,7 +2262,7 @@ mod tests {
         }
         assert_eq!(handle_key(&mut os, &key(KeyCode::Enter)), KeyResult::Passthrough);
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             let text = os.windows[0].emulator.lock().unwrap().render_text();
             if text.contains("INPUT_REPRO") {
@@ -2297,7 +2297,7 @@ mod tests {
         os.update(crate::app::msg::Msg::Tick);
         crate::app::render::render(&os, &mut buf);
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             let text = os.windows[0].emulator.lock().unwrap().render_text();
             if text.contains('$') || text.contains('#') {
@@ -2313,7 +2313,7 @@ mod tests {
         }
         handle_key(&mut os, &key(KeyCode::Enter));
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             os.update(crate::app::msg::Msg::Tick);
             crate::app::render::render(&os, &mut buf);

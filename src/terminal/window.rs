@@ -96,7 +96,7 @@ pub struct RenderCache {
     pub width: i32,
     pub height: i32,
     pub viewport: usize,
-    pub lines: Vec<Vec<(char, crate::vt::Style)>>,
+    pub lines: Vec<Vec<crate::vt::cell::StyledChar>>,
 }
 
 /// A terminal window: one shell session in a pane.
@@ -1306,6 +1306,55 @@ mod tests {
     }
 
     #[test]
+    fn remote_window_emulator_path_handles_wide_and_combining() {
+        // The web/SSH clients attach to a daemon and feed PTY output into
+        // `Window::remote` emulators via a channel + drain_thread. Drive that
+        // exact path and verify the wide-char/combining fixes hold end to end:
+        // selection text stays clean (no phantom spaces) and line extraction
+        // preserves graphemes.
+        let (tx, rx) = crossbeam_channel::unbounded();
+        struct Sink;
+        impl PtySink for Sink {
+            fn write(&self, _data: &[u8]) {}
+            fn resize(&self, _size: WinSize) {}
+        }
+        let win = Window::remote("w0", "remote", WinSize { cols: 80, rows: 24 }, Box::new(Sink), rx);
+
+        // Feed wide CJK + combining marks exactly as a daemon PTY would emit.
+        tx.send(b"\x1b[2J\x1b[H".to_vec()).unwrap();
+        tx.send("\u{4f60}\u{4f60}XX end\n".as_bytes().to_vec()).unwrap();
+        // Decomposed Latin: e + U+0301 must stay attached to one cell.
+        tx.send("e\u{301}Z\n".as_bytes().to_vec()).unwrap();
+        // Drain (bounded wait).
+        let emu = win.emulator.clone();
+        for _ in 0..100 {
+            let ok = emu.lock().map(|e| {
+                let t = e.content_line_text(0);
+                t.contains("end") && e.content_line_text(1).contains('Z')
+            }).unwrap_or(false);
+            if ok {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let emu = emu.lock().unwrap_or_else(|e| e.into_inner());
+        // Selection across the whole CJK run: clean, no phantom spaces.
+        let text = emu.selection_text(0, 0, 0, 9);
+        assert_eq!(text, "\u{4f60}\u{4f60}XX end");
+        // Combining mark rides the base char in the extracted line (lines
+        // are padded to full width, so trim trailing spaces).
+        let line = emu.content_line_text(1);
+        assert!(line.trim_end().ends_with("e\u{301}Z"), "got: {line:?}");
+        // Grid invariant: no width-0 occupied cells from the remote feed.
+        for (i, cell) in emu.content_line(1).iter().enumerate() {
+            if let Some(_c) = cell.content {
+                assert!(cell.width >= 1, "cell {i} occupied with width 0");
+            }
+        }
+    }
+
+    #[test]
     fn flush_resize_no_pending_is_false() {
         let mut win = Window::without_pty("test", "Test", WinSize { cols: 80, rows: 24 });
         assert!(!win.has_pending_resize());
@@ -1440,7 +1489,7 @@ mod tests {
         )
         .expect("PTY should spawn");
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             let text = win.emulator.lock().unwrap().render_text();
             if text.contains("INITIAL") {
@@ -1454,7 +1503,7 @@ mod tests {
         win.clear_dirty();
         assert!(!win.is_dirty());
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             let text = win.emulator.lock().unwrap().render_text();
             if text.contains("DIRTY_REPRO") {
@@ -1659,7 +1708,7 @@ mod tests {
         crate::skip_if_pty_exhausted!();
         let mut win = spawn_cmd("echo SUSPENDED_OUTPUT", true);
         // The pane explains itself, and the child is genuinely stopped.
-        wait_text(&win, "[suspended]", std::time::Duration::from_secs(5));
+        wait_text(&win, "[suspended]", std::time::Duration::from_secs(10));
         assert!(win.suspended);
         assert!(!win.can_rerun());
         let pid = win.pid().expect("child pid");

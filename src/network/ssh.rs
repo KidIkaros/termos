@@ -632,19 +632,26 @@ impl Handler for TermosSshServer {
     ) -> Result<(), Self::Error> {
         let mut clients = self.clients.lock().await;
         if let Some(cs) = clients.values_mut().last() {
-            // Parse SSH input into crossterm key events and drive the model
-            // through the unified message pump.
-            let events = parse_ssh_input(data);
-
-            for key_event in &events {
-                let effects = cs.os.update(crate::app::msg::Msg::Key(*key_event));
+            // Try SGR mouse sequences first (terminal app may have enabled
+            // mouse tracking); fall back to key-event parsing.
+            if let Some(mouse) = crate::network::web::parse_sgr_mouse(data) {
+                let effects = cs.os.update(crate::app::msg::Msg::Mouse(mouse));
                 if effects
                     .iter()
                     .any(|e| matches!(e, crate::app::effect::Effect::Quit))
                 {
-                    // Client wants to quit; we don't break the SSH connection,
-                    // just stop processing input.
-                    break;
+                    return Ok(());
+                }
+            } else {
+                let events = parse_ssh_input(data);
+                for key_event in &events {
+                    let effects = cs.os.update(crate::app::msg::Msg::Key(*key_event));
+                    if effects
+                        .iter()
+                        .any(|e| matches!(e, crate::app::effect::Effect::Quit))
+                    {
+                        return Ok(());
+                    }
                 }
             }
         }

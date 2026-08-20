@@ -2,7 +2,6 @@
 //! `internal/terminal`.
 
 pub mod cwd;
-pub mod diff;
 pub mod env;
 pub mod pty;
 pub mod window;

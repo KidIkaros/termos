@@ -639,6 +639,9 @@ pub fn styled_reverse(fg: Color, bg: Color) -> Style {
 mod tests {
     use super::*;
 
+    /// Serializes tests that toggle the global `ASCII_MODE` flag.
+    static ASCII_MODE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn rect_contains() {
         let r = Rect::new(5, 3, 10, 5);
@@ -685,6 +688,7 @@ mod tests {
 
     #[test]
     fn truncate_long_string() {
+        let _guard = ASCII_MODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_ascii(true);
         assert_eq!(truncate("hello world", 8), "hello...");
         set_ascii(false);
@@ -787,6 +791,7 @@ mod tests {
 
     #[test]
     fn ellipsis_ascii() {
+        let _guard = ASCII_MODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_ascii(true);
         assert_eq!(ellipsis(), "...");
         set_ascii(false);
@@ -795,6 +800,7 @@ mod tests {
 
     #[test]
     fn sigil_mark_ascii() {
+        let _guard = ASCII_MODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_ascii(true);
         assert_eq!(sigil_mark(), ">");
         set_ascii(false);
@@ -803,6 +809,7 @@ mod tests {
 
     #[test]
     fn dash_rule_basic() {
+        let _guard = ASCII_MODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_ascii(false);
         assert_eq!(dash_rule(5), "╌╌╌╌╌");
         set_ascii(true);
@@ -812,6 +819,7 @@ mod tests {
 
     #[test]
     fn rule_basic() {
+        let _guard = ASCII_MODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_ascii(false);
         assert_eq!(rule(5), "─────");
         set_ascii(true);

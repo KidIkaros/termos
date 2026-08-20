@@ -5649,7 +5649,21 @@ impl Os {
         let w = self.windows.get(window)?;
         let emu = w.emulator.lock().ok()?;
         let line = emu.content_index_for_view_row(rel_row);
-        Some((line, rel_col))
+        // Terminal columns span wide glyphs, but selection coordinates are
+        // emulator columns (leads only). A click on a wide char's second
+        // column snaps to the glyph's lead so the char is selected whole;
+        // clicks beyond the line's content keep their raw column.
+        let mut snapped = rel_col;
+        let mut col = 0i32;
+        for cell in &emu.content_line(line) {
+            let cell_w = cell.width.max(1) as i32;
+            if rel_col < col + cell_w {
+                snapped = col;
+                break;
+            }
+            col += cell_w;
+        }
+        Some((line, snapped))
     }
 
     // -- Mouse selection ----------------------------------------------------
@@ -5820,14 +5834,14 @@ impl Os {
         let Some((line, col)) = self.content_position_at(window, column, row) else {
             return;
         };
-        let text = {
+        let (text, cells) = {
             let Some(w) = self.windows.get(window) else {
                 return;
             };
             let Ok(emu) = w.emulator.lock() else {
                 return;
             };
-            emu.content_line_text(line)
+            (emu.content_line_text(line), emu.content_line(line))
         };
         let chars: Vec<char> = text.chars().collect();
         if chars.is_empty() {
@@ -5846,7 +5860,7 @@ impl Os {
             });
             return;
         }
-        // Find word boundaries.
+        // Find word boundaries in text-char space.
         let mut start = pos;
         while start > 0 && is_word(chars[start - 1]) {
             start -= 1;
@@ -5855,12 +5869,39 @@ impl Os {
         while end + 1 < chars.len() && is_word(chars[end + 1]) {
             end += 1;
         }
+        let end_excl = end + 1;
+        // Convert the char range to column space: wide runes occupy two
+        // columns per char, so the selection must span their full width.
+        let mut char_idx = 0usize;
+        let mut col_idx = 0i32;
+        let mut start_col = 0i32;
+        let mut end_col = col;
+        for cell in &cells {
+            if cell.width == 0 {
+                continue;
+            }
+            if char_idx == start {
+                start_col = col_idx;
+            }
+            if char_idx == end_excl {
+                end_col = col_idx;
+                break;
+            }
+            char_idx += 1;
+            col_idx += cell.width.max(1) as i32;
+        }
+        if char_idx == end_excl {
+            end_col = col_idx;
+        }
+        // end_col is exclusive; selection_text treats the end column as
+        // inclusive, so back off by one (saturating for the empty case).
+        let end_col_incl = end_col.saturating_sub(1);
         self.selection = Some(Selection {
             window,
             anchor_line: line,
-            anchor_col: start as i32,
+            anchor_col: start_col,
             cursor_line: line,
-            cursor_col: (end + 1) as i32,
+            cursor_col: end_col_incl,
         });
     }
 
@@ -5883,7 +5924,8 @@ impl Os {
             anchor_line: line,
             anchor_col: 0,
             cursor_line: line,
-            cursor_col: width,
+            // Inclusive end column: width - 1 covers the entire line.
+            cursor_col: (width - 1).max(0),
         });
     }
 
@@ -6716,6 +6758,56 @@ mod tests {
     }
 
     #[test]
+    fn word_select_on_wide_run_selects_full_word() {
+        let mut os = os_with_window();
+        {
+            let w = &os.windows[0];
+            let mut emu = w.emulator.lock().unwrap();
+            emu.write(b"\x1b[2J\x1b[H");
+            emu.write("\u{4f60}\u{4f60}XX end".as_bytes());
+        }
+        // Double-click on the second 你 (screen col 3 = content col 2): the
+        // word 你你XX must be selected whole, including both X's.
+        os.select_word_at(0, 3, 1);
+        let sel = os.selection.as_ref().unwrap();
+        assert_eq!(sel.anchor_col, 0);
+        // 你你XX spans 6 columns (2+2+1+1); the range is in column space
+        // and the end column is inclusive.
+        assert_eq!(sel.cursor_col, 5, "word must cover 你你XX");
+        let text = {
+            let w = &os.windows[0];
+            let emu = w.emulator.lock().unwrap();
+            emu.selection_text(sel.anchor_line, sel.anchor_col, sel.cursor_line, sel.cursor_col)
+        };
+        assert_eq!(text, "\u{4f60}\u{4f60}XX");
+    }
+
+    #[test]
+    fn mouse_click_on_wide_continuation_snaps_to_lead() {
+        let mut os = os_with_window();
+        // Replace content with a wide char + trailing text: 你 occupies
+        // content cols 0-1, X is at col 2.
+        {
+            let w = &os.windows[0];
+            let mut emu = w.emulator.lock().unwrap();
+            emu.write(b"\x1b[2J\x1b[H");
+            emu.write("\u{4f60}X".as_bytes());
+        }
+        // Click on the wide char's continuation column (screen col 2 =
+        // content col 1): must snap to the lead col 0.
+        os.begin_mouse_selection(0, 2, 1);
+        let sel = os.selection.as_ref().unwrap();
+        assert_eq!(sel.anchor_col, 0, "continuation click must snap to lead");
+        assert_eq!(sel.cursor_col, 0);
+        // Click exactly on the lead column also lands on the lead.
+        os.begin_mouse_selection(0, 1, 1);
+        assert_eq!(os.selection.as_ref().unwrap().anchor_col, 0);
+        // Click past the content end keeps its raw column (no clamping).
+        os.begin_mouse_selection(0, 15, 1);
+        assert_eq!(os.selection.as_ref().unwrap().anchor_col, 14);
+    }
+
+    #[test]
     fn mouse_selection_yanks_on_release() {
         let mut os = os_with_window();
         // Click at content (line 0, col 0) then release over (0, 4). The pane
@@ -6728,6 +6820,71 @@ mod tests {
         os.end_mouse_selection();
         assert!(!os.mouse_selecting);
         assert_eq!(os.clipboard, "hello");
+    }
+
+    #[test]
+    fn mouse_drag_yanks_clean_wide_text() {
+        let mut os = os_with_window();
+        {
+            let w = &os.windows[0];
+            let mut emu = w.emulator.lock().unwrap();
+            emu.write(b"\x1b[2J\x1b[H");
+            emu.write("\u{4f60}\u{4f60}XX end".as_bytes());
+        }
+        // Drag from the first 你's lead (content col 0) to 'd' (content col 9).
+        // The pane has a 1-cell border ring, so screen (1,1)..(10,1) maps to
+        // content cols 0..9.
+        os.begin_mouse_selection(0, 1, 1);
+        os.extend_mouse_selection(0, 10, 1);
+        os.end_mouse_selection();
+        assert_eq!(os.clipboard, "\u{4f60}\u{4f60}XX end");
+    }
+
+    #[test]
+    fn mouse_drag_starting_on_wide_continuation_yanks_full_word() {
+        let mut os = os_with_window();
+        {
+            let w = &os.windows[0];
+            let mut emu = w.emulator.lock().unwrap();
+            emu.write(b"\x1b[2J\x1b[H");
+            emu.write("\u{4f60}\u{4f60}XX end".as_bytes());
+        }
+        // Press lands on the second 你's continuation (content col 3) and
+        // drags to 'd' (content col 9). The snap anchors the selection at the
+        // second 你's lead (col 2), so cols 2..=9 are copied cleanly — the
+        // first 你 is legitimately excluded, and there must be no phantom
+        // space where the continuation cell sits.
+        os.begin_mouse_selection(0, 4, 1);
+        os.extend_mouse_selection(0, 10, 1);
+        os.end_mouse_selection();
+        assert_eq!(os.clipboard, "\u{4f60}XX end");
+    }
+
+    #[test]
+    fn select_line_at_wide_chars_yanks_full_line() {
+        let mut os = os_with_window();
+        {
+            let w = &os.windows[0];
+            let mut emu = w.emulator.lock().unwrap();
+            emu.write(b"\x1b[2J\x1b[H");
+            emu.write("\u{4f60}\u{4f60}XX end".as_bytes());
+        }
+        // Triple-click (line select) on the content: screen (2,1) = content col 0.
+        os.select_line_at(0, 2, 1);
+        let sel = os.selection.as_ref().unwrap();
+        assert_eq!(sel.anchor_col, 0);
+        // cursor_col is inclusive: covers the entire line (cols 0..=width-1).
+        let w = &os.windows[0];
+        let emu = w.emulator.lock().unwrap();
+        let width = emu.width();
+        drop(emu);
+        assert_eq!(sel.cursor_col, width - 1, "line select must cover full line");
+        let text = {
+            let w = &os.windows[0];
+            let emu = w.emulator.lock().unwrap();
+            emu.selection_text(sel.anchor_line, sel.anchor_col, sel.cursor_line, sel.cursor_col)
+        };
+        assert_eq!(text, "\u{4f60}\u{4f60}XX end");
     }
 
     struct NullSink;

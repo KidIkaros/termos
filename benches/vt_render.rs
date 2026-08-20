@@ -97,8 +97,8 @@ fn bench_style_resolution(c: &mut Criterion) {
                 b.iter(|| {
                     let mut acc = 0u64;
                     for row in &lines {
-                        for (_, style) in row {
-                            acc = acc.wrapping_add(palette.style(*style).add_modifier.bits() as u64);
+                        for sc in row {
+                            acc = acc.wrapping_add(palette.style(sc.style).add_modifier.bits() as u64);
                         }
                     }
                     black_box(acc);

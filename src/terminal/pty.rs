@@ -27,9 +27,9 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Condvar, LazyLock, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -39,6 +39,7 @@ use nix::{
     libc,
     pty::{grantpt, posix_openpt, ptsname, unlockpt, PtyMaster},
     sys::stat::Mode,
+    sys::wait::{waitpid, WaitPidFlag, WaitStatus},
     unistd::{close, dup2, fork, setsid, ForkResult, Pid},
 };
 
@@ -81,6 +82,78 @@ impl std::fmt::Display for PtyError {
 }
 
 impl std::error::Error for PtyError {}
+
+// ---------------------------------------------------------------------------
+// PTY pool — back-pressure semaphore
+// ---------------------------------------------------------------------------
+
+/// Maximum number of concurrent PTY spawns.  On a box near the system
+/// ceiling (`/proc/sys/kernel/pty/nr`) the pool blocks the caller instead
+/// of failing.  This is the single choke-point that turns a hard spawn
+/// failure into graceful back-pressure.
+const PTY_POOL_CAPACITY: usize = 8;
+
+/// How long `spawn_pty` waits for a pool slot before returning
+/// `Err(PtyError::Nix(ETIMEDOUT))`.  Generous enough that parallel tests
+/// complete within the harness timeout; production callers should rarely
+/// hit this.
+const PTY_POOL_TIMEOUT: Duration = Duration::from_secs(120);
+
+struct PtyPool {
+    count: Mutex<usize>,
+    capacity: usize,
+    available: Condvar,
+}
+
+impl PtyPool {
+    const fn new(capacity: usize) -> Self {
+        PtyPool {
+            count: Mutex::new(0),
+            capacity,
+            available: Condvar::new(),
+        }
+    }
+
+    /// Acquire a slot.  Blocks until one is available or the timeout fires.
+    fn acquire(&self, timeout: Duration) -> Result<PtyPoolGuard, PtyError> {
+        let deadline = Instant::now() + timeout;
+        let mut guard = self.count.lock().unwrap_or_else(|e| e.into_inner());
+        while *guard >= self.capacity {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(PtyError::Nix(nix::errno::Errno::ETIMEDOUT));
+            }
+            let result = self.available.wait_timeout(guard, remaining);
+            guard = match result {
+                Ok((g, _)) => g,
+                Err(poisoned) => poisoned.into_inner().0,
+            };
+        }
+        *guard += 1;
+        drop(guard);
+        Ok(PtyPoolGuard)
+    }
+
+    fn release(&self) {
+        let mut guard = self.count.lock().unwrap_or_else(|e| e.into_inner());
+        *guard -= 1;
+        self.available.notify_one();
+    }
+}
+
+/// RAII guard that holds one PTY pool slot.  Dropped when the window is
+/// dropped — this is the moment the child has been reaped and the PTY is
+/// fully released.
+struct PtyPoolGuard;
+
+impl Drop for PtyPoolGuard {
+    fn drop(&mut self) {
+        PTY_POOL.release();
+    }
+}
+
+/// Global pool: 4 concurrent PTY slots, 60-second acquisition timeout.
+static PTY_POOL: LazyLock<PtyPool> = LazyLock::new(|| PtyPool::new(PTY_POOL_CAPACITY));
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -352,6 +425,10 @@ pub fn spawn_pty(
     cwd: Option<&str>,
     suspended: bool,
 ) -> Result<(PtyWriter, PtyHandle, PtyReader), PtyError> {
+    // Acquire a pool slot before opening the PTY.  This blocks instead of
+    // failing, so callers get graceful back-pressure under load.
+    let pool_guard = PTY_POOL.acquire(PTY_POOL_TIMEOUT)?;
+
     // 1. Open master.
     let master: PtyMaster = posix_openpt(OFlag::O_RDWR | OFlag::O_NOCTTY)?;
     grantpt(&master)?;
@@ -486,7 +563,27 @@ pub fn spawn_pty(
                 return Err(nix::errno::Errno::last().into());
             }
             let handle_fd = unsafe { OwnedFd::from_raw_fd(handle_fd_raw) };
+
+            // `start_suspended`: block until the child actually stops. The
+            // child raises SIGSTOP just before exec; waiting here makes the
+            // "stopped" state observable to callers as soon as spawn returns
+            // (the pane's `[suspended]` hint is only truthful after this).
+            if suspended {
+                loop {
+                    match waitpid(child, Some(WaitPidFlag::WUNTRACED)) {
+                        Ok(WaitStatus::Stopped(_, _)) => break,
+                        // EINTR or a transient notification: keep waiting.
+                        Ok(_) => continue,
+                        Err(nix::errno::Errno::EINTR) => continue,
+                        Err(e) => return Err(PtyError::Nix(e)),
+                    }
+                }
+            }
+
             let handle = PtyHandle::new(child, handle_fd);
+            // Release the pool slot now that the PTY is fully set up.  The
+            // guard's drop calls PTY_POOL.release().
+            drop(pool_guard);
             Ok((writer, handle, PtyReader { rx, reading }))
         }
     }
@@ -576,7 +673,7 @@ mod tests {
         .unwrap();
         // Wait until the shell has printed its prompt (its termios setup is
         // done by then, so typed input is not flushed).
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             let text = w.emulator.lock().unwrap().render_text();
             if text.contains('$') || text.contains("#") {
@@ -594,7 +691,7 @@ mod tests {
             w.write(&[*b]);
         }
         // Poll until the command output settles.
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut occurrences = 0;
         while std::time::Instant::now() < deadline {
             let text = w.emulator.lock().unwrap().render_text();

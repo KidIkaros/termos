@@ -14,11 +14,11 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
+use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use serde_json::Value;
 
 use crate::terminal::pty::{spawn_pty, PtyHandle, PtyWriter, WinSize};
@@ -53,7 +53,8 @@ struct LiveWindow {
     info: WindowInfo,
     writer: PtyWriter,
     // Kept alive so the child is SIGHUP'd and reaped when the window closes.
-    _handle: PtyHandle,
+    // pub(crate) so Daemon::drop can close the master fd without dropping.
+    pub(crate) handle: PtyHandle,
     shell: String,
 }
 
@@ -511,7 +512,7 @@ impl Daemon {
                 agent_harness: String::new(),
             },
             writer,
-            _handle: handle,
+            handle,
             shell: shell.to_string(),
         })
     }
@@ -1726,6 +1727,24 @@ impl Daemon {
     }
 }
 
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        // Close every PTY master fd so reader threads exit (EOF), channels
+        // close, and pump threads drain.  Without this, pump threads hold
+        // Arc clones of the windows map and keep LiveWindows (and their
+        // PtyHandles) alive indefinitely after the Daemon is dropped.
+        if let Ok(mut windows) = self.windows.lock() {
+            for wins in windows.values_mut() {
+                for w in wins.iter_mut() {
+                    // Close the master fd: the reader thread's poll returns 0
+                    // (EOF), the channel closes, and the pump thread exits.
+                    w.handle.close();
+                }
+            }
+        }
+    }
+}
+
 impl Default for Daemon {
     fn default() -> Self {
         Self::new()
@@ -2037,8 +2056,8 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
         return;
     }
 
-    // (session name, subscriber id, stop flag for the forward thread).
-    let mut attached: Option<(String, u64, Arc<AtomicBool>)> = None;
+    // (session name, subscriber id, stop signal for the forward thread).
+    let mut attached: Option<(String, u64, StreamStop)> = None;
     // The client name from the Hello handshake, for join/leave notifications.
     let mut client_name = String::from("client");
 
@@ -2087,26 +2106,30 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
             Message::Attach { name } => {
                 // Stop any previous streaming for this connection.
                 if let Some((prev, sub_id, stop)) = attached.take() {
-                    stop.store(true, Ordering::Release);
+                    stop.signal();
                     daemon.detach(&prev, sub_id);
                 }
                 match daemon.attach_named(&name, &client_name, 0, 0) {
                     Ok((windows, sub_id, rx)) => {
-                        let stop = Arc::new(AtomicBool::new(false));
-                        attached = Some((name.clone(), sub_id, Arc::clone(&stop)));
+                        let (stop, stop_rx) = StreamStop::new();
+                        attached = Some((name.clone(), sub_id, stop));
                         let _ = send(&writer, &Message::Attached { windows });
                         // Forward the session's broadcast stream to this client.
                         let forward_writer = Arc::clone(&writer);
                         std::thread::spawn(move || {
-                            while !stop.load(Ordering::Acquire) {
-                                match rx.recv_timeout(Duration::from_millis(100)) {
-                                    Ok(msg) => {
-                                        if send(&forward_writer, &msg).is_err() {
-                                            break;
+                            loop {
+                                select! {
+                                    recv(rx) -> msg => {
+                                        match msg {
+                                            Ok(msg) => {
+                                                if send(&forward_writer, &msg).is_err() {
+                                                    break;
+                                                }
+                                            }
+                                            Err(_) => break, // broadcast closed
                                         }
                                     }
-                                    Err(RecvTimeoutError::Timeout) => continue,
-                                    Err(RecvTimeoutError::Disconnected) => break,
+                                    recv(stop_rx) -> _ => break, // stop signal
                                 }
                             }
                         });
@@ -2118,7 +2141,7 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
             }
             Message::Detach => {
                 if let Some((name, sub_id, stop)) = attached.take() {
-                    stop.store(true, Ordering::Release);
+                    stop.signal();
                     daemon.detach(&name, sub_id);
                 }
             }
@@ -2564,13 +2587,13 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
             Message::AttachResume { name, seq } => {
                 // Stop any previous streaming for this connection.
                 if let Some((prev, sub_id, stop)) = attached.take() {
-                    stop.store(true, Ordering::Release);
+                    stop.signal();
                     daemon.detach(&prev, sub_id);
                 }
                 match daemon.attach_resume(&name, &client_name, 0, 0, seq) {
                     Ok((windows, sub_id, current_seq, rx)) => {
-                        let stop = Arc::new(AtomicBool::new(false));
-                        attached = Some((name.clone(), sub_id, Arc::clone(&stop)));
+                        let (stop, stop_rx) = StreamStop::new();
+                        attached = Some((name.clone(), sub_id, stop));
                         let _ = send(
                             &writer,
                             &Message::AttachedResume {
@@ -2581,15 +2604,19 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
                         // Forward the session's broadcast stream to this client.
                         let forward_writer = Arc::clone(&writer);
                         std::thread::spawn(move || {
-                            while !stop.load(Ordering::Acquire) {
-                                match rx.recv_timeout(Duration::from_millis(100)) {
-                                    Ok(msg) => {
-                                        if send(&forward_writer, &msg).is_err() {
-                                            break;
+                            loop {
+                                select! {
+                                    recv(rx) -> msg => {
+                                        match msg {
+                                            Ok(msg) => {
+                                                if send(&forward_writer, &msg).is_err() {
+                                                    break;
+                                                }
+                                            }
+                                            Err(_) => break, // broadcast closed
                                         }
                                     }
-                                    Err(RecvTimeoutError::Timeout) => continue,
-                                    Err(RecvTimeoutError::Disconnected) => break,
+                                    recv(stop_rx) -> _ => break, // stop signal
                                 }
                             }
                         });
@@ -2626,8 +2653,28 @@ fn handle_client(stream: UnixStream, daemon: Arc<Daemon>) {
 
     // Cleanup on disconnect.
     if let Some((name, sub_id, stop)) = attached {
-        stop.store(true, Ordering::Release);
+        stop.signal();
         daemon.detach(&name, sub_id);
+    }
+}
+
+/// A stop signal for a connection's broadcast forwarder thread.
+///
+/// Sending on it wakes the forwarder immediately via crossbeam `select!`,
+/// instead of making it poll a shared flag every 100 ms while idle.
+struct StreamStop(crossbeam_channel::Sender<()>);
+
+impl StreamStop {
+    /// Create the signal pair: the handle kept by the connection loop and the
+    /// receiver moved into the forwarder thread.
+    fn new() -> (Self, Receiver<()>) {
+        let (tx, rx) = unbounded();
+        (Self(tx), rx)
+    }
+
+    /// Wake the forwarder thread; it exits at its next `select!` iteration.
+    fn signal(&self) {
+        let _ = self.0.send(());
     }
 }
 
@@ -2740,7 +2787,7 @@ fn fire_pane_marker_hook(
 /// Resolve the target session of a verb: the named one, else the session this
 /// connection is attached to, else `None`.
 fn resolve_session(
-    attached: &Option<(String, u64, Arc<AtomicBool>)>,
+    attached: &Option<(String, u64, StreamStop)>,
     session: &Option<String>,
 ) -> Option<String> {
     match session {
@@ -2875,6 +2922,19 @@ mod tests {
     }
 
     #[test]
+    fn stream_stop_signal_wakes_receiver() {
+        let (stop, stop_rx) = StreamStop::new();
+        stop.signal();
+        // The receiver must wake immediately with the stop message.
+        assert!(stop_rx.recv_timeout(Duration::from_millis(200)).is_ok());
+        // Idle: no message pending after the signal was consumed.
+        assert!(
+            stop_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "no further stop messages expected"
+        );
+    }
+
+    #[test]
     fn resolve_session_explicit_name() {
         let attached = None;
         let session = Some("my-session".into());
@@ -2886,11 +2946,8 @@ mod tests {
 
     #[test]
     fn resolve_session_from_attached() {
-        let attached = Some((
-            "attached-session".into(),
-            1,
-            Arc::new(AtomicBool::new(true)),
-        ));
+        let (stop, _stop_rx) = StreamStop::new();
+        let attached = Some(("attached-session".into(), 1, stop));
         let session = None;
         assert_eq!(
             resolve_session(&attached, &session),

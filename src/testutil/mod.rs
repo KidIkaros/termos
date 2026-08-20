@@ -7,37 +7,32 @@
 //! - PTY exhaustion guard for skipping PTY-dependent tests
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ─── PTY Exhaustion Guard ─────────────────────────────────────────────────
 
-/// Cached result of the PTY availability check (runs once per test binary).
-static PTY_CHECKED: AtomicBool = AtomicBool::new(false);
-static PTY_AVAILABLE: AtomicBool = AtomicBool::new(true);
-
-/// Returns `true` if a PTY can be allocated. Checks once, then caches.
-/// Uses `nix::pty::openpty` to test without leaking a descriptor.
+/// Returns `true` if a PTY can be allocated right now.
+///
+/// Unlike the original cached variant, this re-probes on each call so that
+/// `skip_if_pty_exhausted!` reflects the live system state — important
+/// because `Window::spawn` now uses a pool semaphore that blocks instead of
+/// failing, so the bottleneck is the pool slot count, not the kernel PTY
+/// ceiling.
 pub fn pty_is_available() -> bool {
-    if PTY_CHECKED.load(Ordering::Relaxed) {
-        return PTY_AVAILABLE.load(Ordering::Relaxed);
-    }
-
-    // Try to allocate a PTY pair.  Both fds are dropped immediately.
-    let avail = match nix::pty::openpty(None, None) {
+    match nix::pty::openpty(None, None) {
         Ok(pair) => {
             drop(pair.master);
             drop(pair.slave);
             true
         }
         Err(_) => false,
-    };
-    PTY_CHECKED.store(true, Ordering::Relaxed);
-    PTY_AVAILABLE.store(avail, Ordering::Relaxed);
-    avail
+    }
 }
 
 /// Call at the top of any test that requires a real PTY.
-/// Skips the test (via `return`) if PTYs are exhausted.
+/// Skips the test (via `return`) if PTYs are exhausted.  Rate-limiting is
+/// handled by the pool semaphore inside `Window::spawn`, so there is no
+/// need to serialize tests externally.
 ///
 /// # Example
 /// ```ignore

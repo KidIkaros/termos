@@ -187,6 +187,7 @@ pub struct WebServerOptions {
 /// input from reaching the shells. `token` enables auth (and is mandatory
 /// for non-loopback binds); `cert`/`key` are explicit PEM files, while
 /// `auto_tls` generates a self-signed certificate for the bind host.
+#[allow(unused_variables)] // cert/key used only with `tls` feature
 pub async fn run_web_server(
     opts: WebServerOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -738,6 +739,25 @@ async fn handle_ws(
                                         }
                                     }
                                 }
+                                "mouse" => {
+                                    if let Some(b64) = frame.get("data").and_then(|v| v.as_str()) {
+                                        if let Ok(raw) = base64::Engine::decode(
+                                            &base64::engine::general_purpose::STANDARD,
+                                            b64,
+                                        ) {
+                                            if let Some(mouse) = parse_sgr_mouse(&raw) {
+                                                let mut os = os_input.lock().await;
+                                                let effects =
+                                                    os.update(crate::app::msg::Msg::Mouse(mouse));
+                                                if effects.iter().any(|e| {
+                                                    matches!(e, crate::app::effect::Effect::Quit)
+                                                }) {
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 "resize" => {
                                     if let (Some(cols), Some(rows)) = (
                                         frame.get("cols").and_then(|v| v.as_u64()),
@@ -777,6 +797,60 @@ async fn handle_ws(
 
 /// Parse WebSocket input data into crossterm `KeyEvent`s.
 ///
+/// Parse an SGR mouse escape sequence (`\x1b[<btn;x;yM` or `\x1b[<btn;x;ym`)
+/// into a crossterm `MouseEvent`.  Returns `None` for unrecognized sequences.
+pub fn parse_sgr_mouse(raw: &[u8]) -> Option<crossterm::event::MouseEvent> {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    // SGR: ESC [ < btn ; col ; row M/m
+    if raw.len() < 6 || raw[0] != 0x1b || raw[1] != b'[' || raw[2] != b'<' {
+        return None;
+    }
+    // Find the terminator (M or m).
+    let term = *raw.last()?;
+    let pressed = matches!(term, b'M');
+    let body = &raw[3..raw.len() - 1];
+    let parts: Vec<&[u8]> = body.split(|&b| b == b';').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let btn_code = std::str::from_utf8(parts[0]).ok()?.parse::<u16>().ok()?;
+    let col = std::str::from_utf8(parts[1]).ok()?.parse::<u16>().ok()?;
+    let row = std::str::from_utf8(parts[2]).ok()?.parse::<u16>().ok()?;
+
+    let button = match btn_code & 0x03 {
+        0 => MouseButton::Left,
+        1 => MouseButton::Middle,
+        2 => MouseButton::Right,
+        _ => MouseButton::Left,
+    };
+    let kind = if btn_code & 0x40 != 0 {
+        // Motion events (bit 6 set).
+        if pressed {
+            MouseEventKind::Drag(button)
+        } else {
+            MouseEventKind::Moved
+        }
+    } else if btn_code & 0x20 != 0 {
+        // Scroll (bits 5-6 = 0x20).
+        match btn_code & 0x03 {
+            0 => MouseEventKind::ScrollUp,
+            1 => MouseEventKind::ScrollDown,
+            _ => MouseEventKind::ScrollUp,
+        }
+    } else if pressed {
+        MouseEventKind::Down(button)
+    } else {
+        MouseEventKind::Up(button)
+    };
+
+    Some(crossterm::event::MouseEvent {
+        kind,
+        column: col.saturating_sub(1),
+        row: row.saturating_sub(1),
+        modifiers: crossterm::event::KeyModifiers::empty(),
+    })
+}
+
 /// The xterm.js frontend sends input as:
 /// - Plain characters for printable keys
 /// - Escape sequences for special keys (arrows, function keys, etc.)

@@ -8,19 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Packaging and release infrastructure:
-  - `Dockerfile` for containerized builds and deployment.
-  - `install.sh` curl|bash installer with OS/arch detection.
-  - `.github/workflows/release.yml` for cross-compiled release binaries and
-    GitHub Releases on tag push.
-- `SECURITY.md` with vulnerability reporting policy and response timeline.
-- `CONTRIBUTING.md` with development setup, code style, and PR process.
-- `CHANGELOG.md` (this file).
+- **Phase 18 — Pixel canvas: GUI-like visual polish.**
+  - Per-cell RGB background framebuffer (`pixel_canvas.rs`) for shadows,
+    gradients, and anti-aliased edges.
+  - Drop shadows on floating panes.
+  - SDF rounded corners on overlay panels.
+  - Gradient accent bars below dock.
+- **Phase 19 — Interaction reliability & render efficiency.**
+  - Continuation-click snapping for wide chars.
+  - Selection/scrollback audit.
+  - Paint-path wide-char spacing fix.
+- **Phase 20 — Render hot path: inline cell content + per-frame palette.**
+  - Shadow mask caching.
+  - Render coalescer for daemon mode.
+  - Dirty-region tracking.
+- **Phase 21 — Bug fixes and test hardening.**
+  - `select_line_at` inclusive column fix.
+  - PTY prompt deadline bump (30s).
+  - PTY pool semaphore (capacity 8) for back-pressure.
+  - Web/SSH mouse event forwarding (SGR).
+  - Daemon Drop closes PTY master fds.
+  - Combining marks: adaptive inline+spill (4 inline + heap overflow).
+  - Zero-width char fix in VT emulator.
+  - Proptest for selection_text phantom spaces.
+- **21 built-in themes** with swatch picker.
+- **Overlay system** (settings, theme picker, context menus).
+- **Floating pane support** (drag, raise, zoom).
+- **Dock bar** with workspace pills and session buttons.
+- **Agent state notifications** (OSC 9;4 progress, OSC 133 markers).
+- **`termos doctor`** health-check subcommand.
+- **`termos run`** wrapper for one-shot command execution.
+- **VT fuzzing** (cargo-fuzz + structured proptests).
+- **Parallel-test stabilization** — PTY pool, SIGSTOP waitpid, deadline-
+  polling for daemon I/O tests, ASCII_MODE lock for overlay tests.
 
 ### Changed
-- **Renamed the crate from `tuios-rs` to `termos`.** The binary, library, and
-  all references now use the `termos` name. The project remains a Rust port
-  of the upstream Go project [TUIOS](https://github.com/Gaurav-Gosain/tuios).
+- **Renamed the crate from `tuios-rs` to `termos`.**
+- **Combining marks stored inline** — Cell model extended with base char +
+  4 inline marks + optional Arc spill (56→80 bytes). Zero-width chars
+  attach to their base instead of being dropped.
+- **Wide-char paint spacing** — `paint_emulator` advances buffer column by
+  glyph width and marks continuation cells `skip = true`.
+- **`selection_text` skips width-0 cells** — no phantom spaces in copied
+  text from wide-char content.
+- **`select_word_at` column conversion** — word range computed in char
+  space, converted to column space for wide chars.
+- **Daemon Drop** closes all PTY master fds on shutdown.
+- **Config hot-reload** keeps last good config on broken edit.
+- **`compute_diff` removed** — dead 660-line wire protocol deleted.
 
 ## Release History
 

@@ -48,6 +48,13 @@
       ws.send(JSON.stringify({ type: 'input', data }));
     });
 
+    // Forward mouse events when the terminal app enables mouse tracking.
+    // xterm.js sends SGR mouse sequences via onBinary; base64-encode for
+    // JSON transport.
+    term.onBinary((data) => {
+      ws.send(JSON.stringify({ type: 'mouse', data: btoa(data) }));
+    });
+
     ws.onclose = () => {
       term.write('\r\n[Connection closed]\r\n');
     };

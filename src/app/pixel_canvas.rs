@@ -457,6 +457,27 @@ impl PixelCanvas {
     }
 }
 
+/// The SDF coverage of a `w`×`h` rounded rectangle at cell `(x, y)`.
+///
+/// Mirrors the math inside [`PixelCanvas::fill_rounded_rect`]: `alpha` is 1
+/// deep inside the rect, 0 at/beyond the rounded boundary, and smooth in
+/// between, so the caller can blend a fill toward the underlying content to
+/// fake rounded corners at cell resolution.
+pub(crate) fn rounded_corner_alpha(x: usize, y: usize, w: usize, h: usize, radius: f64) -> f64 {
+    let fx = x as f64;
+    let fy = y as f64;
+    let rx = radius;
+    let ry = radius;
+    let r1x = w as f64 - radius - 1.0;
+    let r1y = h as f64 - radius - 1.0;
+    let cx = fx.max(rx).min(r1x);
+    let cy = fy.max(ry).min(r1y);
+    let dx = fx - cx;
+    let dy = fy - cy;
+    let dist = (dx * dx + dy * dy).sqrt() - radius;
+    1.0 - smoothstep(-1.0, 0.0, dist)
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 /// Compute (or fetch from the cache) the shadow intensity mask for a
@@ -514,7 +535,7 @@ fn shadow_mask(rect_w: usize, rect_h: usize, radius: f64) -> ShadowMask {
 }
 
 /// Linear interpolation between two u8 values.
-fn lerp(a: u8, b: u8, t: f64) -> u8 {
+pub(crate) fn lerp(a: u8, b: u8, t: f64) -> u8 {
     let t = t.clamp(0.0, 1.0);
     let result = a as f64 * (1.0 - t) + b as f64 * t;
     result.round().min(255.0) as u8
@@ -598,6 +619,25 @@ mod tests {
     }
 
     #[test]
+    fn rounded_corner_alpha_edges() {
+        // Deep inside a rounded rect the cell is fully covered.
+        assert!((rounded_corner_alpha(5, 5, 20, 10, 2.0) - 1.0).abs() < 0.001);
+        // The corner cell fades out entirely (radius 1 → the corner is cut).
+        let corner = rounded_corner_alpha(0, 0, 10, 10, 1.0);
+        assert!(corner < 0.1, "corner cell should be cut, got {corner}");
+        // The cell one in from the corner sits on the SDF boundary (cut).
+        assert!(rounded_corner_alpha(1, 0, 10, 10, 1.0) < 0.1);
+        // The next cell in is fully covered.
+        assert!((rounded_corner_alpha(1, 1, 10, 10, 1.0) - 1.0).abs() < 0.001);
+        // A larger radius leaves a partial-coverage blend zone at the corner.
+        let blended = rounded_corner_alpha(0, 0, 10, 10, 2.0);
+        assert!(
+            (0.0..1.0).contains(&blended),
+            "radius-2 corner should be a partial blend, got {blended}"
+        );
+    }
+
+    #[test]
     fn rounded_rect_fills_center() {
         let mut c = PixelCanvas::new(20, 20);
         c.clear(0, 0, 0);
@@ -623,9 +663,14 @@ mod tests {
         assert!(r < 200, "shadow should darken, got r={r}");
     }
 
+    /// Serializes tests that assert on the global `SHADOW_MASK_CACHE`
+    /// contents, so parallel runs can't interleave inserts.
+    static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn shadow_mask_is_cached_and_position_independent() {
         // The mask cache is global; clear it so the test measures its own work.
+        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         SHADOW_MASK_CACHE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -665,6 +710,7 @@ mod tests {
 
     #[test]
     fn shadow_mask_cache_is_bounded() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         SHADOW_MASK_CACHE
             .lock()
             .unwrap_or_else(|e| e.into_inner())

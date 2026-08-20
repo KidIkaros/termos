@@ -1123,6 +1123,17 @@ pub struct StyledFragment {
     pub style: crate::vt::cell::Style,
 }
 
+/// The full grapheme of an occupied cell (base char + zero-width combining
+/// marks), so copy/selection preserves decomposed accented text.
+fn fragment_text(cell: &crate::vt::cell::Cell) -> String {
+    let mut s = String::with_capacity(1 + cell.combining_len as usize);
+    if let Some(ch) = cell.content {
+        s.push(ch);
+    }
+    cell.for_each_combining(|m| s.push(m));
+    s
+}
+
 /// Extract styled text from a slice of cells, skipping continuation cells
 /// (width=0) of wide characters. Empty cells become spaces with default style.
 ///
@@ -1141,7 +1152,7 @@ pub fn extract_styled_line(cells: &[crate::vt::cell::Cell]) -> Vec<StyledFragmen
             });
         } else {
             out.push(StyledFragment {
-                text: cell.content.map(|c| c.to_string()).unwrap_or_default(),
+                text: fragment_text(cell),
                 style: cell.style,
             });
         }
@@ -1173,7 +1184,7 @@ pub fn extract_styled_range(
             });
         } else {
             out.push(StyledFragment {
-                text: cell.content.map(|c| c.to_string()).unwrap_or_default(),
+                text: fragment_text(cell),
                 style: cell.style,
             });
         }

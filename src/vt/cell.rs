@@ -75,14 +75,26 @@ pub struct Link {
 /// One grid cell.
 #[derive(Debug, Clone, Default)]
 pub struct Cell {
-    /// The character content: a single `char` when occupied, `None` when
-    /// blank. Stored inline (no heap allocation) — the VT parser emits one
-    /// `char` per `print` call, so a cell never holds more than one code
-    /// point.
+    /// The base character: a single `char` when occupied, `None` when blank.
+    /// Stored inline (no heap allocation) — the VT parser emits one base
+    /// `char` per `print` call.
     pub content: Option<char>,
     /// Display width in columns (1 for normal, 2 for wide CJK, 0 for
     /// continuation cells of a wide rune).
     pub width: u8,
+    /// Zero-width combining marks that render together with `content` as a
+    /// single grapheme (e.g. `e` + U+0301 → `é`). The first
+    /// [`MAX_COMBINING`] marks are stored inline (no heap); any beyond that
+    /// spill into [`Self::combining_overflow`]. Real scripts (Devanagari
+    /// virama+matra stacks, Hangul jamo, polytonic Greek, Vietnamese)
+    /// fit within the inline budget; the spill exists for pathological
+    /// linguistic sequences and is shared via `Arc` so scrollback copies
+    /// never duplicate it.
+    pub combining: [char; MAX_COMBINING],
+    /// How many combining marks are live in total (inline + overflow).
+    pub combining_len: u8,
+    /// Marks beyond the inline [`MAX_COMBINING`]. `None` for the common case.
+    pub combining_overflow: Option<Arc<Vec<char>>>,
     /// The graphical rendition.
     pub style: Style,
     /// Hyperlink, if any.
@@ -91,11 +103,21 @@ pub struct Cell {
     pub dirty: bool,
 }
 
+/// How many zero-width combining marks a single cell holds inline before
+/// spilling to the heap. Covers Latin/Greek/Cyrillic accented text (1-3
+/// marks), Devanagari consonant stacks (virama + matras + nukta, ~3), Hangul
+/// jamo (lead + vowel + final, 2), and Vietnamese stacking. The inline budget
+/// keeps the render hot path allocation-free for every realistic script.
+pub const MAX_COMBINING: usize = 4;
+
 impl Cell {
     pub fn new(content: char, width: u8, style: Style) -> Self {
         Self {
             content: Some(content),
             width,
+            combining: ['\0'; MAX_COMBINING],
+            combining_len: 0,
+            combining_overflow: None,
             style,
             link: Link::default(),
             dirty: true,
@@ -107,6 +129,9 @@ impl Cell {
         Self {
             content: None,
             width,
+            combining: ['\0'; MAX_COMBINING],
+            combining_len: 0,
+            combining_overflow: None,
             style,
             link: Link::default(),
             dirty: true,
@@ -122,10 +147,104 @@ impl Cell {
         self.content.is_none()
     }
 
+    /// The inline (first [`MAX_COMBINING`]) combining marks.
+    pub fn combining_slice(&self) -> &[char] {
+        &self.combining[..(self.combining_len as usize).min(MAX_COMBINING)]
+    }
+
+    /// Visit every combining mark (inline then overflow) in order.
+    pub fn for_each_combining(&self, mut f: impl FnMut(char)) {
+        for &m in self.combining_slice() {
+            f(m);
+        }
+        if let Some(overflow) = &self.combining_overflow {
+            for &m in overflow.iter() {
+                f(m);
+            }
+        }
+    }
+
+    /// Append the full grapheme (base + combining marks) to `out`.
+    pub fn push_grapheme_into(&self, out: &mut String) {
+        if let Some(ch) = self.content {
+            out.push(ch);
+        } else {
+            out.push(' ');
+        }
+        self.for_each_combining(|m| out.push(m));
+    }
+
+    /// The full grapheme this cell renders (base + combining marks), or
+    /// `None` when blank. Allocates — prefer [`Self::push_grapheme_into`]
+    /// in hot paths.
+    pub fn grapheme(&self) -> Option<String> {
+        self.content.map(|ch| {
+            let mut s = String::with_capacity(1 + self.combining_len as usize);
+            s.push(ch);
+            self.for_each_combining(|m| s.push(m));
+            s
+        })
+    }
+
+    /// Attach a zero-width combining mark. Inline until [`MAX_COMBINING`],
+    /// then spilled to a shared heap buffer — unbounded.
+    pub fn push_combining(&mut self, c: char) {
+        let idx = self.combining_len as usize;
+        if idx < MAX_COMBINING {
+            self.combining[idx] = c;
+        } else {
+            let overflow = self.combining_overflow.get_or_insert_with(|| Arc::new(Vec::new()));
+            Arc::make_mut(overflow).push(c);
+        }
+        self.combining_len += 1;
+        self.dirty = true;
+    }
+
     /// Clear this cell back to a blank default cell.
     pub fn clear(&mut self) {
         *self = Self::default();
         self.dirty = true;
+    }
+}
+
+/// One rendered column: the base char, its zero-width combining marks, and
+/// the style. Inline marks are stored inline; spills share the cell's
+/// overflow buffer via `Arc`, so building a styled row never copies mark
+/// data (only refcount bumps). Clone, not Copy — constructing a row copies
+/// the small fields and bumps a refcount at most.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyledChar {
+    pub content: char,
+    pub combining: [char; MAX_COMBINING],
+    pub combining_len: u8,
+    pub combining_overflow: Option<Arc<Vec<char>>>,
+    /// Terminal width of this column (1, or 2 for a wide lead). The renderer
+    /// uses it to leave the continuation cell blank so the terminal's wide
+    /// glyph is not overwritten by the next column.
+    pub width: u8,
+    pub style: Style,
+}
+
+impl StyledChar {
+    pub fn combining_slice(&self) -> &[char] {
+        &self.combining[..(self.combining_len as usize).min(MAX_COMBINING)]
+    }
+
+    /// Visit every combining mark (inline then overflow) in order.
+    pub fn for_each_combining(&self, mut f: impl FnMut(char)) {
+        for &m in self.combining_slice() {
+            f(m);
+        }
+        if let Some(overflow) = &self.combining_overflow {
+            for &m in overflow.iter() {
+                f(m);
+            }
+        }
+    }
+
+    /// Whether this column renders as more than a single code point.
+    pub fn has_combining(&self) -> bool {
+        self.combining_len > 0
     }
 }
 

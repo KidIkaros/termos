@@ -377,14 +377,16 @@ impl Emulator {
             let line = self.content_line(line_idx);
             let mut col = 0i32;
             for cell in &line {
+                // Continuation cells of wide runes are covered by their
+                // lead's column span; visiting them would emit phantom
+                // spaces into the copied text.
+                if cell.width == 0 {
+                    continue;
+                }
                 let w = cell.width.max(1) as i32;
                 let covered = col.max(c_lo) <= (col + w - 1).min(c_hi);
                 if covered {
-                    if let Some(ch) = cell.content {
-                        out.push(ch);
-                    } else {
-                        out.push(' ');
-                    }
+                    cell.push_grapheme_into(&mut out);
                 }
                 col += w;
                 if col > c_hi {
@@ -412,8 +414,8 @@ impl Emulator {
     }
 
     /// Render a full snapshot of the active screen as styled text lines,
-    /// returning (content, style) pairs per cell for the renderer.
-    pub fn render_lines(&self) -> Vec<Vec<(char, Style)>> {
+    /// returning one [`StyledChar`] per displayed column for the renderer.
+    pub fn render_lines(&self) -> Vec<Vec<crate::vt::cell::StyledChar>> {
         let screen = self.screen();
         let mut out = Vec::with_capacity(screen.height() as usize);
         for y in 0..screen.height() {
@@ -425,7 +427,7 @@ impl Emulator {
     /// Render the visible viewport, scrolling back into the scrollback when
     /// `viewport` is non-zero: the last `viewport` scrollback lines are shown
     /// above the live screen rows, up to `height` lines total.
-    pub fn render_view_lines(&self) -> Vec<Vec<(char, Style)>> {
+    pub fn render_view_lines(&self) -> Vec<Vec<crate::vt::cell::StyledChar>> {
         let height = self.screens[self.active].height() as usize;
         if height == 0 {
             return Vec::new();
@@ -655,6 +657,15 @@ impl Emulator {
     /// paths cannot drift apart.
     fn write_cell(&mut self, c: char, width: i32) {
         self.last_printed_char = Some(c);
+        // Zero-width characters (combining marks, joiners, bidi controls)
+        // don't occupy a grid column; they attach to the base cell just
+        // printed so the pair renders as one grapheme (`e` + U+0301 → `é`).
+        // Recording `last_printed_char` above keeps OSC 133 prompt hooks
+        // intact.
+        if width <= 0 {
+            self.attach_combining(c);
+            return;
+        }
         let auto_wrap = self.is_mode_set(MODE_AUTO_WRAP);
         let insert_mode = self.is_mode_set(MODE_INSERT);
 
@@ -701,8 +712,7 @@ impl Emulator {
                     content: Some(c),
                     width: width as u8,
                     style,
-                    link: Default::default(),
-                    dirty: true,
+                    ..Default::default()
                 },
             );
             for k in 1..width {
@@ -713,8 +723,7 @@ impl Emulator {
                         content: None,
                         width: 0,
                         style,
-                        link: Default::default(),
-                        dirty: true,
+                        ..Default::default()
                     },
                 );
             }
@@ -726,6 +735,39 @@ impl Emulator {
             phantom = x + width >= screen.width();
         }
         self.at_phantom = phantom;
+    }
+
+    /// Attach a zero-width combining mark to the base cell just printed: the
+    /// occupied cell immediately left of the cursor (skipping wide-rune
+    /// continuation cells). Marks with no base — at the line start, after a
+    /// blank cell, or past the inline capacity — are dropped.
+    fn attach_combining(&mut self, c: char) {
+        let screen = self.screen_mut();
+        let x = screen.cursor.pos.x;
+        let y = screen.cursor.pos.y;
+        if x <= 0 {
+            return;
+        }
+        // Walk left over width-0 continuation cells to the wide lead.
+        let mut bx = x - 1;
+        while bx > 0 {
+            let cell = screen.cell(bx, y);
+            let is_continuation = cell
+                .map(|cell| cell.width == 0 && cell.content.is_none())
+                .unwrap_or(false);
+            if !is_continuation {
+                break;
+            }
+            bx -= 1;
+        }
+        let Some(cell) = screen.cell_mut(bx, y) else {
+            return;
+        };
+        if cell.content.is_none() {
+            // Blank base — nothing to combine with.
+            return;
+        }
+        cell.push_combining(c);
     }
 
     fn tab(&mut self) {
@@ -742,20 +784,18 @@ fn line_text(line: &[crate::vt::cell::Cell]) -> String {
     let mut col = 0;
     while col < line.len() {
         let cell = &line[col];
-        if let Some(ch) = cell.content {
-            text.push(ch);
-        } else {
-            text.push(' ');
-        }
+        cell.push_grapheme_into(&mut text);
         col += cell.width.max(1) as usize;
     }
     text.trim_end().to_string()
 }
 
-/// Convert a screen line of cells into `(char, style)` pairs, skipping
+/// Convert a screen line of cells into [`StyledChar`] columns, skipping
 /// continuation cells of wide runes so each entry is one displayed column.
-/// Blank cells become `' '` to match the renderer's on-screen padding.
-fn row_to_styled(line: Option<&[crate::vt::cell::Cell]>) -> Vec<(char, Style)> {
+/// Blank cells become `' '` to match the renderer's on-screen padding. Each
+/// column carries its zero-width combining marks so the renderer can emit the
+/// full grapheme into a single terminal cell.
+fn row_to_styled(line: Option<&[crate::vt::cell::Cell]>) -> Vec<crate::vt::cell::StyledChar> {
     let Some(row) = line else {
         return Vec::new();
     };
@@ -763,7 +803,14 @@ fn row_to_styled(line: Option<&[crate::vt::cell::Cell]>) -> Vec<(char, Style)> {
     let mut col = 0;
     while col < row.len() {
         let cell = &row[col];
-        out.push((cell.content.unwrap_or(' '), cell.style));
+        out.push(crate::vt::cell::StyledChar {
+            content: cell.content.unwrap_or(' '),
+            combining: cell.combining,
+            combining_len: cell.combining_len,
+            combining_overflow: cell.combining_overflow.clone(),
+            width: cell.width.max(1),
+            style: cell.style,
+        });
         col += cell.width.max(1) as usize;
     }
     out
@@ -1970,6 +2017,128 @@ mod esc_osc_completion_tests {
     }
 
     #[test]
+    fn combining_mark_attaches_to_base_cell() {
+        // A combining mark (U+0301) has display width 0. It must attach to
+        // the base cell just printed (so `e` + U+0301 renders as one
+        // grapheme), never create an occupied width-0 cell, and never move
+        // the cursor.
+        let mut e = Emulator::new(80, 24);
+        e.write("e\u{301}x".as_bytes());
+        let scr = e.screen();
+        let base = scr.cell(0, 0).unwrap();
+        assert_eq!(base.content, Some('e'));
+        assert_eq!(base.width, 1);
+        assert_eq!(base.combining_slice(), &['\u{301}']);
+        assert_eq!(scr.cell(1, 0).unwrap().content, Some('x'));
+        // No cell may be occupied with width 0.
+        for y in 0..24 {
+            for x in 0..80 {
+                let cell = scr.cell(x, y).unwrap();
+                assert!(
+                    cell.width != 0 || cell.content.is_none(),
+                    "occupied width-0 cell at ({},{})",
+                    x, y
+                );
+            }
+        }
+        // The mark did not corrupt the print stream: the last printed char is
+        // the final `x`, and the cursor advanced exactly one column per real
+        // char (the mark moved nothing).
+        assert_eq!(e.last_printed_char, Some('x'));
+        assert_eq!(e.cursor_position().x, 2);
+    }
+
+    #[test]
+    fn combining_marks_stack_on_one_base() {
+        // Decomposed `ǻ` = a + ring-above + acute: both marks attach to the
+        // single `a` cell, which still advances exactly one column.
+        let mut e = Emulator::new(80, 24);
+        e.write("a\u{30a}\u{301}b".as_bytes());
+        let base = e.screen().cell(0, 0).unwrap();
+        assert_eq!(base.content, Some('a'));
+        assert_eq!(base.combining_slice(), &['\u{30a}', '\u{301}']);
+        assert_eq!(e.screen().cell(1, 0).unwrap().content, Some('b'));
+        assert_eq!(e.cursor_position().x, 2);
+    }
+
+    #[test]
+    fn combining_attaches_to_wide_lead() {
+        // A wide CJK char occupies columns 0-1; its combining mark must land
+        // on the lead (column 0), not the continuation.
+        let mut e = Emulator::new(80, 24);
+        e.write("\u{4f60}\u{301}x".as_bytes());
+        let lead = e.screen().cell(0, 0).unwrap();
+        assert_eq!(lead.content, Some('\u{4f60}'));
+        assert_eq!(lead.width, 2);
+        assert_eq!(lead.combining_slice(), &['\u{301}']);
+        assert_eq!(e.screen().cell(2, 0).unwrap().content, Some('x'));
+        assert_eq!(e.cursor_position().x, 3);
+    }
+
+    #[test]
+    fn combining_spills_past_inline_capacity() {
+        // Past the inline budget marks spill into the shared heap buffer
+        // instead of being dropped — unbounded stacking, cursor unmoved.
+        let mut e = Emulator::new(80, 24);
+        let mut bytes = String::from("e");
+        let extra = crate::vt::cell::MAX_COMBINING + 3;
+        for _ in 0..extra {
+            bytes.push('\u{301}');
+        }
+        e.write(bytes.as_bytes());
+        let base = e.screen().cell(0, 0).unwrap();
+        assert_eq!(base.content, Some('e'));
+        assert_eq!(base.combining_len as usize, extra);
+        assert_eq!(base.combining_slice().len(), crate::vt::cell::MAX_COMBINING);
+        assert!(base.combining_overflow.is_some());
+        // Every mark survives to text extraction.
+        let grapheme = base.grapheme().unwrap();
+        assert_eq!(grapheme.chars().count(), 1 + extra);
+        assert_eq!(e.cursor_position().x, 1);
+        // Line copies (scrollback/snapshot) share the overflow buffer rather
+        // than duplicating it: the Arc pointer survives the clone.
+        let overflow_ptr = std::sync::Arc::clone(base.combining_overflow.as_ref().unwrap());
+        e.write(b"\r\n");
+        let copy_line = e.content_line(0);
+        let copy_base = &copy_line[0];
+        assert_eq!(copy_base.combining_len as usize, extra);
+        assert!(std::sync::Arc::ptr_eq(
+            &overflow_ptr,
+            copy_base.combining_overflow.as_ref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn combining_without_base_is_dropped() {
+        // At the line start there is no base to attach to: the mark is
+        // dropped, the grid stays blank, and the cursor does not move.
+        let mut e = Emulator::new(80, 24);
+        e.write("\u{301}".as_bytes());
+        assert_eq!(e.screen().cell(0, 0).unwrap().content, None);
+        assert_eq!(e.cursor_position().x, 0);
+        assert_eq!(e.last_printed_char, Some('\u{301}'));
+
+        // After a blank cell (cursor moved by CSI) there is no base either.
+        let mut e2 = Emulator::new(80, 24);
+        e2.write("a\x1b[1;1H\u{301}".as_bytes());
+        assert_eq!(e2.screen().cell(0, 0).unwrap().content, Some('a'));
+        assert_eq!(e2.screen().cell(0, 0).unwrap().combining_len, 0);
+    }
+
+    #[test]
+    fn combining_survives_text_extraction() {
+        // render_text, content_line_text, and selection_text must all emit
+        // the full grapheme, not just the base char.
+        let mut e = Emulator::new(80, 24);
+        e.write("e\u{301}x\r\n\u{4f60}\u{30a}".as_bytes());
+        assert_eq!(e.render_text().trim_end(), "e\u{301}x\n\u{4f60}\u{30a}");
+        assert_eq!(e.content_line_text(0), "e\u{301}x");
+        assert_eq!(e.content_line_text(1), "\u{4f60}\u{30a}");
+        let sel = e.selection_text(0, 0, 1, 1);
+        assert!(sel.starts_with("e\u{301}"), "selection lost combining: {sel:?}");
+    }
+
+    #[test]
     fn osc9_progress_still_works() {
         let mut e = Emulator::new(80, 24);
         e.write(b"\x1b]9;4;1;50\x07");
@@ -2424,6 +2593,16 @@ mod kitty_keyboard_tests {
 mod reflow_tests {
     use super::*;
 
+    /// Join a rendered row's columns into text (base + combining marks).
+    fn row_text(row: &[crate::vt::cell::StyledChar]) -> String {
+        let mut s = String::new();
+        for sc in row {
+            s.push(sc.content);
+            sc.for_each_combining(|m| s.push(m));
+        }
+        s
+    }
+
     #[test]
     fn long_line_reflows_on_narrower_resize() {
         let mut e = Emulator::new(80, 24);
@@ -2441,7 +2620,7 @@ mod reflow_tests {
         // Content should span 2 rows.
         let lines = e.render_view_lines();
         let text: String = lines.iter().map(|row| {
-            row.iter().map(|(s, _)| *s).collect::<String>()
+            row_text(row)
         }).collect::<Vec<_>>().join("\n");
         assert!(text.contains("0123456789"));
         assert!(text.contains("AB"));
@@ -2450,7 +2629,7 @@ mod reflow_tests {
         e.resize(40, 24);
         let lines = e.render_view_lines();
         let all_text: String = lines.iter().map(|row| {
-            row.iter().map(|(s, _)| *s).collect::<String>()
+            row_text(row)
         }).collect::<Vec<_>>().join("\n");
         // The original 80 chars should still be present after reflow.
         assert!(all_text.contains("01234567890123456789"));
@@ -2475,7 +2654,7 @@ mod reflow_tests {
         assert_eq!(lines.len(), 3);
         // The last 3 lines should be visible.
         let text: String = lines.iter().map(|row| {
-            row.iter().map(|(s, _)| *s).collect::<String>()
+            row_text(row)
         }).collect::<Vec<_>>().join("\n");
         assert!(text.contains("line5"));
     }
@@ -2488,7 +2667,7 @@ mod reflow_tests {
 
         let lines = e.render_view_lines();
         let text: String = lines.iter().map(|row| {
-            row.iter().map(|(s, _)| *s).collect::<String>()
+            row_text(row)
         }).collect::<Vec<_>>().join("\n");
         assert!(text.contains("hello world"));
         assert!(text.contains("foo bar baz"));
@@ -2497,7 +2676,7 @@ mod reflow_tests {
         e.resize(80, 5);
         let lines = e.render_view_lines();
         let text: String = lines.iter().map(|row| {
-            row.iter().map(|(s, _)| *s).collect::<String>()
+            row_text(row)
         }).collect::<Vec<_>>().join("\n");
         assert!(text.contains("hello world"));
         assert!(text.contains("foo bar baz"));
