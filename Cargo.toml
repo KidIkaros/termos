@@ -76,6 +76,8 @@ tower = { version = "0.5", features = ["util"], optional = true }
 notify-debouncer-mini = "0.7.0"
 notify = "8.2.0"
 clap = { version = "4.6.6", features = ["derive"] }
+# Pixel-mode mapper for GUI-like visual effects (gradients, shadows, anti-aliasing)
+asciline = { git = "https://github.com/KidIkaros/asciline-rust", default-features = false }
 
 [features]
 default = []

@@ -21,6 +21,7 @@ pub mod layout_templates;
 pub mod msg;
 pub mod overlay_hit;
 pub mod overlay_mouse;
+pub mod pixel_canvas;
 pub mod render;
 pub mod sidebar;
 pub mod update;

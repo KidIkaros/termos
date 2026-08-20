@@ -9,6 +9,7 @@ use ratatui::style::{Color as TuiColor, Modifier, Style as TuiStyle};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Widget};
 
+use crate::app::pixel_canvas::PixelCanvas;
 use crate::app::{ContextMenu, Mode, Os, Prefix, Selection};
 use crate::layout::Rect;
 use crate::ui::{border_type, to_tui_style};
@@ -34,16 +35,61 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         height: area.height.saturating_sub(dock_height as u16),
     };
 
-    // Paint the background.
-    let bg = os
+    // Paint the background via the pixel canvas for gradient/shadow support.
+    let bg_rgb = os
         .theme
         .as_ref()
-        .map(|t| TuiColor::Rgb(t.background.0, t.background.1, t.background.2))
-        .unwrap_or(TuiColor::Reset);
-    for y in 0..content_area.height {
-        for x in 0..content_area.width {
-            buf[(content_area.x + x, content_area.y + y)].set_char(' ');
-            buf[(content_area.x + x, content_area.y + y)].set_bg(bg);
+        .map(|t| (t.background.0, t.background.1, t.background.2))
+        .unwrap_or((0, 0, 0));
+    let mut canvas = PixelCanvas::new(area.width as usize, area.height as usize);
+    canvas.clear(bg_rgb.0, bg_rgb.1, bg_rgb.2);
+
+    // Gradient dock bar (bottom 1 row): subtle horizontal fade from bg to bright black.
+    if let Some(theme) = os.theme.as_ref() {
+        let bright_black = theme.ansi[8];
+        canvas.gradient_horizontal(
+            0,
+            area.height as usize - 1,
+            area.width as usize,
+            1,
+            (bg_rgb.0, bg_rgb.1, bg_rgb.2),
+            (bright_black.0, bright_black.1, bright_black.2),
+        );
+    }
+
+    // Drop shadows for floating panes.
+    if !os.floats_hidden_by_zoom() {
+        let ws = os.current_workspace;
+        for fi in os.floats_on_workspace(ws) {
+            let f = &os.floats[fi];
+            let fr = f.rect();
+            let shadow_bg = bg_rgb;
+            canvas.drop_shadow(
+                fr.x as usize,
+                fr.y as usize,
+                fr.w as usize,
+                fr.h as usize,
+                2,
+                1,
+                3.0,
+                (0, 0, 0),
+                shadow_bg,
+            );
+        }
+    }
+
+    // Rounded corners for overlays.
+    // (Applied later when overlays are rendered.)
+
+    // Flush the canvas to BGR and paint into the ratatui Buffer.
+    canvas.flush();
+    let bgr = canvas.bgr();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let idx = ((y as usize * area.width as usize) + x as usize) * 3;
+            let cell = &mut buf[(x, y)];
+            cell.set_char(' ');
+            cell.set_bg(TuiColor::Rgb(bgr[idx + 2], bgr[idx + 1], bgr[idx]));
         }
     }
 

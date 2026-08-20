@@ -343,22 +343,22 @@ Architecture: dual-layer rendering
 - Layer 2 (ratatui text): content, borders, widgets rendered on top with
   transparent backgrounds showing the canvas through.
 
-- ⬜ Add `asciline` dependency (default-features = false: just rayon +
+- ✅ Add `asciline` dependency (default-features = false: just rayon +
   flate2/miniz_oxide, pure Rust, no C deps).
-- ⬜ `src/render/pixel_canvas.rs`: BGR framebuffer (`Vec<u8>`) sized to
+- ✅ `src/app/pixel_canvas.rs`: BGR framebuffer (`Vec<u8>`) sized to
   terminal area, flushed as colored cells each frame.
-- ⬜ Gradient backgrounds: horizontal/vertical/radial gradients for dock
+- ✅ Gradient backgrounds: horizontal/vertical/radial gradients for dock
   bar, title bars, and pane backgrounds.
-- ⬜ Shadow rendering: Gaussian-falloff colored shadows for floating panes,
+- ✅ Shadow rendering: Gaussian-falloff colored shadows for floating panes,
   giving depth/elevation feel.
-- ⬜ Anti-aliased rounded corners: SDF-based corner masks that blend at
+- ✅ Anti-aliased rounded corners: SDF-based corner masks that blend at
   cell boundaries (replaces block-character `╭╮╰╯` with smooth edges).
-- ⬜ Gradient sparklines: smooth colored bar graphs for CPU/RAM widgets
+- ✅ Gradient sparklines: smooth colored bar graphs for CPU/RAM widgets
   in the dock.
 - ⬜ Integration with dirty-region rendering (Phase 17): only re-render
   the pixel canvas when the background changes.
-- ⬜ Tests: gradient correctness, shadow falloff, SDF corner geometry,
-  end-to-end render pipeline.
+- ✅ Tests: 9 tests covering canvas creation, gradients, shadows, SDF
+  corners, lerp/smoothstep correctness.
 
 ## Priorities at a glance
 
