@@ -890,10 +890,9 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
     let accent = os.theme.dock_accent();
     let muted = os.theme.dock_dimmed();
 
-    // Fill the dock background.
-    for x in 0..area.width {
-        buf[(area.x + x, area.y)].set_bg(bg);
-    }
+    // The pixel canvas already painted the dock background (gradient).
+    // We only set bg on cells that need a specific background (pills, widgets).
+    // Text cells inherit the canvas gradient via their default bg.
 
     let ascii_only = os.config.appearance.use_ascii_only;
     let dock_width = area.width as usize;
@@ -1916,6 +1915,8 @@ fn render_theme_picker_overlay(os: &Os, buf: &mut Buffer, area: TuiRect) {
 }
 
 pub fn render_overlay(buf: &mut Buffer, area: TuiRect, lines: &[String], title: &str) {
+    use crate::app::pixel_canvas::PixelCanvas;
+
     let width =
         (lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4).min(area.width);
     let height = (lines.len() as u16 + 4).min(area.height);
@@ -1927,6 +1928,26 @@ pub fn render_overlay(buf: &mut Buffer, area: TuiRect, lines: &[String], title: 
         width,
         height,
     };
+
+    // Paint a dark gradient background for the overlay using the pixel canvas.
+    let mut overlay_canvas = PixelCanvas::new(width as usize, height as usize);
+    overlay_canvas.clear(20, 20, 30);
+    overlay_canvas.gradient_vertical(
+        0, 0,
+        width as usize, height as usize,
+        (25, 25, 38),  // slightly lighter top
+        (15, 15, 22),  // darker bottom
+    );
+    overlay_canvas.flush();
+    let bgr = overlay_canvas.bgr();
+    for yy in 0..height {
+        for xx in 0..width {
+            let idx = ((yy as usize * width as usize) + xx as usize) * 3;
+            let cell = &mut buf[(rect.x + xx, rect.y + yy)];
+            cell.set_char(' ');
+            cell.set_bg(TuiColor::Rgb(bgr[idx + 2], bgr[idx + 1], bgr[idx]));
+        }
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
