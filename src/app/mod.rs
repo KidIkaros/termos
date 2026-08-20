@@ -562,6 +562,10 @@ pub struct Os {
     /// Whether the settings overlay is open and the selected row.
     pub settings_open: bool,
     pub settings_selected: usize,
+    /// Whether to show the welcome overlay on first launch.
+    pub show_welcome: bool,
+    /// Whether the persistent key-hints bar is visible.
+    pub hints_visible: bool,
     /// Cached list of available theme names.
     pub theme_list: Vec<String>,
     /// Available accent colors for the accent picker.
@@ -930,6 +934,8 @@ impl Os {
             accent_picker_selected: 0,
             settings_open: false,
             settings_selected: 0,
+            show_welcome: false,
+            hints_visible: true,
             theme_list: Vec::new(),
             accent_list: vec![
                 "blue".into(),
@@ -6117,6 +6123,16 @@ impl Os {
     /// Toggle the help modal overlay.
     pub fn toggle_help(&mut self) {
         self.help_open = !self.help_open;
+    }
+
+    /// Toggle the persistent key-hints bar.
+    pub fn toggle_hints(&mut self) {
+        self.hints_visible = !self.hints_visible;
+    }
+
+    /// Dismiss the welcome overlay.
+    pub fn dismiss_welcome(&mut self) {
+        self.show_welcome = false;
     }
 }
 

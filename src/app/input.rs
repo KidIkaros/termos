@@ -161,6 +161,12 @@ pub fn handle_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         return handle_quit_confirmation(os, key);
     }
 
+    // Welcome overlay: any key dismisses it.
+    if os.show_welcome {
+        os.dismiss_welcome();
+        return KeyResult::Consumed;
+    }
+
     // During tape playback, Ctrl+P toggles pause/resume (Go's prefix routing).
     if os.script_active()
         && key.code == KeyCode::Char('p')
@@ -945,6 +951,23 @@ fn handle_leader_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
         }
         KeyCode::Char('j') => {
             os.preselection = PreselectionDir::Down;
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // Settings overlay (, after leader).
+        KeyCode::Char(',') => {
+            os.open_settings();
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // Detach session (X after leader).
+        KeyCode::Char('X') => {
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // Toggle key-hints bar (H after leader).
+        KeyCode::Char('H') => {
+            os.toggle_hints();
             os.prefix = Prefix::None;
             KeyResult::Consumed
         }

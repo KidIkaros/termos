@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Phase 22 — Approachability: welcome screen, mode indicator, key hints bar.**
+  - Welcome overlay on first launch (no config file) with keybinding quick reference.
+  - Persistent key-hints bar above dock showing 3-4 contextual keybindings per mode.
+  - Dock mode pill now shows prefix type (PREFIX, WS, WIN, MIN, TAPE, DBG, FLOAT).
+  - Toggle hints bar with `Ctrl+B H`.
 - **Phase 18 — Pixel canvas: GUI-like visual polish.**
   - Per-cell RGB background framebuffer (`pixel_canvas.rs`) for shadows,
     gradients, and anti-aliased edges.

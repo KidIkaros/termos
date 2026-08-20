@@ -25,13 +25,20 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     // style conversion is an array lookup rather than re-resolving colors
     // through an `Option<&Theme>` for every cell.
     let palette = StylePalette::new(os.theme.as_ref());
-    // Dock area: 2 rows — accent bar (top) + dock content (bottom).
-    let dock_height = 2usize;
+    // Dock area: 3 rows — hints bar (top) + accent bar + dock content (bottom).
+    let hints_height: u16 = if os.hints_visible && !os.show_welcome { 1 } else { 0 };
+    let dock_height = 2usize + hints_height as usize;
     let dock_area = TuiRect {
         x: 0,
         y: area.height.saturating_sub(1),
         width: area.width,
         height: 1,
+    };
+    let hints_area = TuiRect {
+        x: 0,
+        y: area.height.saturating_sub(1 + hints_height),
+        width: area.width,
+        height: hints_height,
     };
     let content_area = TuiRect {
         x: 0,
@@ -204,6 +211,11 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         }
     }
 
+    // Draw the key-hints bar (above the dock).
+    if os.hints_visible && !os.show_welcome && hints_height > 0 {
+        render_hints_bar(os, buf, hints_area);
+    }
+
     // Draw the dock bar.
     render_dock(os, buf, dock_area, &sorted_ids);
 
@@ -309,6 +321,8 @@ pub fn render(os: &Os, buf: &mut Buffer) {
             &["Quit TermOS?  (y/n)".to_string()],
             "Quit",
         );
+    } else if os.show_welcome {
+        render_welcome_overlay(os, buf, content_area);
     } else if os.debug_overlay_open {
         let lines = debug_stats_lines(os);
         render_overlay(buf, content_area, &lines, "Debug stats");
@@ -369,6 +383,103 @@ fn scrollback_help_lines() -> Vec<String> {
         "g / G            oldest / live".to_string(),
         "q / Esc          leave".to_string(),
     ]
+}
+
+/// Render the persistent key-hints bar above the dock.
+fn render_hints_bar(os: &Os, buf: &mut Buffer, area: TuiRect) {
+    use crate::config::theme::ThemeColors;
+    let bg = os.theme.dock_bg();
+    let fg = os.theme.dock_dimmed();
+    let accent = os.theme.dock_accent();
+
+    // Build contextual hints based on current mode.
+    let hints = if os.prefix != Prefix::None {
+        vec![
+            ("c", "new"),
+            ("x", "close"),
+            (",", "settings"),
+            ("?", "all cmds"),
+        ]
+    } else if os.scrollback_mode {
+        vec![
+            ("v", "select"),
+            ("y", "yank"),
+            ("/", "search"),
+            ("q", "leave"),
+        ]
+    } else if os.mode == Mode::WindowManagement {
+        vec![
+            ("i", "terminal"),
+            ("q", "quit"),
+            ("H/J/K/L", "swap"),
+            ("?", "help"),
+        ]
+    } else {
+        // Terminal mode.
+        vec![
+            ("Ctrl+B", "prefix"),
+            ("?", "help"),
+            ("Esc", "WM mode"),
+        ]
+    };
+
+    // Render the hints bar as a single row.
+    let y = area.y;
+    let mut x: u16 = 1;
+
+    // Draw the mode label.
+    let mode_label = match os.mode {
+        Mode::Terminal => " TERM ",
+        Mode::WindowManagement => "  WM  ",
+    };
+    for (i, ch) in mode_label.chars().enumerate() {
+        if x + i as u16 >= area.width {
+            break;
+        }
+        let cell = &mut buf[(area.x + x + i as u16, y)];
+        cell.set_char(ch);
+        cell.set_style(TuiStyle::default().fg(accent).bg(bg));
+    }
+    x += mode_label.chars().count() as u16 + 1;
+
+    // Draw the hints.
+    for (key, desc) in &hints {
+        let label = format!("{key}:{desc}  ");
+        for (i, ch) in label.chars().enumerate() {
+            if x + i as u16 >= area.width {
+                break;
+            }
+            let cell = &mut buf[(area.x + x + i as u16, y)];
+            cell.set_char(ch);
+            // Key name in accent, description in dimmed.
+            let style = if i < key.len() {
+                TuiStyle::default().fg(accent).bg(bg)
+            } else {
+                TuiStyle::default().fg(fg).bg(bg)
+            };
+            cell.set_style(style);
+        }
+        x += label.chars().count() as u16;
+    }
+}
+
+/// Render the welcome overlay shown on first launch.
+fn render_welcome_overlay(_os: &Os, buf: &mut Buffer, area: TuiRect) {
+    let lines = vec![
+        "Welcome to TermOS!".to_string(),
+        String::new(),
+        "You're in terminal mode — type commands as usual.".to_string(),
+        String::new(),
+        "Quick reference:".to_string(),
+        "  Ctrl+B then C     Create a new window".to_string(),
+        "  Ctrl+B then 1-9   Jump to a window".to_string(),
+        "  Ctrl+B then ,     Open settings".to_string(),
+        "  ?                 Show all keybindings".to_string(),
+        "  Esc               Switch to window management".to_string(),
+        String::new(),
+        "Press any key to dismiss. Run `termos wizard` for guided setup.".to_string(),
+    ];
+    render_overlay(buf, area, &lines, "Getting started");
 }
 
 /// Render the help modal with keybindings for the current mode.
@@ -965,6 +1076,18 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
         "SWITCH"
     } else if os.scrollback_mode {
         "SCROLL"
+    } else if os.prefix != Prefix::None {
+        // Show the active prefix type in the mode pill.
+        match os.prefix {
+            Prefix::Leader => "PREFIX",
+            Prefix::Workspace => "WS",
+            Prefix::Window => "WIN",
+            Prefix::Minimize => "MIN",
+            Prefix::Tape => "TAPE",
+            Prefix::Debug => "DBG",
+            Prefix::Float => "FLOAT",
+            Prefix::None => unreachable!(),
+        }
     } else {
         match os.mode {
             Mode::WindowManagement => "WM",
@@ -981,9 +1104,6 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
         os.current_workspace,
         sorted_ids.len() + float_count
     );
-    if os.prefix != Prefix::None {
-        left_text.push_str("⌨ ");
-    }
     // Tape playback progress indicator.
     if os.script_active() {
         let pct = os.script_progress().unwrap_or(0);

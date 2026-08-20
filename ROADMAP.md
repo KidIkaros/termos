@@ -690,6 +690,39 @@ code (and took a `Mutex` lock per lookup).
 - ✅ `#[allow(unused_variables)]` on `run_web_server` suppresses the
   `cert`/`key` warnings when the `tls` feature is disabled.
 
+## Phase 22 — Approachability (Tier 1)
+
+Research-driven UX improvements to make TermOS less intimidating for casual
+terminal users and GUI power users.  Based on `docs/RESEARCH_TUI_APPROACHABILITY.md`
+(compare Zellij, Bubbletea, Spotify Player, lazygit).
+
+### Welcome overlay on first launch
+
+- ✅ **`show_welcome` flag on `Os`.** Set to `true` only when no config file
+  exists (first launch).  Dismissed by any keypress.
+- ✅ **`render_welcome_overlay`** shows a centered overlay with:
+  - Greeting + mode explanation
+  - 5 keybindings (new window, jump, settings, help, WM mode)
+  - "Press any key to dismiss" + wizard hint
+- ✅ Any keypress in `handle_key` dismisses the overlay before other
+  routing.
+
+### Mode indicator in dock
+
+- ✅ **Dock mode pill now shows prefix type** when a prefix is active
+  (PREFIX, WS, WIN, MIN, TAPE, DBG, FLOAT) instead of the generic
+  keyboard icon.  Users always see what mode they're in.
+
+### Persistent key-hints bar
+
+- ✅ **1-row hints bar** above the dock, showing 3-4 contextual keybindings:
+  - Terminal mode: `Ctrl+B:prefix  ?:help  Esc:WM mode`
+  - WM mode: `i:terminal  q:quit  H/J/K/L:swap  ?:help`
+  - Prefix mode: `c:new  x:close  ,:settings  ?:all cmds`
+  - Scrollback mode: `v:select  y:yank  /:search  q:leave`
+- ✅ **Toggle with `Ctrl+B H`.** `hints_visible` field on `Os`.
+- ✅ Hints bar hidden when welcome overlay is active (no overlap).
+
 ## Priorities at a glance
 
 | Phase | Tier | Theme | Effort |
@@ -708,3 +741,4 @@ code (and took a `Mutex` lock per lookup).
 | 19 | 1 | Interaction reliability & render efficiency | Large (complete) |
 | 20 | 1 | Render hot path: content, palette, screen ops, canvas cache | Large |
 | 21 | 1 | Bug fixes: select_line_at column hazard, daemon test flakes, web mouse support, config docs | Medium |
+| 22 | 1 | Approachability: welcome screen, mode indicator, key hints bar | Small |

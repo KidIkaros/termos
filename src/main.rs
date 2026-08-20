@@ -2204,6 +2204,10 @@ fn run_local_tui_with_overrides(overrides: &Overrides) -> Result<(), Box<dyn std
     overrides.apply(&mut config);
     let mut os = Os::new(config);
     os.init_graphics();
+    // Show the welcome overlay on first launch (no config file).
+    if !UserConfig::config_path().is_some_and(|p| p.exists()) {
+        os.show_welcome = true;
+    }
 
     // Spawn a config file watcher for hot-reload.
     let config_rx = UserConfig::config_path().and_then(|p| UserConfig::watch(p).ok());
