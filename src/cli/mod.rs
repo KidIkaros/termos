@@ -1240,6 +1240,7 @@ pub const COMPLETION_COMMANDS: &[&str] = &[
     "get-window",
     "completion",
     "doctor",
+    "wizard",
 ];
 
 // ─── Log Level ────────────────────────────────────────────────────────────

@@ -143,6 +143,7 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
             let json = args.get(1).map(|s| s.as_str()) == Some("--json");
             cmd_doctor(json)
         }
+        "wizard" => cmd_wizard(),
         "--list-themes" => {
             let themes = termos::config::theme::list_theme_names();
             for t in themes {
@@ -440,7 +441,7 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
                 .into()),
             }
         }
-        other => Err(format!("unknown command '{other}' (try: daemon, run, attach, list, kill, exec, ssh, new-window, run-command, set-config, get-config, explain-agent-screen, set-workspace-name, get-window, doctor, completion, set-agent-state, get-agent-state, send-keys, send-text, capture-pane, wait-for, list-verbs, action, subscribe, block-until-exit, tape)").into()),
+        other => Err(format!("unknown command '{other}' (try: daemon, run, attach, list, kill, exec, ssh, new-window, run-command, set-config, get-config, explain-agent-screen, set-workspace-name, get-window, doctor, wizard, completion, set-agent-state, get-agent-state, send-keys, send-text, capture-pane, wait-for, list-verbs, action, subscribe, block-until-exit, tape)").into()),
     }
 }
 
@@ -541,6 +542,7 @@ fn print_help() {
     println!("    set-config <path> <value>  Set a runtime config option");
     println!("    get-config <path>          Get a runtime config option");
     println!("    explain-agent-screen [--harness H] [--lines N]  Explain screen rules");
+    println!("    wizard                     Interactive first-run setup");
     println!("    doctor                     Check config, PTY, daemon, and theme health");
     println!("    completion <bash|zsh|fish> Generate shell completion scripts");
     println!();
@@ -3011,6 +3013,173 @@ fn generate_fish_completions() -> String {
         out.push_str(&format!("complete -c termos -n '__fish_use_subcommand' -a {c}\n"));
     }
     out
+}
+
+/// `termos wizard` — interactive first-run setup.
+fn cmd_wizard() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{self, Write};
+
+    let path = termos::cli::config_path();
+
+    // --- Greeting ---
+    println!("termos wizard — interactive setup");
+    println!();
+
+    if path.exists() {
+        print!("Config already exists at {}. Reconfigure? [y/N]: ", path.display());
+        io::stdout().flush()?;
+        let mut ans = String::new();
+        io::stdin().read_line(&mut ans)?;
+        if !matches!(ans.trim().to_lowercase().as_str(), "y" | "yes") {
+            println!("Keeping existing config. Run `termos config edit` to modify.");
+            return Ok(());
+        }
+    }
+
+    // --- Helper to read a numbered choice ---
+    fn pick(prompt: &str, options: &[&str], default: usize) -> usize {
+        let mut stdout = io::stdout();
+        println!("{prompt}");
+        for (i, opt) in options.iter().enumerate() {
+            let marker = if i == default { " (default)" } else { "" };
+            println!("  {}) {opt}{marker}", i + 1);
+        }
+        print!("  Choice [{}]: ", default + 1);
+        stdout.flush().unwrap();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+        let input = input.trim();
+        if input.is_empty() {
+            return default;
+        }
+        input
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| if n >= 1 && n <= options.len() { Some(n - 1) } else { None })
+            .unwrap_or(default)
+    }
+
+    fn pick_text(prompt: &str, default: &str) -> String {
+        print!("{prompt} [{default}]: ");
+        io::stdout().flush().unwrap();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+        let input = input.trim().to_string();
+        if input.is_empty() { default.to_string() } else { input }
+    }
+
+    fn pick_yn(prompt: &str, default: bool) -> bool {
+        let hint = if default { "Y/n" } else { "y/N" };
+        print!("{prompt} [{hint}]: ");
+        io::stdout().flush().unwrap();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+        let input = input.trim().to_lowercase();
+        match input.as_str() {
+            "y" | "yes" => true,
+            "n" | "no" => false,
+            _ => default,
+        }
+    }
+
+    // --- 1. Theme ---
+    println!("Step 1/6: Theme");
+    let themes = termos::config::theme::list_theme_names();
+    let mut theme_options: Vec<&str> = themes.iter().map(|s| s.as_str()).collect();
+    theme_options.push("(none — use built-in default)");
+    let theme_idx = pick("  Choose a theme:", &theme_options, 0);
+    let theme = if theme_idx < themes.len() {
+        themes[theme_idx].clone()
+    } else {
+        String::new()
+    };
+    println!();
+
+    // --- 2. Border style ---
+    println!("Step 2/6: Border style");
+    let border_styles = ["rounded", "single", "double", "plain", "ascii"];
+    let border_idx = pick("  Choose a border style:", &border_styles, 0);
+    let border_style = border_styles[border_idx];
+    println!();
+
+    // --- 3. Dockbar position ---
+    println!("Step 3/6: Dockbar position");
+    let dockbar_positions = ["bottom", "top", "hidden"];
+    let dockbar_idx = pick("  Where should the dockbar appear?", &dockbar_positions, 0);
+    let dockbar_position = dockbar_positions[dockbar_idx];
+    println!();
+
+    // --- 4. Shell ---
+    println!("Step 4/6: Default shell");
+    let default_shell = std::env::var("SHELL")
+        .unwrap_or_else(|_| "/bin/sh".into());
+    let shell = pick_text("  Preferred shell", &default_shell);
+    println!();
+
+    // --- 5. Confirm quit ---
+    println!("Step 5/6: Quit confirmation");
+    let confirm_quit = pick_yn("  Always ask before quitting?", false);
+    println!();
+
+    // --- 6. Animations ---
+    println!("Step 6/6: Animations");
+    let animations = pick_yn("  Enable border animations?", true);
+    println!();
+
+    // --- Build config ---
+    let mut cfg = termos::config::userconfig::UserConfig::default_config();
+    cfg.appearance.theme = theme;
+    cfg.appearance.border_style = border_style.to_string();
+    cfg.appearance.dockbar_position = dockbar_position.to_string();
+    cfg.appearance.preferred_shell = shell;
+    cfg.appearance.confirm_quit = confirm_quit;
+    cfg.appearance.animations_enabled = animations;
+
+    // --- Save ---
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let toml = toml::to_string_pretty(&cfg)?;
+    let header = format!(
+        "# TermOS Configuration File\n\
+         # Generated by `termos wizard`\n\
+         # Edit keybindings by modifying the arrays of keys for each action\n\
+         # Multiple keys can be bound to the same action\n\
+         # Documentation: https://github.com/Gaurav-Gosain/tuios\n\n\
+         {toml}"
+    );
+    std::fs::write(&path, &header)?;
+
+    println!("Config saved to {}", path.display());
+    println!();
+
+    // --- Offer to open in editor ---
+    if pick_yn("Open config in editor?", false) {
+        let editor = std::env::var("EDITOR")
+            .or_else(|_| std::env::var("VISUAL"))
+            .ok()
+            .or_else(|| {
+                for e in &["vim", "vi", "nano", "emacs"] {
+                    if std::process::Command::new("which")
+                        .arg(e)
+                        .output()
+                        .is_ok_and(|o| o.status.success())
+                    {
+                        return Some((*e).to_string());
+                    }
+                }
+                None
+            });
+        if let Some(editor) = editor {
+            std::process::Command::new(&editor).arg(&path).status()?;
+        } else {
+            println!("No editor found. Set $EDITOR or install vim/vi/nano.");
+        }
+    }
+
+    println!();
+    println!("Setup complete! Run `termos` to start.");
+    Ok(())
 }
 
 /// `termos doctor` — health check for config, PTY, daemon, and theme.
