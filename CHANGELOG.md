@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Phase 24 — Layout modes: master-stack and scrolling (niri-style).** Three layout modes now available:
+  - BSP (default) — binary space partition tiling.
+  - Master-Stack — one master pane on the left, rest stacked on the right.
+  - Scrolling — niri-style columns on an infinite horizontal strip.
+  - Cycle modes with `Prefix+Space` or command palette "Cycle layout mode".
+  - Dock shows layout tag (MS/SCR) when not in BSP mode.
+  - Scrolling mode: `Alt+Left/Right` shifts focus between columns.
+  - Layout cache invalidated on mode switch.
+- **Command palette fuzzy search with match highlighting.** Multi-token query support (space-separated terms), fine-grained scoring (prefix > word-boundary > subsequence), bold+yellow highlighted characters, "No matches" empty state, keyboard shortcut hints, recently-used commands sorted first, and mouse click support.
 - **Phase 22 — Approachability: welcome screen, mode indicator, key hints bar, mouse-friendly dock.**
   - Welcome overlay on first launch (no config file) with keybinding quick reference.
   - Persistent key-hints bar above dock showing 3-4 contextual keybindings per mode.

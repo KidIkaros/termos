@@ -109,6 +109,7 @@ pub enum Command {
     SessionSwitcher,
     WorkspaceSwitcher,
     LayoutSwitcher,
+    CycleLayoutMode,
     TapeManager,
     AccentPicker,
     Fullscreen,
@@ -158,6 +159,7 @@ impl Command {
             Command::SessionSwitcher,
             Command::WorkspaceSwitcher,
             Command::LayoutSwitcher,
+            Command::CycleLayoutMode,
             Command::TapeManager,
             Command::AccentPicker,
             Command::Fullscreen,
@@ -218,6 +220,7 @@ impl Command {
             Command::SessionSwitcher => "Session switcher".into(),
             Command::WorkspaceSwitcher => "Workspace switcher".into(),
             Command::LayoutSwitcher => "Layout switcher".into(),
+            Command::CycleLayoutMode => "Cycle layout mode".into(),
             Command::TapeManager => "Tape manager".into(),
             Command::AccentPicker => "Accent picker".into(),
             Command::Fullscreen => "Toggle fullscreen".into(),
@@ -244,7 +247,7 @@ impl Command {
             | Command::FocusRight | Command::FocusUp | Command::FocusDown
             | Command::SwapLeft | Command::SwapRight | Command::SwapUp
             | Command::SwapDown => "Navigation",
-            Command::ToggleTiling | Command::EqualizeSplits => "Layout",
+            Command::ToggleTiling | Command::EqualizeSplits | Command::CycleLayoutMode => "Layout",
             Command::Scrollback | Command::CopyMode | Command::OpenBrowser
             | Command::OpenAggregate => "View",
             Command::SwitchWorkspace(_) | Command::WorkspaceSwitcher => "Workspace",
@@ -256,6 +259,83 @@ impl Command {
             Command::CommandPalette | Command::SessionSwitcher | Command::LayoutSwitcher
             | Command::TapeManager | Command::Help => "Open",
             Command::Quit | Command::Detach => "Session",
+        }
+    }
+
+    /// A short description shown in the palette as a dimmed hint.
+    pub fn description(&self) -> &'static str {
+        match self {
+            Command::NewWindow => "Open a new terminal pane",
+            Command::CloseWindow => "Close the focused pane",
+            Command::SplitHorizontal => "Split horizontally (top/bottom)",
+            Command::SplitVertical => "Split vertically (left/right)",
+            Command::NextWindow => "Move focus to the next pane",
+            Command::PrevWindow => "Move focus to the previous pane",
+            Command::ToggleTiling => "Toggle between tiled and floating",
+            Command::EqualizeSplits => "Reset all splits to equal size",
+            Command::Scrollback => "Enter scrollback/copy mode",
+            Command::SwitchWorkspace(_) => "Switch to a numbered workspace",
+            Command::Quit => "Quit TermOS",
+            Command::Theme => "Browse and apply themes",
+            Command::ThemeDetect => "Auto-detect light/dark from terminal",
+            Command::CommandPane => "Run a custom shell command",
+            Command::Settings => "Open the settings overlay",
+            Command::FocusLeft => "Move focus to the left pane",
+            Command::FocusRight => "Move focus to the right pane",
+            Command::FocusUp => "Move focus to the pane above",
+            Command::FocusDown => "Move focus to the pane below",
+            Command::SwapLeft => "Swap focused pane left",
+            Command::SwapRight => "Swap focused pane right",
+            Command::SwapUp => "Swap focused pane up",
+            Command::SwapDown => "Swap focused pane down",
+            Command::ZoomToggle => "Toggle zoom on focused pane",
+            Command::ToggleFloat => "Toggle float/tile on focused pane",
+            Command::FloatNew => "Create a new floating pane",
+            Command::RenameWindow => "Rename the focused pane",
+            Command::CopyMode => "Enter vim-style copy mode",
+            Command::ToggleSidebar => "Toggle the sidebar panel",
+            Command::OpenBrowser => "Open scrollback in a browser",
+            Command::OpenAggregate => "View all panes combined",
+            Command::CommandPalette => "Open the command palette",
+            Command::SessionSwitcher => "Switch between sessions",
+            Command::WorkspaceSwitcher => "Switch workspaces",
+            Command::LayoutSwitcher => "Switch tiling layout",
+            Command::CycleLayoutMode => "Cycle BSP → Master-Stack → Scrolling",
+            Command::TapeManager => "Manage recorded tapes",
+            Command::AccentPicker => "Pick an accent color",
+            Command::Fullscreen => "Toggle fullscreen mode",
+            Command::Detach => "Detach from the current session",
+            Command::Help => "Show the help overlay",
+            Command::StackPane => "Stack or unstack the focused pane",
+            Command::CycleStack => "Cycle focus within a stack",
+            Command::MultiSelect => "Toggle multi-select mode",
+            Command::BulkClose => "Close all selected panes",
+            Command::BulkStack => "Stack all selected panes",
+            Command::BulkBreak => "Break selected panes from stack",
+            Command::CustomAction(_) => "Run a custom shell command",
+        }
+    }
+
+    /// Default keybinding for this command, if any.
+    pub fn keybinding(&self) -> Option<&'static str> {
+        match self {
+            Command::NewWindow => Some("Ctrl+B c"),
+            Command::CloseWindow => Some("Ctrl+B x"),
+            Command::SplitHorizontal => Some("Ctrl+B -"),
+            Command::SplitVertical => Some("Ctrl+B \\"),
+            Command::NextWindow => Some("Ctrl+B l"),
+            Command::PrevWindow => Some("Ctrl+B h"),
+            Command::ToggleTiling => Some("Ctrl+B t"),
+            Command::CycleLayoutMode => None,
+            Command::ZoomToggle => Some("Ctrl+B z"),
+            Command::Scrollback => Some("Ctrl+B ["),
+            Command::Quit => Some("Ctrl+B q"),
+            Command::Settings => Some("Ctrl+B ,"),
+            Command::Help => Some("Ctrl+B ?"),
+            Command::CommandPalette => Some("Ctrl+B P"),
+            Command::CopyMode => Some("Ctrl+B ["),
+            Command::ToggleSidebar => Some("Ctrl+B s"),
+            _ => None,
         }
     }
 }
@@ -336,42 +416,204 @@ pub struct SwitcherEntry {
 /// Case-insensitive fuzzy subsequence match: every character of `query` must
 /// appear in `text` in order. An empty query matches everything.
 pub fn matches_query(text: &str, query: &str) -> bool {
-    if query.is_empty() {
-        return true;
+    fuzzy_match(text, query).is_some()
+}
+
+// ---------------------------------------------------------------------------
+// Fuzzy scoring with match-position tracking
+// ---------------------------------------------------------------------------
+
+/// Result of a fuzzy match: a score (lower is better) and the set of character
+/// indices in `text` that matched the query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FuzzyMatch {
+    /// Composite score — lower is better.  0 = perfect match.
+    pub score: i64,
+    /// Character indices in the (lowercased) text that matched.
+    pub positions: Vec<usize>,
+}
+
+/// Score a single fuzzy-matching character pair.
+///
+/// Rewards (lower = better):
+/// - Exact-case match:      -2
+/// - Word-boundary match:   -4  (after separator or at start)
+/// - Consecutive match:     -2  (adjacent to previous match)
+/// - Start-of-string:       -2
+///
+/// Penalties (higher = worse):
+/// - Base cost per char:     +1
+fn fuzzy_char_score(
+    text_chars: &[char],
+    text_idx: usize,
+    query_char: char,
+    prev_text_idx: Option<usize>,
+) -> i64 {
+    let ch = text_chars.get(text_idx).copied().unwrap_or_default();
+    let mut score: i64 = 1; // base cost
+
+    // Exact case match bonus
+    if ch == query_char {
+        score -= 2;
     }
-    let text = text.to_lowercase();
-    let query = query.to_lowercase();
-    let mut it = text.chars();
-    for q in query.chars() {
-        let found = it.by_ref().find(|&c| c == q);
-        if found.is_none() {
-            return false;
+
+    // Word-boundary bonus: start of string or preceded by a non-alphanumeric
+    if text_idx == 0 {
+        score -= 2;
+    } else if let Some(prev_idx) = prev_text_idx {
+        // Adjacent to previous match — consecutive bonus
+        if prev_idx + 1 == text_idx {
+            score -= 2;
         }
     }
-    true
+    // Check word boundary (previous char is a separator)
+    if text_idx > 0 {
+        let prev_ch = text_chars.get(text_idx - 1).copied().unwrap_or_default();
+        if !prev_ch.is_alphanumeric() {
+            score -= 4;
+        }
+    }
+
+    score
+}
+
+/// Find the best fuzzy match of `query` in `text`, returning the score and
+/// matched character positions.  Both are compared case-insensitively.
+///
+/// An empty query matches everything with score 0 and no positions.
+pub fn fuzzy_match(text: &str, query: &str) -> Option<FuzzyMatch> {
+    if query.is_empty() {
+        return Some(FuzzyMatch {
+            score: 0,
+            positions: Vec::new(),
+        });
+    }
+
+    let text_l: Vec<char> = text.to_lowercase().chars().collect();
+    let query_l: Vec<char> = query.to_lowercase().chars().collect();
+    let n = text_l.len();
+    let m = query_l.len();
+
+    if m > n {
+        return None;
+    }
+
+    // Greedy rightmost match: find the last possible position for each query
+    // character, then score from the left to prefer early matches.
+    let mut right_positions = Vec::with_capacity(m);
+    let mut ti = n;
+    for qi in (0..m).rev() {
+        ti = text_l[..ti].iter().rposition(|&c| c == query_l[qi])?;
+        right_positions.push(ti);
+    }
+    right_positions.reverse();
+
+    // Left-to-right greedy match within the rightmost bounds.
+    // Prefer word-boundary positions over earlier non-boundary positions:
+    // when a query char matches at multiple positions, pick the first one
+    // that sits at a word boundary (start of string or after a separator)
+    // rather than blindly taking the earliest.
+    let mut positions = Vec::with_capacity(m);
+    let mut ti = 0;
+    for qi in 0..m {
+        let bound = right_positions[qi];
+        let slice = &text_l[ti..=bound];
+        // Find all candidate positions for this query char.
+        let mut earliest = None;
+        let mut earliest_boundary = None;
+        for (offset, &ch) in slice.iter().enumerate() {
+            if ch == query_l[qi] {
+                let abs = ti + offset;
+                if earliest.is_none() {
+                    earliest = Some(offset);
+                }
+                if earliest_boundary.is_none() {
+                    let at_boundary = abs == 0
+                        || !text_l.get(abs - 1).map(|c| c.is_alphanumeric()).unwrap_or(false);
+                    if at_boundary {
+                        earliest_boundary = Some(offset);
+                    }
+                }
+                if earliest.is_some() && earliest_boundary.is_some() {
+                    break;
+                }
+            }
+        }
+        // Prefer word-boundary match, fall back to earliest.
+        let offset = earliest_boundary.or(earliest)?;
+        positions.push(ti + offset);
+        ti = ti + offset + 1;
+    }
+
+    // Score
+    let mut score: i64 = 0;
+    let mut prev: Option<usize> = None;
+    for (qi, &ti) in positions.iter().enumerate() {
+        score += fuzzy_char_score(&text_l, ti, query_l[qi], prev);
+        prev = Some(ti);
+    }
+
+    Some(FuzzyMatch { score, positions })
+}
+
+/// Multi-token fuzzy match: split `query` on whitespace and require every
+/// token to match independently.  Returns the combined score (sum of per-
+/// token scores) and the merged set of matched positions.
+///
+/// A bonus is applied when every token matches a complete word (the last
+/// matched character is at a word boundary), so `new win` prefers
+/// `New window` over `Next window`.
+pub fn fuzzy_match_tokens(text: &str, query: &str) -> Option<FuzzyMatch> {
+    let tokens: Vec<&str> = query.split_whitespace().collect();
+    if tokens.is_empty() {
+        return Some(FuzzyMatch {
+            score: 0,
+            positions: Vec::new(),
+        });
+    }
+
+    let text_chars: Vec<char> = text.chars().collect();
+    let mut total_score: i64 = 0;
+    let mut all_positions: Vec<usize> = Vec::new();
+    let mut all_word_boundary = true;
+
+    for token in &tokens {
+        let m = fuzzy_match(text, token)?;
+        total_score += m.score;
+
+        // Check if the last matched character is at a word boundary
+        // (end of string or followed by a non-alphanumeric char).
+        if let Some(&last_pos) = m.positions.last() {
+            let at_end = last_pos + 1 >= text_chars.len();
+            let next_is_sep = text_chars
+                .get(last_pos + 1)
+                .map(|c| !c.is_alphanumeric())
+                .unwrap_or(true);
+            if !(at_end || next_is_sep) {
+                all_word_boundary = false;
+            }
+        }
+        all_positions.extend(m.positions);
+    }
+
+    // Bonus when every token matches a complete word.
+    if all_word_boundary && tokens.len() > 1 {
+        total_score -= (tokens.len() as i64) * 6;
+    }
+
+    all_positions.sort_unstable();
+    all_positions.dedup();
+
+    Some(FuzzyMatch {
+        score: total_score,
+        positions: all_positions,
+    })
 }
 
 /// Rank how well `text` matches `query`, lower is better. `None` means no
-/// match. Prefix matches beat word-boundary matches beat subsequence matches,
-/// so the most relevant row sorts to the top of a fuzzy-filtered list.
+/// match.  Delegates to `fuzzy_match_tokens` for scoring.
 pub fn fuzzy_rank(text: &str, query: &str) -> Option<usize> {
-    if query.is_empty() {
-        return Some(0);
-    }
-    let text_l = text.to_lowercase();
-    let query_l = query.to_lowercase();
-    if text_l.starts_with(&query_l) {
-        return Some(0);
-    }
-    for word in text_l.split(|c: char| !c.is_alphanumeric()) {
-        if word.starts_with(&query_l) {
-            return Some(1);
-        }
-    }
-    if matches_query(text, query) {
-        return Some(2);
-    }
-    None
+    fuzzy_match_tokens(text, query).map(|m| m.score as usize)
 }
 
 /// One workspace (1-9), holding its own BSP tree.
@@ -432,6 +674,12 @@ pub struct Os {
     pub gap: i32,
     /// The auto-split scheme.
     pub auto_scheme: AutoScheme,
+    /// The active layout mode (BSP, master-stack, or scrolling).
+    pub layout_mode: crate::layout::LayoutMode,
+    /// Master-stack master pane width ratio (0.3-0.7).
+    pub master_ratio: f64,
+    /// Scrolling layout state (niri-style columns).
+    pub scrolling: crate::layout::ScrollingLayout,
     /// Pending preselection direction.
     pub preselection: PreselectionDir,
     /// Notifications to show in the dock.
@@ -467,6 +715,8 @@ pub struct Os {
     pub palette_open: bool,
     pub palette_query: String,
     pub palette_selected: usize,
+    /// Recently-used palette commands (most recent last). Capped at 8.
+    pub palette_recent: Vec<Command>,
     /// Switcher (workspace/window) state.
     pub switcher_open: bool,
     pub switcher_kind: SwitcherKind,
@@ -869,6 +1119,9 @@ impl Os {
             shared_borders,
             gap: if shared_borders { 1 } else { 0 },
             auto_scheme: AutoScheme::Spiral,
+            layout_mode: crate::layout::LayoutMode::BSP,
+            master_ratio: 0.5,
+            scrolling: crate::layout::ScrollingLayout::new(),
             preselection: PreselectionDir::None,
             notifications: Vec::new(),
             quitting: false,
@@ -889,6 +1142,7 @@ impl Os {
             palette_open: false,
             palette_query: String::new(),
             palette_selected: 0,
+            palette_recent: Vec::new(),
             switcher_open: false,
             switcher_kind: SwitcherKind::Workspace,
             switcher_query: String::new(),
@@ -1066,13 +1320,43 @@ impl Os {
     /// currently only runs BSP tiling, so this fires with `bsp`; layout
     /// switches (master-stack/scrolling) will call it when they land.
     pub fn fire_layout_changed(&self) {
+        let label = self.layout_mode.label().to_lowercase();
         self.fire_hook(
             hooks::Event::AfterLayoutChange,
             hooks::Context {
-                layout: "bsp".into(),
+                layout: label,
                 ..hooks::Context::default()
             },
         );
+    }
+
+    /// Cycle the layout mode: BSP → Master-Stack → Scrolling → BSP.
+    pub fn cycle_layout_mode(&mut self) {
+        self.layout_mode = self.layout_mode.next();
+        // Invalidate the layout cache so the new mode takes effect immediately.
+        if let Ok(mut cache) = self.layout_cache.lock() {
+            *cache = None;
+        }
+        // For scrolling mode, sync columns from the current workspace's BSP tree.
+        if self.layout_mode == crate::layout::LayoutMode::Scrolling {
+            self.sync_scrolling_from_workspace();
+        }
+        let label = self.layout_mode.label();
+        self.notify(
+            format!("Layout: {label}"),
+            "info",
+        );
+        self.fire_layout_changed();
+    }
+
+    /// Populate the scrolling layout from the current workspace's window list.
+    fn sync_scrolling_from_workspace(&mut self) {
+        let ws = self.current_workspace;
+        let ids = self.workspace_window_ids(ws);
+        self.scrolling = crate::layout::ScrollingLayout::new();
+        for &id in &ids {
+            self.scrolling.add_column(id);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2591,6 +2875,11 @@ impl Os {
         ws.tree.get_all_window_ids()
     }
 
+    /// Window IDs on the given workspace, in BSP order.
+    fn workspace_window_ids(&self, ws: i32) -> Vec<i32> {
+        self.workspace(ws).tree.get_all_window_ids()
+    }
+
     /// True if the given window index is on the current workspace (tiled or
     /// floating).
     pub fn window_on_current_workspace(&self, index: usize) -> bool {
@@ -2656,9 +2945,20 @@ impl Os {
         }
         self.workspace_mut(ws).focused = Some(index);
         self.focused_window = Some(index);
+        // In scrolling mode, add the window as a new column.
+        if self.layout_mode == crate::layout::LayoutMode::Scrolling {
+            self.scrolling.add_column(index as i32);
+        }
+        self.invalidate_layout_cache();
         self.record_action("new_window", &[]);
         let ctx = self.window_hook_ctx(index);
         self.fire_hook(hooks::Event::AfterNewWindow, ctx);
+    }
+
+    pub(crate) fn invalidate_layout_cache(&self) {
+        if let Ok(mut cache) = self.layout_cache.lock() {
+            *cache = None;
+        }
     }
 
     /// Spawn a command pane: a window that runs `sh -c <command>` instead of
@@ -2875,6 +3175,11 @@ impl Os {
         // Focus a neighbor on the window's own workspace.
         let remaining = self.workspace(target_ws).tree.get_all_window_ids();
         self.workspace_mut(target_ws).focused = remaining.first().map(|&i| i as usize);
+        // In scrolling mode, remove the window from the scrolling layout.
+        if self.layout_mode == crate::layout::LayoutMode::Scrolling {
+            self.scrolling.remove_window(index as i32);
+        }
+        self.invalidate_layout_cache();
         if target_ws == self.current_workspace {
             self.focused_window = remaining.first().map(|&i| i as usize);
             // If the tree emptied but floats remain, focus the frontmost float.
@@ -3485,6 +3790,14 @@ impl Os {
 
     /// The layout rects for the current workspace.
     pub fn current_layout(&self) -> HashMap<i32, Rect> {
+        match self.layout_mode {
+            crate::layout::LayoutMode::BSP => self.current_layout_bsp(),
+            crate::layout::LayoutMode::MasterStack => self.current_layout_master_stack(),
+            crate::layout::LayoutMode::Scrolling => self.current_layout_scrolling(),
+        }
+    }
+
+    fn current_layout_bsp(&self) -> HashMap<i32, Rect> {
         let ws = self.current_workspace;
         let bounds = self.workspace_bounds(ws);
         let key = LayoutCacheKey {
@@ -3505,6 +3818,47 @@ impl Os {
             *cache = Some((key, layout.clone()));
         }
         layout
+    }
+
+    fn current_layout_master_stack(&self) -> HashMap<i32, Rect> {
+        let ws = self.current_workspace;
+        let ids = self.workspace_window_ids(ws);
+        let n = ids.len() as i32;
+        if n == 0 {
+            return HashMap::new();
+        }
+        let bounds = self.workspace_bounds(ws);
+        let tiles = crate::layout::tiling::calculate_tiling_layout(
+            n,
+            bounds.w,
+            bounds.h,
+            bounds.y,
+            self.master_ratio,
+            self.gap,
+        );
+        let mut layout = HashMap::new();
+        for (i, &id) in ids.iter().enumerate() {
+            if let Some(tile) = tiles.get(i) {
+                layout.insert(id, Rect { x: tile.x, y: tile.y, w: tile.width, h: tile.height });
+            }
+        }
+        layout
+    }
+
+    fn current_layout_scrolling(&self) -> HashMap<i32, Rect> {
+        let bounds = self.workspace_bounds(self.current_workspace);
+        let raw = self.scrolling.compute_positions(bounds.w, bounds.h, bounds.y);
+        // Clamp positions to the visible area so the renderer doesn't
+        // write outside the buffer bounds.
+        let mut result = HashMap::new();
+        for (id, rect) in raw {
+            let x = rect.x.max(0);
+            let w = (rect.w).min(bounds.w - x);
+            if w > 0 && rect.h > 0 {
+                result.insert(id, Rect { x, y: rect.y, w, h: rect.h });
+            }
+        }
+        result
     }
 
     // -----------------------------------------------------------------------
@@ -4095,19 +4449,31 @@ impl Os {
     }
 
     /// The commands matching the current query, best match first.
-    pub fn palette_items(&self) -> Vec<Command> {
-        let mut items: Vec<(usize, Command)> = Command::all()
+    /// Each entry carries the command and the character positions that matched
+    /// the query (for rendering with highlights).
+    pub fn palette_items(&self) -> Vec<(Command, Vec<usize>)> {
+        let mut items: Vec<(i64, Command, Vec<usize>)> = Command::all()
             .into_iter()
-            .filter_map(|c| fuzzy_rank(&c.label(), &self.palette_query).map(|r| (r, c)))
+            .filter_map(|c| {
+                fuzzy_match_tokens(&c.label(), &self.palette_query)
+                    .map(|m| (m.score, c, m.positions))
+            })
             .collect();
         // Append custom actions from config.
         for action in &self.config.custom_actions {
-            if let Some(r) = fuzzy_rank(&action.name, &self.palette_query) {
-                items.push((r, Command::CustomAction(action.name.clone())));
+            if let Some(m) = fuzzy_match_tokens(&action.name, &self.palette_query) {
+                items.push((m.score, Command::CustomAction(action.name.clone()), m.positions));
+            }
+        }
+        // Boost recently-used commands: each recency slot gives a -10 bonus
+        // so the most-recent command beats any fuzzy-score difference.
+        for (score, cmd, _) in &mut items {
+            if let Some(pos) = self.palette_recent.iter().rev().position(|r| r == cmd) {
+                *score -= ((self.palette_recent.len() - pos) as i64) * 10;
             }
         }
         items.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.label().cmp(&b.1.label())));
-        items.into_iter().map(|(_, c)| c).collect()
+        items.into_iter().map(|(_, c, p)| (c, p)).collect()
     }
 
     pub fn palette_move(&mut self, delta: i32) {
@@ -4119,12 +4485,63 @@ impl Os {
         self.palette_selected = sel.rem_euclid(len as i32) as usize;
     }
 
+    /// Compute the palette overlay geometry for mouse hit-testing.
+    /// Returns (panel_x, panel_y, panel_w, panel_h, row_y_starts).
+    pub fn palette_geometry(&self) -> Option<(i32, i32, i32, i32, Vec<i32>)> {
+        if !self.palette_open {
+            return None;
+        }
+        let items = self.palette_items();
+        let rows: Vec<(String, String)> = items
+            .iter()
+            .map(|(c, _)| (c.label(), c.category().to_string()))
+            .collect();
+        let max_row = rows
+            .iter()
+            .map(|(l, d)| {
+                l.chars().count()
+                    + if d.is_empty() { 0 } else { 2 + d.chars().count() }
+            })
+            .max()
+            .unwrap_or(0);
+        let query_w = self.palette_query.chars().count() + 2;
+        let content_w = max_row.max(query_w).max("Commands".len()) + 4;
+        let w = (content_w as i32).clamp(20, self.width - 2);
+        let h = ((rows.len() + 4) as i32).clamp(3, self.height - 2);
+        let px = (self.width - w) / 2;
+        let py = (self.height - h) / 2;
+        let visible = (h as usize).saturating_sub(3).max(1);
+        let start = if rows.len() > visible {
+            self.palette_selected.saturating_sub(visible - 1)
+        } else {
+            0
+        };
+        let mut row_ys = Vec::new();
+        for i in 0..visible {
+            if start + i >= rows.len() {
+                break;
+            }
+            let ry = py + 2 + i as i32;
+            if ry >= py + h - 1 {
+                break;
+            }
+            row_ys.push(ry);
+        }
+        Some((px, py, w, h, row_ys))
+    }
+
     /// Run the selected command and close the palette.
     pub fn activate_palette(&mut self) {
         let items = self.palette_items();
-        let cmd = items.get(self.palette_selected).cloned();
+        let cmd = items.get(self.palette_selected).map(|(c, _)| c.clone());
         self.close_palette();
         if let Some(cmd) = cmd {
+            // Track recency: remove if already present, push to end, cap at 8.
+            self.palette_recent.retain(|c| c != &cmd);
+            self.palette_recent.push(cmd.clone());
+            if self.palette_recent.len() > 8 {
+                self.palette_recent.remove(0);
+            }
             self.run_command(cmd);
         }
     }
@@ -4150,6 +4567,7 @@ impl Os {
                 // BSP tiling is always on in this port; the palette entry
                 // exists for parity with the Go command list.
             }
+            Command::CycleLayoutMode => self.cycle_layout_mode(),
             Command::ToggleFloat => self.toggle_float(),
             Command::FloatNew => {
                 let shell = self.default_shell();
@@ -6607,12 +7025,104 @@ mod tests {
     }
 
     #[test]
+    fn fuzzy_match_returns_positions() {
+        let m = fuzzy_match("Close window", "cw").unwrap();
+        // 'C' at 0, 'w' at 6
+        assert!(m.positions.contains(&0));
+        assert!(m.positions.contains(&6));
+    }
+
+    #[test]
+    fn fuzzy_match_scores_prefix_higher_than_subsequence() {
+        let prefix = fuzzy_match("Close window", "close").unwrap();
+        let subseq = fuzzy_match("Close window", "cow").unwrap();
+        assert!(prefix.score < subseq.score);
+    }
+
+    #[test]
+    fn fuzzy_match_scores_word_boundary_higher() {
+        let word = fuzzy_match("Close window", "window").unwrap();
+        let mid = fuzzy_match("Close window", "lose").unwrap();
+        assert!(word.score < mid.score);
+    }
+
+    #[test]
+    fn fuzzy_match_tokens_multi_word() {
+        let m = fuzzy_match_tokens("Close window", "cl wi");
+        assert!(m.is_some());
+        let m = fuzzy_match_tokens("Close window", "cl xyz");
+        assert!(m.is_none());
+    }
+
+    #[test]
+    fn palette_multi_token_search() {
+        let mut os = test_os();
+        os.open_palette();
+        // "win close" should match "Close window" (multi-token fuzzy)
+        os.palette_query = "win close".into();
+        let items = os.palette_items();
+        let cmds: Vec<Command> = items.into_iter().map(|(c, _)| c).collect();
+        assert!(cmds.contains(&Command::CloseWindow));
+    }
+
+    #[test]
+    fn palette_highlight_positions_non_empty() {
+        let mut os = test_os();
+        os.open_palette();
+        os.palette_query = "quit".into();
+        let items = os.palette_items();
+        // Quit should be first and have non-empty highlight positions
+        let (cmd, positions) = items.first().unwrap();
+        assert_eq!(*cmd, Command::Quit);
+        assert!(!positions.is_empty());
+    }
+
+    #[test]
+    fn palette_multi_token_prefers_full_word_matches() {
+        let mut os = test_os();
+        os.open_palette();
+        // "new win" should rank "New window" above "Next window"
+        // because both tokens match complete words in "New window".
+        os.palette_query = "new win".into();
+        let items = os.palette_items();
+        let cmds: Vec<Command> = items.into_iter().map(|(c, _)| c).collect();
+        let new_win_idx = cmds.iter().position(|c| *c == Command::NewWindow);
+        let next_win_idx = cmds.iter().position(|c| *c == Command::NextWindow);
+        if let (Some(nw), Some(nx)) = (new_win_idx, next_win_idx) {
+            assert!(nw < nx, "New window should rank above Next window");
+        }
+    }
+
+    #[test]
+    fn palette_empty_query_shows_all() {
+        let mut os = test_os();
+        os.open_palette();
+        os.palette_query.clear();
+        let items = os.palette_items();
+        assert!(!items.is_empty());
+    }
+
+    #[test]
+    fn palette_recent_commands_sort_first() {
+        let mut os = test_os();
+        // Simulate using NewWindow and CloseWindow recently.
+        os.palette_recent = vec![Command::NewWindow, Command::CloseWindow];
+        os.open_palette();
+        os.palette_query.clear(); // show all
+        let items = os.palette_items();
+        let cmds: Vec<Command> = items.into_iter().map(|(c, _)| c).collect();
+        // CloseWindow (most recent) should be first, NewWindow second.
+        assert_eq!(cmds[0], Command::CloseWindow);
+        assert_eq!(cmds[1], Command::NewWindow);
+    }
+
+    #[test]
     fn palette_filters_commands() {
         let mut os = test_os();
         os.open_palette();
         os.palette_query = "close".into();
         let items = os.palette_items();
-        assert!(items.contains(&Command::CloseWindow));
+        assert!(items.iter().any(|(c, _)| c == &Command::CloseWindow));
     }
 
     #[test]
@@ -6622,7 +7132,8 @@ mod tests {
         // "quit" also subsequence-matches "equalize splits"; the prefix match
         // on "Quit" must rank first.
         os.palette_query = "quit".into();
-        assert_eq!(os.palette_items().first(), Some(&Command::Quit));
+        let first = os.palette_items().first().map(|(c, _)| c.clone());
+        assert_eq!(first, Some(Command::Quit));
     }
 
     #[test]
@@ -6631,7 +7142,8 @@ mod tests {
         os.open_palette();
         os.palette_query = "workspace 3".into();
         let items = os.palette_items();
-        assert_eq!(items, vec![Command::SwitchWorkspace(3)]);
+        let cmds: Vec<Command> = items.into_iter().map(|(c, _)| c).collect();
+        assert_eq!(cmds, vec![Command::SwitchWorkspace(3)]);
         os.activate_palette();
         assert!(!os.palette_open);
         assert_eq!(os.current_workspace, 3);
@@ -9263,7 +9775,7 @@ mod extension_tests {
         os.open_palette();
         os.palette_query = "widget".into();
         let items = os.palette_items();
-        assert!(items.iter().any(|c| matches!(c, Command::CustomAction(n) if n == "My Widget")));
+        assert!(items.iter().any(|(c, _)| matches!(c, Command::CustomAction(n) if n == "My Widget")));
     }
 
     #[test]
@@ -9284,3 +9796,68 @@ mod extension_tests {
     }
 }
 
+#[cfg(test)]
+mod layout_mode_tests {
+    use super::*;
+
+    fn os_with_two() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.width = 80;
+        os.height = 25;
+        os.push_fake_window("win-0", "Terminal", SplitType::Vertical);
+        os.push_fake_window("win-1", "Terminal", SplitType::Vertical);
+        os
+    }
+
+    #[test]
+    fn cycle_layout_mode_bsp_to_ms_to_scroll() {
+        let mut os = os_with_two();
+        assert_eq!(os.layout_mode, crate::layout::LayoutMode::BSP);
+        os.cycle_layout_mode();
+        assert_eq!(os.layout_mode, crate::layout::LayoutMode::MasterStack);
+        os.cycle_layout_mode();
+        assert_eq!(os.layout_mode, crate::layout::LayoutMode::Scrolling);
+        os.cycle_layout_mode();
+        assert_eq!(os.layout_mode, crate::layout::LayoutMode::BSP);
+    }
+
+    #[test]
+    fn master_stack_layout_produces_rects() {
+        let mut os = os_with_two();
+        os.layout_mode = crate::layout::LayoutMode::MasterStack;
+        os.invalidate_layout_cache();
+        let layout = os.current_layout();
+        assert_eq!(layout.len(), 2);
+        // Master on the left (50% width).
+        let r0 = layout.get(&0).unwrap();
+        assert_eq!(r0.x, 0);
+        assert!(r0.w > 0);
+        // Stack on the right.
+        let r1 = layout.get(&1).unwrap();
+        assert!(r1.x > r0.x);
+    }
+
+    #[test]
+    fn scrolling_layout_produces_rects() {
+        let mut os = os_with_two();
+        os.layout_mode = crate::layout::LayoutMode::Scrolling;
+        os.sync_scrolling_from_workspace();
+        os.invalidate_layout_cache();
+        let layout = os.current_layout();
+        assert_eq!(layout.len(), 2);
+    }
+
+    #[test]
+    fn layout_mode_label() {
+        assert_eq!(crate::layout::LayoutMode::BSP.label(), "BSP");
+        assert_eq!(crate::layout::LayoutMode::MasterStack.label(), "MS");
+        assert_eq!(crate::layout::LayoutMode::Scrolling.label(), "SCR");
+    }
+
+    #[test]
+    fn layout_mode_next_cycles() {
+        assert_eq!(crate::layout::LayoutMode::BSP.next(), crate::layout::LayoutMode::MasterStack);
+        assert_eq!(crate::layout::LayoutMode::MasterStack.next(), crate::layout::LayoutMode::Scrolling);
+        assert_eq!(crate::layout::LayoutMode::Scrolling.next(), crate::layout::LayoutMode::BSP);
+    }
+}

@@ -752,3 +752,93 @@ terminal users and GUI power users.  Based on `docs/RESEARCH_TUI_APPROACHABILITY
 | 20 | 1 | Render hot path: content, palette, screen ops, canvas cache | Large |
 | 21 | 1 | Bug fixes: select_line_at column hazard, daemon test flakes, web mouse support, config docs | Medium |
 | 22 | 1 | Approachability: welcome screen, mode indicator, key hints bar | Small |
+| 23 | 1 | Command palette: fuzzy search, match highlighting, empty state, keybinding hints, recency, mouse clicks | Small |
+| 24 | 1 | Layout modes: master-stack + scrolling (niri-style) | Large |
+| 25 | 1 | Vim copy mode: hjkl, word motions, character search, visual selection | Large |
+| 26 | 1 | Dock polish: configurable position, session controls, zoom indicator, minimized entries | Medium |
+| 27 | 1 | Border styles: 9 styles (rounded, thick, double, hidden, block, ascii, etc.) | Medium |
+| 28 | 2 | Zen mode: hide borders on idle, reveal on mouse | Small |
+| 29 | 2 | Interactive scrollbar: click/drag right border thumb | Medium |
+| 30 | 2 | Aggregate view with content previews | Medium |
+| 31 | 2 | Multifocus: broadcast typing to multiple panes | Large |
+| 32 | 3 | Kitty graphics: image rendering, flicker-free video, SHM | Large |
+| 33 | 3 | Mouse enhancements: double-click word, triple-click line, edge snapping | Medium |
+| 34 | 4 | Control protocol: JSON API for external automation | Medium |
+| 35 | 4 | Layout export: convert layouts to tape scripts | Small |
+
+## Tier 1 — TUIOS Parity (Phases 24–27)
+
+The goal: close the biggest functional gaps between TermOS and TUIOS.
+
+### Phase 24 — Layout modes: master-stack + scrolling ✅
+
+TermOS currently only supports BSP tiling. TUIOS offers three layout modes:
+BSP, master-stack, and scrolling (niri-style columns). This phase adds the
+missing two.
+
+#### Master-stack layout
+
+- **`LayoutMode::MasterStack`** enum variant alongside `BSP`.
+- One master pane on the left (configurable width ratio), rest stacked on the
+  right. Master pane gets focus by default.
+- `Prefix+M` to toggle master-stack mode. `Prefix+T` cycles BSP → MasterStack
+  → Scrolling → BSP.
+- Resize master width with `Prefix+,` / `Prefix+.` (like TUIOS).
+- Reuses existing BSP tree for window tracking; master-stack is a layout
+  *renderer*, not a separate data structure.
+- Config: `[appearance] layout_mode = "master-stack"` (default: `"bsp"`).
+
+#### Scrolling layout (niri-style)
+
+- **`LayoutMode::Scrolling`** enum variant.
+- Columns on an infinite horizontal strip. One window per column. Focused
+  column centered. Adjacent columns peek from edges.
+- `Alt+Left` / `Alt+Right` to shift focus between columns.
+- Column width cycles: `Prefix+]` toggles narrow/medium/wide/full.
+- New window opens to the right of focused column.
+- Close a column → neighbors shift to fill the gap.
+- Horizontal scroll with mouse wheel (reversible via config).
+
+#### Shared changes
+
+- `Os::layout_mode()` returns current mode.
+- `Os::set_layout_mode()` switches + retiles.
+- `Os::tile_windows()` dispatches to the active layout's tiler.
+- `render_dock` shows layout mode indicator (BSP/MS/SCR).
+- `Command::LayoutSwitcher` cycles modes.
+- Hints bar updates per layout mode.
+
+#### Testing
+
+- Unit tests for master-stack ratio calculation.
+- Unit tests for scrolling column positioning.
+- Integration test: switch modes mid-session, verify windows retile.
+
+### Phase 25 — Vim copy mode
+
+Full vim-style scrollback navigation matching TUIOS's copy mode.
+
+- **Enter**: `Prefix+[` (or `Ctrl+B [`).
+- **Navigation**: `h/j/k/l`, `w/b/e`, `0/^/$`, `gg/G`, `{/}`.
+- **Count prefix**: `10j` moves 10 lines, `5w` moves 5 words.
+- **Character search**: `f{char}`, `F{char}`, `t{char}`, `T{char}`.
+- **Visual line mode**: `Shift+V` highlights entire line.
+- **Search**: `/` enters search, `n/N` next/prev.
+- **Yank**: `y` copies selection to clipboard.
+- **Exit**: `q` or `Esc` or `i` returns to terminal mode.
+- **Scroll indicator**: `offset/total` on bottom border.
+
+### Phase 26 — Dock polish
+
+- **Configurable position**: `[appearance] dockbar_position = "bottom"` (top/bottom/hidden).
+- **Session controls**: detach, kill, attach buttons in dock.
+- **Zoom indicator**: "Z" badge on dock pill when pane is zoomed.
+- **Minimized entries**: Clickable icons for minimized windows.
+- **Overflow**: Click truncated count → open aggregate view.
+
+### Phase 27 — Border styles
+
+- **9 styles**: rounded (default), normal, thick, double, hidden, block, ascii, outer-half-block, inner-half-block.
+- **Config**: `[appearance] border_style = "rounded"`.
+- **Hidden mode**: Suppresses border chars + window buttons + scrollbar.
+- **Configurable colors**: `border_focused_color` and `border_unfocused_color` hex overrides.

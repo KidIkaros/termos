@@ -28,6 +28,27 @@ pub fn overlay_drag_active(os: &Os) -> bool {
 
 /// Route a mouse click to the topmost overlay. Returns (consumed, activated).
 pub fn overlay_mouse_click(os: &mut Os, x: i32, y: i32, right: bool) -> (bool, bool) {
+    // Inline palette hit-testing when overlay_hits isn't populated.
+    if os.palette_open && !right {
+        if let Some((px, py, pw, _ph, row_ys)) = os.palette_geometry() {
+            if x >= px && x < px + pw && y >= py && y < py + 2 + row_ys.len() as i32 {
+                // Click on a row — select and activate.
+                for (i, &ry) in row_ys.iter().enumerate() {
+                    if y == ry {
+                        os.palette_selected = i;
+                        os.activate_palette();
+                        return (true, true);
+                    }
+                }
+                // Click on query line or header — just consume.
+                return (true, false);
+            }
+            // Click outside palette — dismiss.
+            os.close_palette();
+            return (true, false);
+        }
+    }
+
     let hit = match overlay_hit_at(&os.overlay_hits, x, y) {
         Some(h) => h.clone(),
         None => {

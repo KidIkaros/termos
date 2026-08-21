@@ -676,11 +676,23 @@ fn handle_window_management(os: &mut Os, key: &KeyEvent) -> KeyResult {
         }
         // Snap to half: alt+left/alt+right.
         KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
-            crate::app::actions::dispatch(os, "snap_left");
+            if os.layout_mode == crate::layout::LayoutMode::Scrolling {
+                os.scrolling.focus_left();
+                os.scrolling.scroll_to_focused_column(os.width);
+                os.invalidate_layout_cache();
+            } else {
+                crate::app::actions::dispatch(os, "snap_left");
+            }
             return KeyResult::Consumed;
         }
         KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
-            crate::app::actions::dispatch(os, "snap_right");
+            if os.layout_mode == crate::layout::LayoutMode::Scrolling {
+                os.scrolling.focus_right();
+                os.scrolling.scroll_to_focused_column(os.width);
+                os.invalidate_layout_cache();
+            } else {
+                crate::app::actions::dispatch(os, "snap_right");
+            }
             return KeyResult::Consumed;
         }
         // Enter terminal mode (i / enter).
@@ -796,9 +808,10 @@ fn handle_leader_key(os: &mut Os, key: &KeyEvent) -> KeyResult {
             os.prefix = Prefix::None;
             KeyResult::Consumed
         }
-        // Toggle tiling (space) — no-op here; BSP is always on in this port.
+        // Cycle layout mode: BSP → Master-Stack → Scrolling → BSP.
         KeyCode::Char(' ') => {
             os.prefix = Prefix::None;
+            os.cycle_layout_mode();
             KeyResult::Consumed
         }
         // Sub-prefixes.
@@ -2420,8 +2433,8 @@ mod tests {
         os.open_palette();
         os.palette_query = "float".to_string();
         let items = os.palette_items();
-        assert!(items.contains(&super::super::Command::ToggleFloat));
-        assert!(items.contains(&super::super::Command::FloatNew));
+        assert!(items.iter().any(|(c, _)| c == &super::super::Command::ToggleFloat));
+        assert!(items.iter().any(|(c, _)| c == &super::super::Command::FloatNew));
     }
 
     #[test]

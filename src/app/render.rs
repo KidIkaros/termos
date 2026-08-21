@@ -541,13 +541,23 @@ fn render_showkeys(buf: &mut Buffer, area: TuiRect, chord: &str) {
 }
 
 /// Render the command palette overlay with a query line and fuzzy-filtered
-/// commands, the selected one highlighted.
+/// commands, the selected one highlighted, with matched characters colored.
+/// Commands with default keybindings show the shortcut as a dimmed hint.
 pub fn render_palette(os: &Os, buf: &mut Buffer, area: TuiRect) {
     let items = os.palette_items();
     let rows: Vec<(String, String)> = items
         .iter()
-        .map(|c| (c.label(), c.category().to_string()))
+        .map(|(c, _)| {
+            let mut detail = String::new();
+            if let Some(kb) = c.keybinding() {
+                detail.push_str(kb);
+                detail.push_str("  ");
+            }
+            detail.push_str(c.category());
+            (c.label(), detail)
+        })
         .collect();
+    let highlights: Vec<Vec<usize>> = items.iter().map(|(_, p)| p.clone()).collect();
     render_list_overlay(
         buf,
         area,
@@ -555,6 +565,7 @@ pub fn render_palette(os: &Os, buf: &mut Buffer, area: TuiRect) {
         &os.palette_query,
         &rows,
         os.palette_selected,
+        &highlights,
     );
 }
 
@@ -578,12 +589,14 @@ pub fn render_switcher(os: &Os, buf: &mut Buffer, area: TuiRect) {
         &os.switcher_query,
         &rows,
         os.switcher_selected,
+        &[],
     );
 }
 
 /// A centered, bordered list overlay: a query line at the top, rows below, and
 /// the selected row drawn reverse-video. Rows are windowed so the selection
-/// stays visible.
+/// stays visible.  `highlights` is per-row: character indices in the label
+/// that matched the fuzzy query (rendered bold+yellow).
 pub fn render_list_overlay(
     buf: &mut Buffer,
     area: TuiRect,
@@ -591,6 +604,7 @@ pub fn render_list_overlay(
     query: &str,
     rows: &[(String, String)],
     selected: usize,
+    highlights: &[Vec<usize>],
 ) {
     let max_row = rows
         .iter()
@@ -639,6 +653,21 @@ pub fn render_list_overlay(
         }
     }
 
+    // Empty state: "No matches" when the query produces zero results.
+    if rows.is_empty() && !query.is_empty() {
+        let msg = "No matches";
+        let row_y = rect.y + 2;
+        for (j, ch) in msg.chars().enumerate() {
+            let x = rect.x + 2 + j as u16;
+            if x < rect.x + rect.width - 2 {
+                let cell = &mut buf[(x, row_y)];
+                cell.set_char(ch);
+                cell.set_style(TuiStyle::default().fg(TuiColor::DarkGray));
+            }
+        }
+        return;
+    }
+
     // Rows, windowed to keep the selection visible.
     let visible = (height as usize).saturating_sub(3).max(1);
     let start = if rows.len() > visible {
@@ -659,6 +688,8 @@ pub fn render_list_overlay(
             text.push_str("  ");
             text.push_str(detail);
         }
+        static EMPTY_HL: Vec<usize> = Vec::new();
+        let row_highlights: &Vec<usize> = highlights.get(start + i).unwrap_or(&EMPTY_HL);
         let is_selected = start + i == selected;
         for (j, ch) in text.chars().enumerate() {
             let x = rect.x + 2 + j as u16;
@@ -667,6 +698,13 @@ pub fn render_list_overlay(
                 cell.set_char(ch);
                 if is_selected {
                     let style = cell.style().add_modifier(Modifier::REVERSED);
+                    cell.set_style(style);
+                } else if row_highlights.contains(&j) {
+                    // Highlighted match: bold + yellow foreground.
+                    let style = cell
+                        .style()
+                        .add_modifier(Modifier::BOLD)
+                        .fg(TuiColor::Yellow);
                     cell.set_style(style);
                 }
             }
@@ -1098,11 +1136,17 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
     // The dock count includes floating panes (which are not in the BSP
     // tree and therefore not in `sorted_ids`).
     let float_count = os.floats_on_workspace(os.current_workspace).len();
+    let layout_tag = match os.layout_mode {
+        crate::layout::LayoutMode::BSP => "",
+        crate::layout::LayoutMode::MasterStack => " MS",
+        crate::layout::LayoutMode::Scrolling => " SCR",
+    };
     let mut left_text = format!(
-        " {} {}:{} ",
+        " {} {}:{}{} ",
         mode_name,
         os.current_workspace,
-        sorted_ids.len() + float_count
+        sorted_ids.len() + float_count,
+        layout_tag,
     );
     // Tape playback progress indicator.
     if os.script_active() {
