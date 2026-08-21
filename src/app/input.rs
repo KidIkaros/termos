@@ -1048,11 +1048,38 @@ fn handle_window_prefix(os: &mut Os, key: &KeyEvent) -> KeyResult {
 }
 
 fn handle_minimize_prefix(os: &mut Os, key: &KeyEvent) -> KeyResult {
-    // Minimize is a no-op in this port (windows have no minimized state yet);
-    // the keys are consumed to avoid leaking to the shell.
-    let _ = key;
-    os.prefix = Prefix::None;
-    KeyResult::Consumed
+    match key.code {
+        // Minimize the focused window.
+        KeyCode::Char('m') | KeyCode::Char('x') => {
+            os.minimize_focused();
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // Restore the last minimized window.
+        KeyCode::Char('r') => {
+            os.restore_last_minimized();
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // Number keys 0-9: restore that window index directly.
+        KeyCode::Char(c @ '0'..='9') => {
+            let idx = c.to_digit(10).unwrap() as usize;
+            if idx < os.windows.len() && os.windows[idx].minimized {
+                os.restore_window(idx);
+            }
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        // Escape cancels.
+        KeyCode::Esc => {
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+        _ => {
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1887,7 +1914,12 @@ pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
                     return true;
                 }
                 if let Some(idx) = os.dock_item_at(column, row) {
-                    os.focus_window(idx);
+                    // If the window is minimized, restore it; otherwise focus it.
+                    if os.windows.get(idx).map(|w| w.minimized).unwrap_or(false) {
+                        os.restore_window(idx);
+                    } else {
+                        os.focus_window(idx);
+                    }
                     os.prefix = Prefix::None;
                     return true;
                 }

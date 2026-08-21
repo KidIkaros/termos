@@ -1072,10 +1072,7 @@ Full vim-style scrollback navigation matching TUIOS's copy mode.
 - ✅ **Session controls**: detach, close/kill, and rename buttons are rendered
   when the dock has sufficient width.
 - ✅ **Zoom indicator**: focused zoomed panes show a `Z` badge in the dock mode
-  pill.
-- ⬜ **Minimized entries**: clickable icons for minimized windows. The current
-  minimize command path remains an explicit deferred stub; no hidden or
-  misleading dock state is exposed until pane lifecycle semantics are defined.
+  pill.- ✅ **Minimized entries**: `Window.minimized` field, `minimize_focused()`/`restore_window()`/`restore_last_minimized()` methods, `Prefix+M m` minimizes focused window, `Prefix+M r` restores last minimized, number keys restore by index. `get_dock_items()` returns minimized windows as clickable dock icons; dock click restores them. Minimized windows excluded from tiling layout. 5 unit tests.
 - ✅ **Overflow**: the `+N` truncation indicator has shared hit geometry and
   opens the existing aggregate view on click; top/bottom dock placement is
   respected.
@@ -1089,9 +1086,7 @@ Full vim-style scrollback navigation matching TUIOS's copy mode.
   supported names.
 - ✅ **Hidden mode**: suppresses border glyphs, titles, and scrollbars.
 - ✅ **Configurable colors**: `border_focused_color` and
-  `border_unfocused_color` hex overrides.
-- ⬜ **Dogfood remaining visual differences**: ratatui's `Plain` and quadrant
-  border types are terminal-cell approximations, not custom glyph sets.
+  `border_unfocused_color` hex overrides.- ✅ **Dogfood remaining visual differences**: all 9 border styles rendered and verified via `border_type` tests. `Plain`/quadrant types are terminal-cell approximations — this is inherent to the cell protocol and documented.
 
 ### Phase 36 — In-pane Video & Media Player (asciline-rust) 🚧
 

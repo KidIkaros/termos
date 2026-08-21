@@ -3205,6 +3205,48 @@ impl Os {
         }
     }
 
+    /// Minimize the focused window: hide it from the tiling layout and show it
+    /// as a clickable icon in the dock.  The shell process continues running.
+    pub fn minimize_focused(&mut self) {
+        if let Some(idx) = self.focused_window {
+            if let Some(window) = self.windows.get_mut(idx) {
+                if !window.minimized {
+                    window.minimized = true;
+                    self.begin_minimize(idx as i32);
+                    // Move focus to the next tiled window.
+                    self.focus_next();
+                    self.damage_full(crate::app::damage::DamageReason::Geometry);
+                }
+            }
+        }
+    }
+
+    /// Restore a minimized window by its index: unminimize it and move focus
+    /// to it so it reappears in the tiling layout.
+    pub fn restore_window(&mut self, index: usize) {
+        if let Some(window) = self.windows.get_mut(index) {
+            if window.minimized {
+                window.minimized = false;
+                self.begin_restore(index as i32);
+                self.focused_window = Some(index);
+                self.damage_full(crate::app::damage::DamageReason::Geometry);
+            }
+        }
+    }
+
+    /// Restore the most recently minimized window (or the last window index
+    /// that is minimized).  Used by dock click and the `m r` key chord.
+    pub fn restore_last_minimized(&mut self) {
+        // Walk windows in reverse to find the last minimized one.
+        if let Some(idx) = self.windows.iter().enumerate().rev()
+            .find(|(_, w)| w.minimized)
+            .map(|(i, _)| i)
+        {
+            self.restore_window(idx);
+        }
+    }
+
+
     /// Remove the window at `index`, collapsing the BSP trees and shifting
     /// every later window's index down by one. Also used by the remote TUI
     /// when a daemon window is closed.
@@ -3892,11 +3934,19 @@ impl Os {
 
     /// The layout rects for the current workspace.
     pub fn current_layout(&self) -> HashMap<i32, Rect> {
-        match self.layout_mode {
+        let layout = match self.layout_mode {
             crate::layout::LayoutMode::BSP => self.current_layout_bsp(),
             crate::layout::LayoutMode::MasterStack => self.current_layout_master_stack(),
             crate::layout::LayoutMode::Scrolling => self.current_layout_scrolling(),
-        }
+        };
+        // Exclude minimized windows — they don't participate in tiling.
+        layout.into_iter()
+            .filter(|(id, _)| {
+                self.windows.get(*id as usize)
+                    .map(|w| !w.minimized)
+                    .unwrap_or(true)
+            })
+            .collect()
     }
 
     fn current_layout_bsp(&self) -> HashMap<i32, Rect> {
@@ -6842,20 +6892,32 @@ impl crate::tape::executor::TapeExecutor for Os {
         Ok(())
     }
 
-    fn minimize_window_by_id(&mut self, _window_id: &str) -> Result<(), String> {
-        Err("minimize is not implemented in this port".into())
+    fn minimize_window_by_id(&mut self, window_id: &str) -> Result<(), String> {
+        if let Ok(idx) = window_id.parse::<usize>() {
+            if let Some(w) = self.windows.get_mut(idx) {
+                w.minimized = true;
+                self.begin_minimize(idx as i32);
+                self.damage_full(crate::app::damage::DamageReason::Geometry);
+                return Ok(());
+            }
+        }
+        Err(format!("window {window_id} not found"))
     }
 
     fn minimize_window_by_name(&mut self, _name: &str) -> Result<(), String> {
-        Err("minimize is not implemented in this port".into())
+        Err("minimize by name not yet supported".into())
     }
 
-    fn restore_window_by_id(&mut self, _window_id: &str) -> Result<(), String> {
-        Err("restore-minimized is not implemented in this port".into())
+    fn restore_window_by_id(&mut self, window_id: &str) -> Result<(), String> {
+        if let Ok(idx) = window_id.parse::<usize>() {
+            self.restore_window(idx);
+            return Ok(());
+        }
+        Err(format!("window {window_id} not found"))
     }
 
     fn restore_window_by_name(&mut self, _name: &str) -> Result<(), String> {
-        Err("restore-minimized is not implemented in this port".into())
+        Err("restore by name not yet supported".into())
     }
 
     // BSP tiling is always on in this port; the toggles are accepted no-ops.
@@ -10132,5 +10194,75 @@ mod damage_wiring_tests {
         assert_eq!(taken[0].reason, DamageReason::Resize);
         assert_eq!(taken[0].rect, Rect { x: 0, y: 0, w: 80, h: 25 });
         assert!(os.damage.is_empty());
+    }
+
+    #[test]
+    fn minimize_focused_hides_window_from_layout() {
+        let mut os = os_with_two();
+        os.focused_window = Some(0);
+        let before = os.current_layout();
+        assert!(before.contains_key(&0));
+
+        os.minimize_focused();
+
+        assert!(os.windows[0].minimized);
+        let after = os.current_layout();
+        assert!(!after.contains_key(&0), "minimized window should not be in layout");
+        // Focus should have moved to window 1.
+        assert_eq!(os.focused_window, Some(1));
+    }
+
+    #[test]
+    fn restore_window_brings_it_back() {
+        let mut os = os_with_two();
+        os.focused_window = Some(0);
+        os.minimize_focused();
+        assert!(os.windows[0].minimized);
+
+        os.restore_window(0);
+
+        assert!(!os.windows[0].minimized);
+        assert_eq!(os.focused_window, Some(0));
+        let layout = os.current_layout();
+        assert!(layout.contains_key(&0));
+    }
+
+    #[test]
+    fn restore_last_minimized_picks_last() {
+        let mut os = os_with_two();
+        os.focused_window = Some(0);
+        os.minimize_focused();
+        os.focused_window = Some(1);
+        os.minimize_focused();
+        // Both minimized.
+        assert!(os.windows[0].minimized);
+        assert!(os.windows[1].minimized);
+
+        os.restore_last_minimized();
+
+        // Last minimized (index 1) should be restored.
+        assert!(!os.windows[1].minimized);
+        assert!(os.windows[0].minimized);
+    }
+
+    #[test]
+    fn dock_items_include_minimized_windows() {
+        use crate::app::dock::get_dock_items;
+        let mut os = os_with_two();
+        os.focused_window = Some(0);
+        os.minimize_focused();
+
+        let items = get_dock_items(&os);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].minimized);
+        assert_eq!(items[0].window_index, 0);
+    }
+
+    #[test]
+    fn dock_items_empty_when_no_minimized() {
+        use crate::app::dock::get_dock_items;
+        let os = os_with_two();
+        let items = get_dock_items(&os);
+        assert!(items.is_empty());
     }
 }

@@ -123,6 +123,8 @@ pub struct Window {
     last_size: Option<WinSize>,
     /// Whether the window is zoomed.
     pub zoomed: bool,
+    /// Whether the window is minimized (hidden from tiling, shown as a dock icon).
+    pub minimized: bool,
     /// Pre-zoom position and size, saved when zooming in.
     pub pre_zoom_x: i32,
     pub pre_zoom_y: i32,
@@ -264,6 +266,7 @@ impl Window {
             cwd_cache: super::cwd::CwdCache::new(),
             last_size: None,
             zoomed: false,
+            minimized: false,
             pre_zoom_x: 0,
             pre_zoom_y: 0,
             pre_zoom_width: 0,
@@ -334,6 +337,7 @@ impl Window {
             cwd_cache: super::cwd::CwdCache::new(),
             last_size: None,
             zoomed: false,
+            minimized: false,
             pre_zoom_x: 0,
             pre_zoom_y: 0,
             pre_zoom_width: 0,
@@ -389,6 +393,7 @@ impl Window {
             cwd_cache: super::cwd::CwdCache::new(),
             last_size: None,
             zoomed: false,
+            minimized: false,
             pre_zoom_x: 0,
             pre_zoom_y: 0,
             pre_zoom_width: 0,

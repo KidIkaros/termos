@@ -557,8 +557,25 @@ pub fn dock_item_label(number: i32, name: &str) -> String {
 
 /// All dock items (minimized windows in the current workspace).
 pub fn get_dock_items(os: &Os) -> Vec<DockItem> {
-    let _ = os;
-    Vec::new()
+    let mut items = Vec::new();
+    for (idx, window) in os.windows.iter().enumerate() {
+        // Only include minimized windows on the current workspace.
+        if window.minimized && os.window_on_current_workspace(idx) {
+            let label = if window.title.is_empty() {
+                format!(" {} ", idx + 1)
+            } else {
+                format!(" {}:{} ", idx + 1, window.title.chars().take(10).collect::<String>())
+            };
+            let width = label.chars().count() + 1; // pill padding
+            items.push(DockItem {
+                window_index: idx as i32,
+                label,
+                width,
+                minimized: true,
+            });
+        }
+    }
+    items
 }
 
 // ---------------------------------------------------------------------------
