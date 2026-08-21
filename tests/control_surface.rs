@@ -101,6 +101,10 @@ fn subscribe_until_closed(path: &Path, session: &str, window: &str) -> String {
 
 #[test]
 fn control_surface_end_to_end() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping control_surface test");
+        return;
+    }
     let (_dir, socket) = start_daemon();
     let mut conn = VerbConn::connect(&socket);
 
@@ -208,6 +212,10 @@ fn window_ids_stay_unique_across_close_and_reopen() {
     // closing a window made the next spawn reuse its id (two live windows
     // both named "w2" — scripting targets silently hit the wrong pane).
     // Ids must be monotonic per session and never repeat.
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping control_surface test");
+        return;
+    }
     let (_dir, socket) = start_daemon();
     let mut conn = VerbConn::connect(&socket);
 
@@ -300,6 +308,10 @@ fn exec_flow_reports_output_and_exit_code() {
     // Replicates `termos exec` against a real daemon: fresh session, tail the
     // pane (ack before any input so nothing is missed), send `cmd; exit $?`,
     // and report the streamed output and the command's own exit code.
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping control_surface test");
+        return;
+    }
     let (_dir, socket) = start_daemon();
     let mut ctrl = VerbConn::connect(&socket);
 
@@ -417,6 +429,10 @@ fn exec_flow_reports_output_and_exit_code() {
 fn exec_flags_shell_and_cwd_reach_the_pane() {
     // `termos exec --shell <sh> --cwd <dir>` must pick the pane's shell and
     // start it in the directory — verified by asking the pane itself.
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping control_surface test");
+        return;
+    }
     let (dir, socket) = start_daemon();
     let mut ctrl = VerbConn::connect(&socket);
 
@@ -493,6 +509,10 @@ fn exec_flags_shell_and_cwd_reach_the_pane() {
 
 #[test]
 fn verb_client_round_trip_over_a_real_socket() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping control_surface test");
+        return;
+    }
     let (_dir, socket) = start_daemon();
     let mut client = VerbClient::connect_to(&socket).unwrap();
     let result = client

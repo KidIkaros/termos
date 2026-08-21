@@ -47,6 +47,7 @@ impl Os {
             Msg::Resize { cols, rows } => {
                 self.width = cols as i32;
                 self.height = rows as i32;
+                self.damage_resize(cols as i32, rows as i32);
                 self.sync_window_sizes();
                 Vec::new()
             }
@@ -85,6 +86,7 @@ impl Os {
                 } else {
                     self.theme = crate::config::Theme::built_in(&self.config.appearance.theme);
                 }
+                self.damage_full(crate::app::damage::DamageReason::Theme);
                 self.notify("config reloaded", "info");
                 Vec::new()
             }

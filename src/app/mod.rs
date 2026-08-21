@@ -10,6 +10,7 @@ pub mod actions;
 pub mod agent_alert;
 pub mod border_grid;
 pub mod clipboard;
+pub mod damage;
 pub mod copymode_ext;
 pub mod dock;
 pub mod dock_session_buttons;
@@ -755,6 +756,8 @@ pub struct Os {
     pub copy_search_state: copymode_ext::SearchState,
     /// Count prefix state for vim-style {count}motion.
     pub copy_count: copymode_ext::CountState,
+    /// Whether the previous copy-mode command was `g`, awaiting a second `g`.
+    pub copy_pending_g: bool,
     /// Mark store for vim-style marks (m{letter} / '{letter}).
     pub copy_marks: copymode_ext::MarkStore,
     /// Register store for vim-style named registers ("{letter}y).
@@ -871,6 +874,8 @@ pub struct Os {
     /// Whether a state/input change requires a new frame. PTY output is also
     /// detected through each window's dirty flag.
     render_requested: bool,
+    /// Damage rectangles for incremental compositor rendering.
+    pub damage: crate::app::damage::DamageSet,
     /// Active window animations (minimize/restore/snap), keyed by window id.
     animations: HashMap<i32, crate::ui::animation::Animation>,
     /// Whether the client's pointer is a finger (per-session, set by the web
@@ -1061,6 +1066,16 @@ fn rows_overlap(y1: i32, h1: i32, y2: i32, h2: i32) -> bool {
     y1 < y2 + h2 && y2 < y1 + h1
 }
 
+/// Expand a rect by `margin` cells on all sides, clamped to non-negative.
+fn expand_rect(r: Rect, margin: i32) -> Rect {
+    Rect {
+        x: (r.x - margin).max(0),
+        y: (r.y - margin).max(0),
+        w: (r.w + margin * 2).max(1),
+        h: (r.h + margin * 2).max(1),
+    }
+}
+
 /// A dock notification.
 #[derive(Debug, Clone)]
 pub struct Notification {
@@ -1165,6 +1180,7 @@ impl Os {
             copy_search_typing: false,
             copy_search_state: copymode_ext::SearchState::new(),
             copy_count: copymode_ext::CountState::new(),
+            copy_pending_g: false,
             copy_marks: copymode_ext::MarkStore::new(),
             copy_registers: copymode_ext::RegisterStore::new(),
             copy_pending_register: None,
@@ -1225,6 +1241,7 @@ impl Os {
             hold_mode: interaction::HoldMode::new(),
             tick_stats: interaction::TickStats::new(),
             render_requested: true,
+            damage: crate::app::damage::DamageSet::new(Rect { x: 0, y: 0, w: 0, h: 0 }),
             animations: HashMap::new(),
             touch_client: false,
             read_only: false,
@@ -1262,6 +1279,55 @@ impl Os {
     /// Request a frame after an input, state, or configuration change.
     pub fn request_render(&mut self) {
         self.render_requested = true;
+    }
+
+    /// Mark the compositor's full bounds as dirty (theme, resize, workspace).
+    pub fn damage_full(&mut self, reason: crate::app::damage::DamageReason) {
+        self.damage.mark_full(reason);
+        self.request_render();
+    }
+
+    /// Mark a specific rectangle as dirty (pane output, float movement, overlay).
+    pub fn damage_rect(&mut self, rect: Rect, reason: crate::app::damage::DamageReason) {
+        self.damage.mark(rect, reason);
+        self.request_render();
+    }
+
+    /// Update the damage set's bounds (called on resize).
+    pub fn damage_resize(&mut self, width: i32, height: i32) {
+        self.damage = crate::app::damage::DamageSet::new(Rect { x: 0, y: 0, w: width, h: height });
+        self.damage_full(crate::app::damage::DamageReason::Resize);
+    }
+
+    /// Drain pending damage for a frame.
+    pub fn damage_take(&mut self) -> Vec<crate::app::damage::DamageRect> {
+        self.damage.take()
+    }
+
+    /// Walk dirty windows and mark their pane rects as output damage.
+    /// Call this right before `render()` so the compositor knows which
+    /// regions have new content.
+    pub fn collect_pane_damage(&mut self) {
+        let dirty_indices: Vec<usize> = self
+            .windows
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.is_dirty())
+            .map(|(i, _)| i)
+            .collect();
+        let layout = self.current_layout();
+        let mut rects: Vec<Rect> = Vec::with_capacity(dirty_indices.len());
+        for idx in &dirty_indices {
+            if let Some(rect) = layout.get(&(*idx as i32)) {
+                rects.push(*rect);
+            } else if let Some(fi) = self.float_for_window(*idx) {
+                rects.push(self.floats[fi].rect());
+            }
+        }
+        drop(layout);
+        for rect in rects {
+            self.damage_rect(rect, crate::app::damage::DamageReason::Output);
+        }
     }
 
     /// Whether a frame is currently needed. PTY output and active animations
@@ -1335,6 +1401,7 @@ impl Os {
     /// Cycle the layout mode: BSP → Master-Stack → Scrolling → BSP.
     pub fn cycle_layout_mode(&mut self) {
         self.layout_mode = self.layout_mode.next();
+        self.damage_full(crate::app::damage::DamageReason::Resize);
         // Invalidate the layout cache so the new mode takes effect immediately.
         if let Ok(mut cache) = self.layout_cache.lock() {
             *cache = None;
@@ -1784,7 +1851,15 @@ impl Os {
     /// state), or a dock pill tooltip if hovering the dock bar.
     pub fn hover_target_at(&self, x: i32, y: i32) -> Option<String> {
         // Dock bar hover: show window title for the pill under cursor.
-        if self.config.appearance.mouse_friendly && y >= self.height - 1 {
+        let dock_row = if self.config.appearance.dockbar_position == "top" {
+            0
+        } else {
+            self.height - 1
+        };
+        if self.config.appearance.mouse_friendly
+            && self.config.appearance.dockbar_position != "hidden"
+            && y == dock_row
+        {
             if let Some(idx) = self.dock_item_at(x, y) {
                 let window = self.windows.get(idx)?;
                 let mut text = window.title.clone();
@@ -3416,6 +3491,7 @@ impl Os {
         if number == previous {
             return;
         }
+        self.damage_full(crate::app::damage::DamageReason::Full);
         self.current_workspace = number;
         self.focused_window = self.workspace(number).focused;
         self.prefix = Prefix::None;
@@ -4352,6 +4428,12 @@ impl Os {
                 rows: r.h.max(1) as u16,
             });
         }
+        // Damage old position + new position, including shadow margin.
+        let margin = 3;
+        let old_rect = expand_rect(drag.start_rect, margin);
+        let new_rect = expand_rect(r, margin);
+        self.damage_rect(old_rect, crate::app::damage::DamageReason::Geometry);
+        self.damage_rect(new_rect, crate::app::damage::DamageReason::Geometry);
         self.float_drag = Some(drag);
     }
 
@@ -4866,6 +4948,7 @@ impl Os {
         self.copy_search_query.clear();
         self.copy_search_state.clear();
         self.copy_count.reset();
+        self.copy_pending_g = false;
         self.copy_pending_register = None;
         self.copy_pending_mark = None;
         self.selection = None;
@@ -4938,6 +5021,12 @@ impl Os {
     pub fn copy_move_col(&mut self, delta: i32) {
         self.copy_cursor_col = (self.copy_cursor_col + delta).max(0);
         self.sync_selection_cursor();
+    }
+
+    /// Move a copy-mode line motion by a vim count.
+    pub fn copy_move_lines(&mut self, delta: i32, count: usize) {
+        let distance = delta.saturating_mul(count.min(i32::MAX as usize) as i32);
+        self.copy_move_line(distance);
     }
 
     /// Jump the copy-mode cursor to the oldest line.
@@ -6207,8 +6296,16 @@ impl Os {
     /// Hit-test the dock bar: returns the window index if the click lands
     /// on a dock pill, or `None` otherwise.  Computes layout on demand.
     pub fn dock_item_at(&self, column: i32, row: i32) -> Option<usize> {
-        // Only the bottom row is the dock.
-        if row < self.height - 1 {
+        let dock_position = self.config.appearance.dockbar_position.as_str();
+        if dock_position == "hidden" {
+            return None;
+        }
+        let dock_row = if dock_position == "top" {
+            0
+        } else {
+            self.height - 1
+        };
+        if row != dock_row {
             return None;
         }
         let layout = crate::app::dock::calculate_dock_layout(self);
@@ -6541,6 +6638,7 @@ impl Os {
             _ => "dark",
         };
         self.theme = applied;
+        self.damage_full(crate::app::damage::DamageReason::Theme);
         self.notify(format!("theme: {name} ({mode_name} detected)"), "info");
         self.log_action(&format!("theme_detect {name}"));
     }
@@ -7637,13 +7735,13 @@ mod tests {
         let mut os = test_os();
         os.prefix = Prefix::Tape; // narrow which-key popup
         let mut terminal = Terminal::new(TestBackend::new(80, 25)).unwrap();
-        terminal.draw(|f| render(&os, f.buffer_mut())).unwrap();
+        terminal.draw(|f| render(&os, f.buffer_mut(), &[])).unwrap();
         os.prefix = Prefix::None;
         os.tape_manager_open = true; // tape manager overlay
-        terminal.draw(|f| render(&os, f.buffer_mut())).unwrap();
+        terminal.draw(|f| render(&os, f.buffer_mut(), &[])).unwrap();
         os.tape_manager_open = false;
         os.switcher_open = true; // switcher overlay
-        terminal.draw(|f| render(&os, f.buffer_mut())).unwrap();
+        terminal.draw(|f| render(&os, f.buffer_mut(), &[])).unwrap();
     }
 
     #[test]
@@ -7677,14 +7775,14 @@ mod tests {
         os.sync_window_sizes();
 
         let mut terminal = Terminal::new(TestBackend::new(80, 25)).unwrap();
-        terminal.draw(|f| render(&os, f.buffer_mut())).unwrap();
+        terminal.draw(|f| render(&os, f.buffer_mut(), &[])).unwrap();
         assert!(os.windows[0]
             .render_cache
             .lock()
             .unwrap()
             .as_ref()
             .is_some());
-        terminal.draw(|f| render(&os, f.buffer_mut())).unwrap();
+        terminal.draw(|f| render(&os, f.buffer_mut(), &[])).unwrap();
         let buf = terminal.backend().buffer();
         // The border ring: row 0 is the top edge, column 0/79 are the sides.
         assert_eq!(buf[(0, 0)].symbol(), "╭");
@@ -8147,6 +8245,17 @@ mod tests {
         assert!(!os.focused_is_modal());
         os.focus_next();
         assert_eq!(os.focused_window, Some(1));
+    }
+
+    #[test]
+    fn dock_item_hit_uses_top_and_hidden_positions() {
+        let mut os = float_test_os();
+        os.config.appearance.dockbar_position = "top".into();
+        assert!(os.dock_item_at(0, 0).is_none());
+        os.config.appearance.dockbar_position = "bottom".into();
+        assert!(os.dock_item_at(0, os.height - 1).is_none());
+        os.config.appearance.dockbar_position = "hidden".into();
+        assert!(os.dock_item_at(0, 0).is_none());
     }
 
     #[test]
@@ -9908,5 +10017,112 @@ mod layout_mode_tests {
         let cfg = crate::config::UserConfig::default_config();
         assert_eq!(cfg.appearance.layout_mode, "");
         assert!((cfg.appearance.master_ratio - 0.5).abs() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod damage_wiring_tests {
+    use super::*;
+    use crate::app::damage::DamageReason;
+
+    /// Build Os with two fake windows and a valid DamageSet.
+    fn os_with_two() -> Os {
+        let mut os = Os::new(UserConfig::default_config());
+        os.width = 80;
+        os.height = 25;
+        os.damage_resize(80, 25);
+        os.damage_take(); // drain the full Resize damage so tests start clean
+        os.push_fake_window("win-0", "Terminal", SplitType::Vertical);
+        os.push_fake_window("win-1", "Terminal", SplitType::Vertical);
+        os
+    }
+
+    #[test]
+    fn damage_full_marks_bounds_and_requests_render() {
+        let mut os = os_with_two();
+        os.render_requested = false;
+        os.damage_full(DamageReason::Theme);
+        assert!(os.render_requested);
+        assert!(os.damage.is_full());
+
+        let taken = os.damage_take();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].reason, DamageReason::Theme);
+        assert!(os.damage.is_empty());
+    }
+
+    #[test]
+    fn damage_rect_marks_specific_region() {
+        let mut os = os_with_two();
+        os.render_requested = false;
+        let rect = Rect { x: 10, y: 4, w: 12, h: 6 };
+        os.damage_rect(rect, DamageReason::Output);
+        assert!(os.render_requested);
+
+        let taken = os.damage_take();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].rect, rect);
+        assert_eq!(taken[0].reason, DamageReason::Output);
+    }
+
+    #[test]
+    fn damage_resize_replaces_bounds_and_full_marks() {
+        let mut os = os_with_two();
+        os.damage_rect(Rect { x: 0, y: 0, w: 5, h: 5 }, DamageReason::Output);
+        os.damage_resize(120, 40);
+
+        assert!(os.damage.is_full());
+        assert_eq!(os.damage.bounds(), Rect { x: 0, y: 0, w: 120, h: 40 });
+
+        let taken = os.damage_take();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].reason, DamageReason::Resize);
+    }
+
+    #[test]
+    fn collect_pane_damage_marks_dirty_windows() {
+        let mut os = os_with_two();
+        // Fake windows start dirty (no PTY output has been consumed yet).
+        assert!(os.windows.iter().all(|w| w.is_dirty()));
+
+        os.collect_pane_damage();
+
+        let taken = os.damage_take();
+        assert!(!taken.is_empty());
+        assert!(taken.iter().all(|d| d.reason == DamageReason::Output));
+    }
+
+    #[test]
+    fn collect_pane_damage_skips_clean_windows() {
+        let mut os = os_with_two();
+        for w in &os.windows {
+            w.clear_dirty();
+        }
+        assert!(os.damage.is_empty());
+
+        os.collect_pane_damage();
+
+        assert!(os.damage.is_empty());
+    }
+
+    #[test]
+    fn damage_resize_seeds_bounds_for_first_frame() {
+        let mut os = Os::new(UserConfig::default_config());
+        os.width = 80;
+        os.height = 25;
+        // Before damage_resize, bounds are (0,0,0,0).
+        assert_eq!(os.damage.bounds(), Rect { x: 0, y: 0, w: 0, h: 0 });
+
+        // Simulate what set_os_size does.
+        os.damage_resize(os.width, os.height);
+
+        assert_eq!(os.damage.bounds(), Rect { x: 0, y: 0, w: 80, h: 25 });
+        assert!(os.damage.is_full());
+
+        let taken = os.damage_take();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].reason, DamageReason::Resize);
+        assert_eq!(taken[0].rect, Rect { x: 0, y: 0, w: 80, h: 25 });
+        assert!(os.damage.is_empty());
     }
 }

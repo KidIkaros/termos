@@ -1969,8 +1969,10 @@ fn run_remote_event_loop(
         // requires a frame.
         if last_render.elapsed() >= frame_budget && os.needs_render() {
             let render_started = Instant::now();
+            os.collect_pane_damage();
+            let damage = os.damage_take();
             terminal.draw(|frame| {
-                render(os, frame.buffer_mut());
+                render(os, frame.buffer_mut(), &damage);
             })?;
             os.tick_stats.record_frame(render_started.elapsed());
             os.mark_rendered();
@@ -2258,6 +2260,7 @@ fn run_local_tui_with_overrides(overrides: &Overrides) -> Result<(), Box<dyn std
 }
 
 /// Resize `os` to the terminal's current size, with a sane headless fallback.
+/// Seeds the damage set so the first render has valid bounds.
 fn set_os_size(os: &mut Os) {
     if let Ok((cols, rows)) = crossterm::terminal::size() {
         os.width = cols.max(1) as i32;
@@ -2269,6 +2272,7 @@ fn set_os_size(os: &mut Os) {
     if os.height < 2 {
         os.height = 24;
     }
+    os.damage_resize(os.width, os.height);
 }
 
 fn run_event_loop(
@@ -2301,8 +2305,10 @@ fn run_event_loop(
         // animation, or input state has requested one.
         if last_render.elapsed() >= frame_budget && os.needs_render() {
             let render_started = Instant::now();
+            os.collect_pane_damage();
+            let damage = os.damage_take();
             terminal.draw(|frame| {
-                render(os, frame.buffer_mut());
+                render(os, frame.buffer_mut(), &damage);
             })?;
             os.tick_stats.record_frame(render_started.elapsed());
             os.mark_rendered();
@@ -3109,7 +3115,10 @@ fn cmd_wizard() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- 2. Border style ---
     println!("Step 2/6: Border style");
-    let border_styles = ["rounded", "single", "double", "plain", "ascii"];
+    let border_styles = [
+        "rounded", "normal", "thick", "double", "plain", "block", "outer-half-block",
+        "inner-half-block", "hidden", "ascii",
+    ];
     let border_idx = pick("  Choose a border style:", &border_styles, 0);
     let border_style = border_styles[border_idx];
     println!();

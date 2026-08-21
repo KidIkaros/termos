@@ -46,6 +46,23 @@ pub struct BackgroundKey {
     pub dock: (u8, u8, u8),
 }
 
+/// RGB color used by cell compositors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rgb(pub u8, pub u8, pub u8);
+
+/// A terminal-cell compositor surface.
+///
+/// Implementations produce one RGB color per terminal cell. Text and widgets
+/// remain a separate composition layer, which keeps this contract usable by
+/// both the current Ratatui backend and a future asciline-based backend.
+pub trait CellCompositor {
+    fn resize(&mut self, width: usize, height: usize);
+    fn begin_frame(&mut self, background: Rgb);
+    fn finish_frame(&self) -> &[u8];
+    fn width(&self) -> usize;
+    fn height(&self) -> usize;
+}
+
 pub struct PixelCanvas {
     /// RGB framebuffer: `[R, G, B]` per cell, `width * height * 3` bytes.
     rgb: Vec<u8>,
@@ -56,6 +73,30 @@ pub struct PixelCanvas {
     /// instead of recomputed gradients/lerps.
     bg_cache_key: Option<BackgroundKey>,
     bg_cache: Vec<u8>,
+}
+
+impl CellCompositor for PixelCanvas {
+    fn resize(&mut self, width: usize, height: usize) {
+        if self.width != width || self.height != height {
+            *self = Self::new(width, height);
+        }
+    }
+
+    fn begin_frame(&mut self, background: Rgb) {
+        self.clear(background.0, background.1, background.2);
+    }
+
+    fn finish_frame(&self) -> &[u8] {
+        self.rgb()
+    }
+
+    fn width(&self) -> usize {
+        self.width()
+    }
+
+    fn height(&self) -> usize {
+        self.height()
+    }
 }
 
 impl PixelCanvas {
@@ -156,6 +197,11 @@ impl PixelCanvas {
     /// Get the RGB framebuffer for rendering.
     pub fn rgb(&self) -> &[u8] {
         &self.rgb
+    }
+
+    /// Get mutable access to the RGB framebuffer for compositor adapters.
+    pub fn rgb_mut(&mut self) -> &mut [u8] {
+        &mut self.rgb
     }
 
     /// Width in cells.
@@ -570,6 +616,18 @@ fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cell_compositor_lifecycle_preserves_dimensions_and_framebuffer() {
+        let mut canvas = PixelCanvas::new(3, 2);
+        CellCompositor::begin_frame(&mut canvas, Rgb(10, 20, 30));
+        assert_eq!(CellCompositor::finish_frame(&canvas).len(), 18);
+        assert_eq!(CellCompositor::finish_frame(&canvas)[..3], [10, 20, 30]);
+        CellCompositor::resize(&mut canvas, 4, 1);
+        assert_eq!(CellCompositor::width(&canvas), 4);
+        assert_eq!(CellCompositor::height(&canvas), 1);
+        assert_eq!(CellCompositor::finish_frame(&canvas).len(), 12);
+    }
 
     #[test]
     fn canvas_creation() {

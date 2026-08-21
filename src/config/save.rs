@@ -23,7 +23,7 @@ fn config_file_header(config_path: &str) -> String {
     sb.push_str("# Many of these can be changed live from the in-app settings page\n");
     sb.push_str("# (open it with the leader key followed by ',').\n");
     sb.push_str("#\n");
-    sb.push_str("# border_style: rounded, single, double, plain, ascii\n");
+    sb.push_str("# border_style: rounded, normal, thick, double, plain, block, outer-half-block, inner-half-block, hidden, ascii\n");
     sb.push_str("# dockbar_position: bottom, top, hidden\n");
     sb.push_str("# window_title_position: bottom, top, hidden\n");
     sb.push_str("# theme: color theme name (e.g. dracula, nord); empty for terminal colors;\n");

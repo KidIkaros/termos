@@ -41,6 +41,10 @@ fn start_daemon() -> (tempfile::TempDir, DaemonClient) {
 
 #[test]
 fn daemon_create_attach_input_output_kill() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping daemon test");
+        return;
+    }
     let (_dir, client) = start_daemon();
 
     // Create a session whose first window is a shell.
@@ -91,6 +95,10 @@ fn daemon_create_attach_input_output_kill() {
 
 #[test]
 fn daemon_rejects_duplicate_session_and_broadcasts_to_two_clients() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping daemon test");
+        return;
+    }
     let (dir, client) = start_daemon();
     let socket = dir.path().join("tuios.sock");
     client.new_session("dup", "/bin/sh").unwrap();
@@ -144,6 +152,10 @@ fn daemon_rejects_duplicate_session_and_broadcasts_to_two_clients() {
 
 #[test]
 fn daemon_lists_and_kills_missing_session() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping daemon test");
+        return;
+    }
     let (_dir, client) = start_daemon();
     assert!(client.kill("nope").is_err());
     let list = client.list().unwrap();
@@ -154,6 +166,10 @@ fn daemon_lists_and_kills_missing_session() {
 /// closes (the authoritative fire sites for daemon-mode windows).
 #[test]
 fn daemon_fires_window_lifecycle_hooks() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping daemon test");
+        return;
+    }
     use std::sync::Mutex;
     use std::time::Instant;
 
@@ -265,6 +281,10 @@ fn daemon_fires_window_lifecycle_hooks() {
 /// the `AgentStateChanged` broadcast.
 #[test]
 fn daemon_set_agent_state_broadcasts_to_clients() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping daemon test");
+        return;
+    }
     use std::sync::Mutex;
 
     isolate_state_dir();
@@ -361,6 +381,10 @@ fn daemon_set_agent_state_broadcasts_to_clients() {
 /// work headlessly against the daemon's output rings.
 #[test]
 fn daemon_agent_verbs_work_headlessly() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping daemon test");
+        return;
+    }
     isolate_state_dir();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("tuios.sock");
@@ -471,6 +495,10 @@ fn daemon_agent_verbs_work_headlessly() {
 /// `tape exec` streams parsed commands to the session's attached clients.
 #[test]
 fn daemon_tape_exec_broadcasts_commands() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping daemon test");
+        return;
+    }
     isolate_state_dir();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("tuios.sock");
@@ -522,6 +550,10 @@ fn daemon_tape_exec_broadcasts_commands() {
 
 #[test]
 fn multi_client_both_see_session_list() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping daemon test");
+        return;
+    }
     let (dir, client_a) = start_daemon();
     let socket = dir.path().join("tuios.sock");
 
@@ -553,6 +585,10 @@ fn multi_client_both_see_session_list() {
 
 #[test]
 fn set_session_name_sets_label() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping daemon test");
+        return;
+    }
     let (_dir, client) = start_daemon();
     client
         .send(&Message::New {
@@ -581,6 +617,10 @@ fn set_session_name_sets_label() {
 
 #[test]
 fn kill_server_stops_daemon() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping daemon test");
+        return;
+    }
     let (dir, client) = start_daemon();
     let socket = dir.path().join("tuios.sock");
 

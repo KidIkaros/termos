@@ -464,9 +464,11 @@ impl TermosSshServer {
                         // Create a terminal backend writing to our buffer.
                         let backend = CrosstermBackend::new(&mut buf);
                         if cs.os.needs_render() {
+                            cs.os.collect_pane_damage();
+                            let damage = cs.os.damage_take();
                             if let Ok(mut terminal) = Terminal::new(backend) {
                                 let _ = terminal.draw(|frame| {
-                                    render(&cs.os, frame.buffer_mut());
+                                    render(&cs.os, frame.buffer_mut(), &damage);
                                 });
                                 // Force flush the backend to write to buf.
                                 let _ = terminal.backend_mut().flush();
@@ -600,6 +602,7 @@ impl Handler for TermosSshServer {
             }
             cs.os.width = col_width as i32;
             cs.os.height = row_height as i32;
+            cs.os.damage_resize(col_width as i32, row_height as i32);
             cs.os.sync_window_sizes();
         }
         session.channel_success(channel);
@@ -619,6 +622,7 @@ impl Handler for TermosSshServer {
         if let Some(cs) = clients.values_mut().last() {
             cs.os.width = col_width as i32;
             cs.os.height = row_height as i32;
+            cs.os.damage_resize(col_width as i32, row_height as i32);
             cs.os.sync_window_sizes();
         }
         Ok(())

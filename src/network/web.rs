@@ -588,6 +588,7 @@ async fn handle_ws(
         os.width = 80;
         os.height = 24;
     }
+    os.damage_resize(os.width, os.height);
 
     // Wire the session: a named request attaches to a daemon session;
     // otherwise spawn a fresh local shell (backwards compatible).
@@ -679,9 +680,11 @@ async fn handle_ws(
                 // Create a terminal backend writing to our buffer.
                 let backend = CrosstermBackend::new(&mut buf);
                 if os.needs_render() {
+                    os.collect_pane_damage();
+                    let damage = os.damage_take();
                     if let Ok(mut terminal) = Terminal::new(backend) {
                         let _ = terminal.draw(|frame| {
-                            render(&os, frame.buffer_mut());
+                            render(&os, frame.buffer_mut(), &damage);
                         });
                         let _ = terminal.backend_mut().flush();
                     }

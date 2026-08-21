@@ -1,0 +1,16 @@
+# TermOS Cargo configuration
+#
+# test-threads is capped at 4 to bound peak PTY consumption during `cargo test`.
+# The system PTY limit is 4096; each PTY-spawning test can hold open ≥1 PTY
+# for 30 s, and at 12 threads the test suite can exhaust the kernel pool,
+# blocking the rest of the system.
+#
+# PTY_POOL_CAPACITY in src/terminal/pty.rs is also set to 4 so the pool's
+# back-pressure semaphore matches this thread cap.  To run with more threads
+# (e.g. on a machine with higher pty/max), override on the command line:
+#
+#   cargo test -- --test-threads=8
+
+[test]
+# Maximum concurrent test threads.  Keep ≤ PTY_POOL_CAPACITY (src/terminal/pty.rs).
+test-threads = 4

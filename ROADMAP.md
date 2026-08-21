@@ -733,6 +733,231 @@ terminal users and GUI power users.  Based on `docs/RESEARCH_TUI_APPROACHABILITY
   Set to `false` to disable dock mouse interaction.
 - ✅ **Unit tests** for `dock_item_at` edge cases.
 
+## Phase 28 — CPU compositor architecture and Liquid Glass-ready rendering 🚧
+
+### Destination
+
+Deliver a portable, CPU-only TermOS cell compositor based on the techniques in
+`asciline-rust`, while preserving Ratatui text/widgets and all terminal,
+SSH, and web clients. The result should make the terminal frontend feel more
+like a modern layered UI without pretending that terminal cells can provide
+true desktop backdrop blur.
+
+### Scope and decisions
+
+- The compositor targets terminal-cell output first: RGB cell surfaces,
+  gradients, shadows, rounded surfaces, sparklines, frame caching, and damage
+  tracking.
+- `asciline-rust` is the reference and possible focused dependency for
+  row-parallel mapping and encoding. We will not import its ffmpeg, video
+  player, WebSocket server, or ASC2 container unless a separate product need
+  justifies them.
+- No GPU is required. CPU/Rayon performance is the baseline and must be
+  measured on machines with and without many cores.
+- Ratatui remains responsible for terminal text, widgets, and compatibility.
+  A native GPU GUI is explicitly out of scope for this phase and can consume
+  the later renderer-neutral scene boundary.
+
+### Milestones
+
+1. **Baseline and API audit** — freeze current `PixelCanvas` benchmarks and
+   inspect the exact public asciline mapper/encoder APIs. Record dimensions,
+   allocations, frame time, ANSI bytes, and terminal redraw rate.
+2. **Compositor seam** — introduce a small `CellCompositor` trait plus RGB,
+   surface, shadow, and damage-region types. Add a `PixelCanvasCompositor`
+   adapter with no visual behavior change.
+3. **Scene/effect ownership** — move background fills, gradients, shadows,
+   rounded-corner blending, and sparklines behind the trait. Keep Ratatui
+   painting text over the compositor output.
+4. **Asciline prototype backend** — implement the mapper/encoding adapter in a
+   feature-gated module or local integration. Start with one operation at a
+   time; do not couple TermOS to asciline's video pipeline.
+5. **Benchmark decision** — compare direct RGB, asciline-backed mapping, and
+   ANSI run-length encoding at 80×24, 120×40, 240×67, and 480×135. Measure
+   cold and cached frames, one-core and default Rayon settings, allocations,
+   output bytes, and visual equivalence.
+6. **Dogfood and hardening** — test top/bottom/hidden docks, floats, overlays,
+   wide and combining glyphs, SSH/web output, small terminals, resize churn,
+   and reduced-core environments. Enable the asciline path only if it is
+   measurably better and deterministic.
+
+### Acceptance criteria
+
+- The existing terminal UI remains pixel-equivalent or intentionally
+  documented where the new compositor differs.
+- No GPU, ffmpeg, or desktop runtime is required for the default build.
+- The compositor adds no unbounded per-frame allocations and does not regress
+  the current render benchmark by more than 5% on the baseline workload.
+- CPU-only output is deterministic across Rayon thread counts.
+- ANSI output remains compatible with local terminals, SSH, and web/remote
+  clients.
+- A benchmark report records when the asciline backend wins, ties, or loses;
+  retaining the direct implementation is an acceptable result.
+
+### Initial benchmark finding
+
+The first mapper-only run was informative but not yet a backend decision. The
+initial direct-RGB benchmark measured a no-op/read loop rather than a real
+frame copy, so it understated the direct path. After correcting it to use a
+real `copy_from_slice`, the asciline mapper remained a separate BGR transform
+rather than an obvious win: any advantage at larger frames must be weighed
+against the required channel-layout conversion and final Ratatui flush. The
+benchmark therefore remains an experiment, not a reason to make asciline the
+default.
+
+### Refined implementation plan
+
+The target is **GPU-like visual quality at CPU cost**, not literal GPU
+throughput. A terminal frame contains tens of thousands of cells rather than
+millions of desktop pixels, so the winning strategy is to avoid recomputing
+unchanged cells and reserve parallel CPU work for large dirty regions.
+
+- ⬜ Add `DamageSet`: merge dirty rectangles and track reasons such as PTY
+  output, float movement, overlay changes, dock/theme changes, and resize.
+  Moving a float damages both its old and new bounds plus its shadow margin.
+- ⬜ Add retained compositor surfaces keyed by bounds, theme revision, effect
+  revision, and content revision. Background, dock, shadows, and overlays
+  should be reusable across frames.
+- ✅ Keep Ratatui's existing pane render cache and window dirty flags as the
+  text-layer baseline; compositor damage must not replace semantic VT dirty
+  tracking.
+- ⬜ Change the compositor contract toward `compose_into(scene, target,
+  damage)` so implementations can write directly into the final RGB target
+  instead of requiring an intermediate full-frame copy.
+- ⬜ Add an asciline RGB-output mapper or channel-order parameter upstream/local
+  adapter. Do not pay a BGR→RGB pass when the final target is RGB.
+- ⬜ Use scalar loops below a measured cell threshold and Rayon above it. The
+  threshold must be configurable for benchmarks and deterministic output must
+  hold across worker counts.
+- ⬜ Replace floating-point hot-path blending with cached fixed-point blend,
+  gradient, SDF, and shadow tables where measurements justify it.
+- ⬜ Benchmark damage ratios of 1%, 10%, 50%, and 100%, including effects,
+  mapping, Ratatui flush, and ANSI serialization. Mapper-only wins do not
+  qualify as backend wins.
+- ⬜ Add capability tiers: true-color RGB, indexed 256-color, and ANSI-only
+  fallback. Effects degrade predictably when the terminal cannot display RGB.
+
+### Backend decision gate
+
+Adopt an asciline-backed path only if it improves the full pipeline at the
+workloads TermOS actually sees, does not regress small terminals, preserves
+visual equivalence, and remains deterministic. Otherwise retain direct RGB as
+the default and keep the asciline adapter as an optional large-frame or
+high-rate path.
+
+### Risks and explicit non-goals
+
+- Terminal-cell RGB is not true alpha compositing: “glass” is simulated with
+  gradients, contrast, shadows, and controlled translucency.
+- CPU parallelism can cost more than it saves for small terminal sizes; the
+  backend must avoid Rayon overhead on tiny frames.
+- ANSI transport and terminal repaint may dominate mapper time, so mapper-only
+  wins are insufficient.
+- True desktop blur, subpixel window geometry, native accessibility, and
+  high-DPI GUI surfaces belong to a future graphical frontend.
+
+
+TermOS currently renders through ratatui/crossterm. That remains the correct
+terminal-native backend: it preserves SSH, web, tmux, Kitty/Sixel passthrough,
+and the existing low-dependency distribution. However, a terminal cannot
+provide true iOS-style Liquid Glass because the terminal owns the final
+compositor; blur of arbitrary desktop content, translucent window materials,
+subpixel positioning, native titlebars, and GPU composition are outside the
+cell protocol.
+
+The goal of this phase is **not** an immediate ratatui rewrite. It is to make
+TermOS renderer-neutral enough to add a graphical client later while keeping
+the terminal client stable.
+
+### Target architecture
+
+```text
+                         ┌── Ratatui + crossterm ── terminal / SSH
+Os + VT + sessions ─────┤
+   shared UI snapshot    ├── xterm.js / WebSocket ── web client
+                         └── GPU GUI frontend ───── desktop Liquid Glass
+```
+
+- ✅ Research decision: retain ratatui for terminal text/widgets, but treat
+  the existing CPU-only asciline-inspired `PixelCanvas` as the seed of a
+  TermOS cell compositor. The repository's asciline-rust renderer uses Rust +
+  Rayon CPU parallelism; it does not require a GPU. Electron is viable but
+  unnecessarily heavy for a Rust-first app. GPUI/Slint/Tauri/wgpu remain
+  options only for a later native desktop client. See the renderer comparison
+  below.
+- ⬜ Define a renderer-neutral `UiSnapshot`/`RenderState` containing pane
+  geometry, modes, dock/session state, overlays, selections, theme tokens,
+  graphics placements, and input hit regions. It must contain no ratatui,
+  crossterm, or terminal buffer types.
+- ⬜ Extract input intent from terminal events: map keyboard/mouse events into
+  shared commands while retaining terminal-specific escape encoding at the
+  Ratatui boundary.
+- ⬜ Add a snapshot adapter from `Os` without changing the current renderer.
+- ⬜ Build a headless snapshot test fixture covering panes, floats, overlays,
+  dock positions, zoom, selections, and theme changes.
+- ⬜ Extract a `CellCompositor` seam around the existing `PixelCanvas`; use
+  asciline's CPU mapper/encoding techniques where they improve throughput,
+  without importing its video server, ffmpeg pipeline, WebSocket server, or
+  container format.
+- ⬜ Prototype one graphical client against the snapshot boundary. Compare
+  GPUI, Slint, and Tauri on startup cost, binary size, accessibility, IME/
+  clipboard support, GPU effects, packaging, and maintenance burden before
+  committing to a production frontend.
+- ⬜ Implement Liquid Glass materials in the selected GUI backend: blur,
+  translucent surfaces, elevation/shadows, rounded clipping, animated
+  transitions, high-DPI scaling, keyboard/mouse/touch input, and native
+  window integration.
+- ⬜ Keep terminal/web/SSH clients as supported first-class frontends; the GUI
+  client is additive, not a replacement for remote attach.
+
+### Renderer comparison
+
+| Backend | True blur/materials | Rust fit | Weight | Decision |
+|---|---:|---:|---:|---|
+| Ratatui + custom RGB canvas | No; terminal-cell limited | Excellent | Very low | Keep for terminal mode |
+| Crossterm directly | No; more cell control | Excellent | Very low | Not a Liquid Glass solution |
+| Electron + web UI | Yes | Low/medium | High | Use only if web ecosystem wins |
+| Tauri + web UI | Yes | Good | Low/medium | Practical fallback |
+| GPUI | Yes, native GPU | Excellent | Medium | Primary prototype candidate |
+| Slint | Yes, declarative GPU | Excellent | Low/medium | Lightweight alternative |
+| Iced | Partial/custom work | Excellent | Medium | Secondary Rust option |
+| `wgpu` custom renderer | Yes, maximum control | Excellent | Variable/high | Long-term escape hatch |
+
+### Explicit non-goals
+
+- Replacing ratatui before a measurable limitation exists.
+- Making terminal mode depend on a desktop compositor or GPU.
+- Promising true blur or anti-aliased text inside SSH/tmux terminals.
+- Forking the VT/session/input model for each frontend.
+
+### Acceptance criteria
+
+- Terminal mode remains behaviorally compatible and passes the existing test
+  and network suites.
+- A renderer-neutral snapshot can represent every current visible UI state.
+- A prototype GUI can render panes, dock, overlays, and theme changes without
+  importing ratatui.
+- The selected GUI backend demonstrates real translucent surfaces and blur on
+  at least one supported desktop platform.
+- The decision is documented with measured startup, memory, binary-size, and
+  interaction/accessibility results.
+
+## Renderer decision notes
+
+The primary product constraint is the compositor boundary. Ratatui is a
+cell-oriented compositor and is not the reason terminal text looks old;
+terminals receive cells and ANSI attributes, then perform final glyph
+rasterization. Asciline-rust is a valuable CPU-only renderer foundation for
+that cell-level layer: it can map and encode frames quickly without a GPU.
+A desktop GUI backend is still additive architecture, not an in-place
+renderer swap. The existing `PixelCanvas` can evolve into a TermOS
+`CellCompositor`, but neither it nor asciline can provide true desktop
+backdrop blur inside a terminal.
+
+Recommended sequence: **snapshot boundary → headless tests → GPUI/Slint
+prototype → measured decision → production GUI backend**, while retaining
+Ratatui for terminal/SSH and xterm.js for web.
+
 ## Priorities at a glance
 
 | Phase | Tier | Theme | Effort |
@@ -814,31 +1039,50 @@ missing two.
 - Unit tests for scrolling column positioning.
 - Integration test: switch modes mid-session, verify windows retile.
 
-### Phase 25 — Vim copy mode
+### Phase 25 — Vim copy mode ✅
 
 Full vim-style scrollback navigation matching TUIOS's copy mode.
 
-- **Enter**: `Prefix+[` (or `Ctrl+B [`).
-- **Navigation**: `h/j/k/l`, `w/b/e`, `0/^/$`, `gg/G`, `{/}`.
-- **Count prefix**: `10j` moves 10 lines, `5w` moves 5 words.
-- **Character search**: `f{char}`, `F{char}`, `t{char}`, `T{char}`.
-- **Visual line mode**: `Shift+V` highlights entire line.
-- **Search**: `/` enters search, `n/N` next/prev.
-- **Yank**: `y` copies selection to clipboard.
-- **Exit**: `q` or `Esc` or `i` returns to terminal mode.
-- **Scroll indicator**: `offset/total` on bottom border.
+- ✅ **Enter**: `Prefix+[` (or `Ctrl+B [`).
+- ✅ **Navigation**: `h/j/k/l`, `w/b/e`, `0/^/$`, `gg/G`, `{/}`.
+- ✅ **Count prefix**: `10j` moves 10 lines and repeated word motions honor
+  counts; standalone `0` remains the line-start command.
+- ✅ **Character search**: `f{char}`, `F{char}`, `t{char}`, `T{char}`, with
+  `;`/`,` repeat.
+- ✅ **Visual line mode**: `V` highlights entire lines; `v` is char-wise.
+- ✅ **Search**: `/` and `?` enter search, `n/N` move between matches.
+- ✅ **Yank**: `y` copies selection to the internal and host clipboard.
+- ✅ **Exit**: `q` or `Esc` returns to window management mode.
+- ✅ **Scroll indicator**: viewport state is shown in the copy-mode dock and
+  pane scrollbar.
+- ✅ **Regression tests**: count dispatch, `gg`, standalone `0`, visual
+  selection, wide-character selection, word/character motions, search, and
+  yank behavior.
 
-### Phase 26 — Dock polish
+### Phase 26 — Dock polish 🚧
 
-- **Configurable position**: `[appearance] dockbar_position = "bottom"` (top/bottom/hidden).
-- **Session controls**: detach, kill, attach buttons in dock.
-- **Zoom indicator**: "Z" badge on dock pill when pane is zoomed.
-- **Minimized entries**: Clickable icons for minimized windows.
-- **Overflow**: Click truncated count → open aggregate view.
+- ✅ **Configurable position**: `[appearance] dockbar_position = "bottom"`
+  (top/bottom/hidden), including matching workspace bounds and mouse hit rows.
+- ✅ **Session controls**: detach, close/kill, and rename buttons are rendered
+  when the dock has sufficient width.
+- ✅ **Zoom indicator**: focused zoomed panes show a `Z` badge in the dock mode
+  pill.
+- ⬜ **Minimized entries**: clickable icons for minimized windows. The current
+  minimize command path remains an explicit deferred stub; no hidden or
+  misleading dock state is exposed until pane lifecycle semantics are defined.
+- ✅ **Overflow**: the `+N` truncation indicator has shared hit geometry and
+  opens the existing aggregate view on click; top/bottom dock placement is
+  respected.
 
-### Phase 27 — Border styles
+### Phase 27 — Border styles 🚧
 
-- **9 styles**: rounded (default), normal, thick, double, hidden, block, ascii, outer-half-block, inner-half-block.
-- **Config**: `[appearance] border_style = "rounded"`.
-- **Hidden mode**: Suppresses border chars + window buttons + scrollbar.
-- **Configurable colors**: `border_focused_color` and `border_unfocused_color` hex overrides.
+- ✅ **9 styles/aliases**: rounded (default), normal/single, thick, double,
+  plain, hidden/none, block, ascii, outer-half-block, and inner-half-block.
+- ✅ **Config**: `[appearance] border_style = "rounded"`, generated config
+  comments, wizard choices, CLI completion, and validation all share the
+  supported names.
+- ✅ **Hidden mode**: suppresses border glyphs, titles, and scrollbars.
+- ✅ **Configurable colors**: `border_focused_color` and
+  `border_unfocused_color` hex overrides.
+- ⬜ **Dogfood remaining visual differences**: ratatui's `Plain` and quadrant
+  border types are terminal-cell approximations, not custom glyph sets.

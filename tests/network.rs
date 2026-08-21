@@ -291,6 +291,10 @@ async fn spawn_web_server() -> std::net::SocketAddr {
 /// The picker page lists daemon sessions and `/new` creates + redirects.
 #[tokio::test]
 async fn web_picker_lists_sessions_and_creates() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping web_picker test");
+        return;
+    }
     let (_guard, _dir, _socket) = start_isolated_daemon().await;
     let client = termos::session::DaemonClient::connect().expect("daemon connect");
     client.new_session("webpick", "/bin/sh").expect("create session");
@@ -331,6 +335,10 @@ async fn web_picker_lists_sessions_and_creates() {
 /// session's shell and echoes back through the frames.
 #[tokio::test]
 async fn web_session_attach_types_and_echoes() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping web_session_attach test");
+        return;
+    }
     let (_guard, _dir, _socket) = start_isolated_daemon().await;
     let client = termos::session::DaemonClient::connect().expect("daemon connect");
     client
@@ -375,6 +383,10 @@ async fn web_session_attach_types_and_echoes() {
 /// Attaching to a missing session sends an error frame and closes.
 #[tokio::test]
 async fn web_session_attach_missing_session_errors() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping web_session_attach_missing test");
+        return;
+    }
     let (_guard, _dir, _socket) = start_isolated_daemon().await;
     let addr = spawn_web_server().await;
 
@@ -404,6 +416,10 @@ async fn web_session_attach_missing_session_errors() {
 /// Verify the web server accepts a WebSocket upgrade at /ws.
 #[tokio::test]
 async fn web_websocket_upgrade() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping web_websocket_upgrade test");
+        return;
+    }
     use termos::network::web::run_web_server;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

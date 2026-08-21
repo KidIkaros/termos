@@ -76,10 +76,14 @@ tower = { version = "0.5", features = ["util"], optional = true }
 notify-debouncer-mini = "0.7.0"
 notify = "8.2.0"
 clap = { version = "4.6.6", features = ["derive"] }
-# Pixel effects are rendered directly into ratatui RGB cells; no mapper is
-# required on the hot path.
+# Pixel effects are currently rendered by the CPU-only PixelCanvas directly
+# into ratatui RGB cells. The planned asciline-based CellCompositor will be
+# introduced behind an adapter after its focused mapper API is verified.
+asciline = { package = "asciline", git = "https://github.com/KidIkaros/asciline-rust", default-features = false, optional = true }
+
 [features]
 default = []
+asciline-compositor = ["dep:asciline"]
 network = ["dep:tokio", "dep:russh", "dep:russh-keys", "dep:async-trait", "dep:rand", "dep:axum", "dep:tokio-tungstenite", "dep:futures-util"]
 tls = ["network", "dep:rustls", "dep:rustls-pemfile", "dep:rcgen", "dep:tokio-rustls", "dep:hyper-util", "dep:hyper", "dep:tower"]
 
@@ -99,6 +103,11 @@ harness = false
 [[bench]]
 name = "vt_render"
 harness = false
+
+[[bench]]
+name = "compositor"
+harness = false
+required-features = ["asciline-compositor"]
 
 [profile.release]
 lto = "thin"

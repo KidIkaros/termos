@@ -1429,6 +1429,18 @@ fn handle_scrollback_mode(os: &mut Os, key: &KeyEvent) -> KeyResult {
         return KeyResult::Consumed;
     }
 
+    // Vim counts apply to the next motion. A standalone zero remains the
+    // line-start command; `10j` and `20w` accumulate normally.
+    if let KeyCode::Char(c @ '1'..='9') | KeyCode::Char(c @ '0') = key.code {
+        if os.copy_count.feed(c as u8) {
+            os.copy_pending_g = false;
+            return KeyResult::Consumed;
+        }
+    }
+
+    let count = os.copy_count.consume();
+    let counted_line = |os: &mut Os, direction: i32| os.copy_move_lines(direction, count);
+
     match key.code {
         // q always leaves scrollback mode.
         KeyCode::Char('q') => {
@@ -1460,11 +1472,11 @@ fn handle_scrollback_mode(os: &mut Os, key: &KeyEvent) -> KeyResult {
         }
         // Basic cursor movement (h/j/k/l, arrows).
         KeyCode::Up | KeyCode::Char('k') => {
-            os.copy_move_line(-1);
+            counted_line(os, -1);
             KeyResult::Consumed
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            os.copy_move_line(1);
+            counted_line(os, 1);
             KeyResult::Consumed
         }
         KeyCode::Left | KeyCode::Char('h') => {
@@ -1477,27 +1489,27 @@ fn handle_scrollback_mode(os: &mut Os, key: &KeyEvent) -> KeyResult {
         }
         // Word motions.
         KeyCode::Char('w') => {
-            os.copy_word_forward(false);
+            for _ in 0..count { os.copy_word_forward(false); }
             KeyResult::Consumed
         }
         KeyCode::Char('W') => {
-            os.copy_word_forward(true);
+            for _ in 0..count { os.copy_word_forward(true); }
             KeyResult::Consumed
         }
         KeyCode::Char('b') if !ctrl => {
-            os.copy_word_backward(false);
+            for _ in 0..count { os.copy_word_backward(false); }
             KeyResult::Consumed
         }
         KeyCode::Char('B') => {
-            os.copy_word_backward(true);
+            for _ in 0..count { os.copy_word_backward(true); }
             KeyResult::Consumed
         }
         KeyCode::Char('e') => {
-            os.copy_word_end(false);
+            for _ in 0..count { os.copy_word_end(false); }
             KeyResult::Consumed
         }
         KeyCode::Char('E') => {
-            os.copy_word_end(true);
+            for _ in 0..count { os.copy_word_end(true); }
             KeyResult::Consumed
         }
         // Line motions.
@@ -1515,36 +1527,47 @@ fn handle_scrollback_mode(os: &mut Os, key: &KeyEvent) -> KeyResult {
         }
         // Paging.
         KeyCode::Char('u') if ctrl => {
-            os.copy_move_line(-10);
+            os.copy_move_lines(-1, 10);
             KeyResult::Consumed
         }
         KeyCode::Char('d') if ctrl => {
-            os.copy_move_line(10);
+            os.copy_move_lines(1, 10);
             KeyResult::Consumed
         }
         KeyCode::Char('b') if ctrl => {
-            os.copy_move_line(-20);
+            os.copy_move_lines(-1, 20);
             KeyResult::Consumed
         }
         KeyCode::Char('f') if ctrl => {
-            os.copy_move_line(20);
+            os.copy_move_lines(1, 20);
             KeyResult::Consumed
         }
         KeyCode::PageUp => {
-            os.copy_move_line(-10);
+            os.copy_move_lines(-1, 10);
             KeyResult::Consumed
         }
         KeyCode::PageDown => {
-            os.copy_move_line(10);
+            os.copy_move_lines(1, 10);
             KeyResult::Consumed
         }
-        // Jumps.
-        KeyCode::Home | KeyCode::Char('g') => {
+        // Jumps. `gg` is the vim spelling for the oldest line; a lone `g`
+        // remains a useful compatibility shortcut and waits for a second g.
+        KeyCode::Char('g') => {
+            if os.copy_pending_g {
+                os.copy_pending_g = false;
+                os.copy_top();
+            } else {
+                os.copy_pending_g = true;
+            }
+            KeyResult::Consumed
+        }
+        KeyCode::Home => {
             os.copy_top();
             KeyResult::Consumed
         }
-        KeyCode::End | KeyCode::Char('G') => {
+        KeyCode::End |        KeyCode::Char('G') => {
             os.copy_bottom();
+
             KeyResult::Consumed
         }
         // Viewport positioning.
@@ -1626,7 +1649,10 @@ fn handle_scrollback_mode(os: &mut Os, key: &KeyEvent) -> KeyResult {
             os.copy_search_next_match(&os.copy_search_query.clone(), os.copy_search_forward, true);
             KeyResult::Consumed
         }
-        _ => KeyResult::Consumed,
+        _ => {
+            os.copy_pending_g = false;
+            KeyResult::Consumed
+        }
     }
 }
 
@@ -1843,14 +1869,23 @@ fn handle_switcher(os: &mut Os, key: &KeyEvent) -> KeyResult {
 pub fn handle_mouse(os: &mut Os, mouse: &MouseEvent) -> bool {
     let column = mouse.column as i32;
     let row = mouse.row as i32;
-    // The dock bar occupies the bottom row.
-    if row >= os.height - 1 {
+    // The dock bar occupies the configured top/bottom row.
+    let dock_row = if os.config.appearance.dockbar_position == "top" {
+        0
+    } else {
+        os.height - 1
+    };
+    if os.config.appearance.dockbar_position != "hidden" && row == dock_row {
         if !os.config.appearance.mouse_friendly {
             return false;
         }
         // Mouse-friendly dock: left-click switches window, right-click opens context menu.
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                if super::dock::dock_overflow_at(os, column, row) {
+                    os.open_aggregate_view();
+                    return true;
+                }
                 if let Some(idx) = os.dock_item_at(column, row) {
                     os.focus_window(idx);
                     os.prefix = Prefix::None;
@@ -2352,7 +2387,7 @@ mod tests {
 
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
         os.update(crate::app::msg::Msg::Tick);
-        crate::app::render::render(&os, &mut buf);
+        crate::app::render::render(&os, &mut buf, &[]);
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
@@ -2373,7 +2408,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             os.update(crate::app::msg::Msg::Tick);
-            crate::app::render::render(&os, &mut buf);
+            crate::app::render::render(&os, &mut buf, &[]);
             let rendered: String = buf.content().iter().map(|cell| cell.symbol()).collect();
             if rendered.contains("RENDER_REPRO") {
                 break;
@@ -2386,7 +2421,7 @@ mod tests {
         assert!(rendered.contains("RENDER_REPRO"), "rendered buffer omitted PTY output");
 
         // A second frame with no new PTY data must retain the pane content.
-        crate::app::render::render(&os, &mut buf);
+        crate::app::render::render(&os, &mut buf, &[]);
         let rendered_again: String = buf.content().iter().map(|cell| cell.symbol()).collect();
         assert!(
             rendered_again.contains("RENDER_REPRO"),
@@ -3644,6 +3679,39 @@ mod tests {
         os.enter_scrollback_mode();
         let result = handle_key(&mut os, &key(KeyCode::Char('j')));
         assert_eq!(result, KeyResult::Consumed);
+    }
+
+    #[test]
+    fn copy_count_applies_to_line_motion() {
+        let mut os = os_with_window();
+        os.enter_scrollback_mode();
+        os.copy_cursor_line = 0;
+        handle_key(&mut os, &key(KeyCode::Char('2')));
+        handle_key(&mut os, &key(KeyCode::Char('j')));
+        assert_eq!(os.copy_cursor_line, 2);
+        assert!(!os.copy_count.active());
+    }
+
+    #[test]
+    fn copy_double_g_jumps_to_oldest_line() {
+        let mut os = os_with_window();
+        os.enter_scrollback_mode();
+        os.copy_cursor_line = 3;
+        handle_key(&mut os, &key(KeyCode::Char('g')));
+        assert!(os.copy_pending_g);
+        handle_key(&mut os, &key(KeyCode::Char('g')));
+        assert_eq!(os.copy_cursor_line, 0);
+        assert!(!os.copy_pending_g);
+    }
+
+    #[test]
+    fn copy_zero_remains_line_start_not_count() {
+        let mut os = os_with_window();
+        os.enter_scrollback_mode();
+        os.copy_cursor_col = 4;
+        handle_key(&mut os, &key(KeyCode::Char('0')));
+        assert_eq!(os.copy_cursor_col, 0);
+        assert!(!os.copy_count.active());
     }
 
     #[test]

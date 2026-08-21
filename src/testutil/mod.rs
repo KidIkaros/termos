@@ -11,14 +11,34 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 // ─── PTY Exhaustion Guard ─────────────────────────────────────────────────
 
-/// Returns `true` if a PTY can be allocated right now.
+/// Minimum number of free PTYs required before a PTY-spawning test proceeds.
+/// At 20 free slots, up to 4 concurrent tests can each spawn 4 shells with
+/// headroom to spare.  Below this threshold the system is too full for safe
+/// parallel PTY work and tests should be skipped.
+const PTY_HEADROOM: u64 = 20;
+
+/// Returns `true` when the system has enough free PTYs for a test to proceed.
 ///
-/// Unlike the original cached variant, this re-probes on each call so that
-/// `skip_if_pty_exhausted!` reflects the live system state — important
-/// because `Window::spawn` now uses a pool semaphore that blocks instead of
-/// failing, so the bottleneck is the pool slot count, not the kernel PTY
-/// ceiling.
+/// Reads `/proc/sys/kernel/pty/nr` (current count) and `pty/max` (ceiling)
+/// to check for at least `PTY_HEADROOM` free slots.  Falls back to a
+/// probe-open-and-close when the procfs files are unreadable (non-Linux or
+/// unusual kernel configuration).
+///
+/// Re-probes on every call so `skip_if_pty_exhausted!` reflects the live
+/// system state; the check itself is cheap (two file reads).
 pub fn pty_is_available() -> bool {
+    // Primary: read procfs for cheap headroom check.
+    if let (Ok(nr_s), Ok(max_s)) = (
+        std::fs::read_to_string("/proc/sys/kernel/pty/nr"),
+        std::fs::read_to_string("/proc/sys/kernel/pty/max"),
+    ) {
+        if let (Ok(nr), Ok(max)) =
+            (nr_s.trim().parse::<u64>(), max_s.trim().parse::<u64>())
+        {
+            return max.saturating_sub(nr) >= PTY_HEADROOM;
+        }
+    }
+    // Fallback: try to open one PTY — at least confirms the kernel will grant one.
     match nix::pty::openpty(None, None) {
         Ok(pair) => {
             drop(pair.master);
@@ -30,9 +50,10 @@ pub fn pty_is_available() -> bool {
 }
 
 /// Call at the top of any test that requires a real PTY.
-/// Skips the test (via `return`) if PTYs are exhausted.  Rate-limiting is
-/// handled by the pool semaphore inside `Window::spawn`, so there is no
-/// need to serialize tests externally.
+/// Skips the test (via `return`) when fewer than `PTY_HEADROOM` PTY slots are
+/// free system-wide.  Rate-limiting for concurrent spawns is handled by the
+/// pool semaphore inside `Window::spawn`; this guard prevents tests from even
+/// attempting to acquire a slot when the system is near the kernel ceiling.
 ///
 /// # Example
 /// ```ignore
@@ -46,7 +67,16 @@ pub fn pty_is_available() -> bool {
 macro_rules! skip_if_pty_exhausted {
     () => {
         if !$crate::testutil::pty_is_available() {
-            eprintln!("SKIP: PTYs exhausted — skipping PTY-dependent test");
+            // Print the current nr/max for diagnosis.
+            let nr = std::fs::read_to_string("/proc/sys/kernel/pty/nr")
+                .map(|s| s.trim().to_owned())
+                .unwrap_or_else(|_| "?".into());
+            let max = std::fs::read_to_string("/proc/sys/kernel/pty/max")
+                .map(|s| s.trim().to_owned())
+                .unwrap_or_else(|_| "?".into());
+            eprintln!(
+                "SKIP: PTY headroom too low ({nr}/{max} in use) — skipping PTY-dependent test"
+            );
             return;
         }
     };

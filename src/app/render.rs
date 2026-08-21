@@ -9,13 +9,15 @@ use ratatui::style::{Color as TuiColor, Modifier, Style as TuiStyle};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Widget};
 
-use crate::app::pixel_canvas::PixelCanvas;
+use crate::app::pixel_canvas::CellCompositor;
 use crate::app::{ContextMenu, Mode, Os, Prefix, Selection};
 use crate::layout::Rect;
 use crate::ui::{border_type, StylePalette};
 
 /// Render the whole app into a ratatui buffer.
-pub fn render(os: &Os, buf: &mut Buffer) {
+/// `damage` lists the regions that changed since the last frame;
+/// only those cells are flushed into the buffer.
+pub fn render(os: &Os, buf: &mut Buffer, damage: &[crate::app::damage::DamageRect]) {
     let area = *buf.area();
     // A zero-size terminal (e.g. headless) has nothing to paint.
     if area.width == 0 || area.height == 0 {
@@ -85,9 +87,7 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         .map(|t| (t.background.0, t.background.1, t.background.2))
         .unwrap_or((0, 0, 0));
     let mut canvas = os.pixel_canvas.lock().unwrap_or_else(|e| e.into_inner());
-    if canvas.width() != area.width as usize || canvas.height() != area.height as usize {
-        *canvas = PixelCanvas::new(area.width as usize, area.height as usize);
-    }
+    canvas.resize(area.width as usize, area.height as usize);
 
     // Accent bar: 1-row gradient strip above the dock, giving a "glass" effect.
     // Fades from content background to a dimmed version of the accent color.
@@ -133,17 +133,8 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     // Rounded corners for overlays.
     // (Applied later when overlays are rendered.)
 
-    // Paint the RGB canvas directly into the ratatui Buffer. The previous
-    // mapper-backed BGR round trip duplicated this full-frame work.
-    let rgb = canvas.rgb();
-    for y in 0..area.height {
-        for x in 0..area.width {
-            let idx = ((y as usize * area.width as usize) + x as usize) * 3;
-            let cell = &mut buf[(x, y)];
-            cell.set_char(' ');
-            cell.set_bg(TuiColor::Rgb(rgb[idx], rgb[idx + 1], rgb[idx + 2]));
-        }
-    }
+    // Paint the RGB canvas into the ratatui Buffer, skipping undamaged regions.
+    flush_compositor_to_buffer(&*canvas, buf, area, damage);
 
     // Composite each pane.
     let layout = os.current_layout();
@@ -394,6 +385,56 @@ pub fn render(os: &Os, buf: &mut Buffer) {
         && !os.accent_picker_open
     {
         render_showkeys(buf, content_area, &os.last_key_chord);
+    }
+}
+
+/// Flush a cell compositor's packed RGB framebuffer into a Ratatui buffer.
+///
+/// Keeping this adapter separate means an asciline-backed compositor can be
+/// introduced without changing pane, dock, or overlay rendering code.
+fn flush_compositor_to_buffer<C: CellCompositor>(
+    compositor: &C,
+    buf: &mut Buffer,
+    area: TuiRect,
+    damage: &[crate::app::damage::DamageRect],
+) {
+    let rgb = compositor.finish_frame();
+    let cw = compositor.width();
+    let ch = compositor.height();
+    let expected = cw.saturating_mul(ch).saturating_mul(3);
+    if rgb.len() < expected {
+        return;
+    }
+    let w = area.width.min(cw as u16);
+    let h = area.height.min(ch as u16);
+
+    if damage.is_empty() {
+        // No damage info — full frame flush (backward compat for tests).
+        for y in 0..h {
+            for x in 0..w {
+                let idx = ((y as usize * cw) + x as usize) * 3;
+                let cell = &mut buf[(area.x + x, area.y + y)];
+                cell.set_char(' ');
+                cell.set_bg(TuiColor::Rgb(rgb[idx], rgb[idx + 1], rgb[idx + 2]));
+            }
+        }
+        return;
+    }
+
+    // Flush only damaged regions.
+    for d in damage {
+        let x0 = d.rect.x.max(0) as u16;
+        let y0 = d.rect.y.max(0) as u16;
+        let x1 = (d.rect.x + d.rect.w).min(w as i32) as u16;
+        let y1 = (d.rect.y + d.rect.h).min(h as i32) as u16;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let idx = ((y as usize * cw) + x as usize) * 3;
+                let cell = &mut buf[(area.x + x, area.y + y)];
+                cell.set_char(' ');
+                cell.set_bg(TuiColor::Rgb(rgb[idx], rgb[idx + 1], rgb[idx + 2]));
+            }
+        }
     }
 }
 
@@ -1088,6 +1129,10 @@ fn draw_pane_border(
     color: TuiColor,
     os: &Os,
 ) {
+    // "hidden" / "none" border style: no border glyphs, no title, no scrollbar.
+    if crate::ui::border_is_hidden(&os.config.appearance.border_style) {
+        return;
+    }
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(border_type(&os.config.appearance.border_style))
@@ -1176,12 +1221,19 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
         crate::layout::LayoutMode::MasterStack => " MS",
         crate::layout::LayoutMode::Scrolling => " SCR",
     };
+    let zoom_badge = os
+        .focused_window
+        .and_then(|idx| os.windows.get(idx))
+        .filter(|window| window.zoomed)
+        .map(|_| " Z")
+        .unwrap_or("");
     let mut left_text = format!(
-        " {} {}:{}{} ",
+        " {} {}:{}{}{} ",
         mode_name,
         os.current_workspace,
         sorted_ids.len() + float_count,
         layout_tag,
+        zoom_badge,
     );
     // Tape playback progress indicator.
     if os.script_active() {
@@ -1376,7 +1428,7 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
 
     // Truncation indicator.
     if layout.truncated_count > 0 {
-        let trunc_x = x;
+        let trunc_x = layout.overflow_position.unwrap_or(x as i32);
         let trunc_text = format!(" +{} ", layout.truncated_count);
         let trunc_style = TuiStyle::default().fg(muted).bg(bg);
         for (i, ch) in trunc_text.chars().enumerate() {
@@ -2304,7 +2356,7 @@ mod tests {
     fn render_zero_size_buffer_does_not_panic() {
         let os = test_os();
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 0, 0));
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
     }
 
     #[test]
@@ -2496,7 +2548,7 @@ mod tests {
         os.focused_window = Some(0);
 
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
         // Should not panic and should paint something.
         // Check that the dock row (last row) has content.
         let dock_row = 23u16;
@@ -2529,7 +2581,7 @@ mod tests {
         os.focused_window = Some(0);
 
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
         // Both pane borders are painted (the right pane starts at x=40).
         let cell = &buf[(79, 0)];
         assert!(!cell.symbol().is_empty());
@@ -2569,7 +2621,7 @@ mod tests {
         });
 
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
         // The float's top-left border corner paints at its offset position.
         let cell = &buf[(16, 5)];
         assert!(!cell.symbol().is_empty());
@@ -2737,7 +2789,7 @@ mod tests {
         let mut os = test_os();
         os.show_quit_confirmation = true;
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
         // Should not panic.
     }
 
@@ -2748,7 +2800,7 @@ mod tests {
         os.theme_list = vec!["default".into(), "monokai".into()];
         os.theme_picker_selected = 0;
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
     }
 
     #[test]
@@ -2756,7 +2808,7 @@ mod tests {
         let mut os = test_os();
         os.help_open = true;
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
     }
 
     #[test]
@@ -2764,7 +2816,7 @@ mod tests {
         let mut os = test_os();
         os.scrollback_mode = true;
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
     }
 
     #[test]
@@ -2772,7 +2824,7 @@ mod tests {
         let mut os = test_os();
         os.switcher_open = true;
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
     }
 
     #[test]
@@ -2780,7 +2832,7 @@ mod tests {
         let mut os = test_os();
         os.palette_open = true;
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
     }
 
     #[test]
@@ -2789,7 +2841,7 @@ mod tests {
         os.last_key_chord = "Ctrl+A".into();
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
         // Disabled by default: the chord must not be drawn.
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
         let drawn: String = buf
             .content
             .iter()
@@ -2801,7 +2853,7 @@ mod tests {
         // Enabled via `[debug] show_key_events`: the chord is drawn.
         os.config.debug.show_key_events = true;
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
         let drawn: String = buf
             .content
             .iter()
@@ -2819,7 +2871,7 @@ mod tests {
         let mut os = test_os();
         os.tape_manager_open = true;
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
     }
 
     #[test]
@@ -2831,7 +2883,7 @@ mod tests {
             content: b"some tape content".to_vec(),
         });
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
     }
 
     #[test]
@@ -2840,7 +2892,7 @@ mod tests {
         os.config.appearance.which_key_enabled = true;
         os.prefix = Prefix::Leader;
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
     }
 
     #[test]
@@ -2856,7 +2908,7 @@ mod tests {
         os.workspace_mut(1).focused = Some(0);
         os.focused_window = Some(0);
         let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 24));
-        render(&os, &mut buf);
+        render(&os, &mut buf, &[]);
     }
 
     #[test]
@@ -2881,5 +2933,55 @@ mod tests {
         os.prefix = Prefix::Tape;
         let lines = build_which_key_lines(&os);
         assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn damage_aware_flush_skips_undamaged_regions() {
+        use crate::app::damage::{DamageReason, DamageRect};
+        use crate::layout::Rect;
+        use crate::terminal::pty::WinSize;
+        use crate::terminal::window::Window;
+
+        let mut os = test_os();
+        os.width = 80;
+        os.height = 25;
+        os.damage_resize(80, 25);
+        os.damage_take(); // drain initial
+
+        let win = Window::without_pty(
+            "w0".to_string(),
+            "w0".to_string(),
+            WinSize { cols: 20, rows: 4 },
+        );
+        os.windows.push(win);
+        {
+            let w = &os.windows[0];
+            let mut emu = w.emulator.lock().unwrap();
+            emu.write(b"hello");
+        }
+        let bounds = os.workspace_bounds(1);
+        os.workspace_mut(1)
+            .tree
+            .insert_window(0, -1, SplitType::None, 0.5, bounds, 0);
+        os.workspace_mut(1).focused = Some(0);
+        os.focused_window = Some(0);
+        os.sync_window_sizes();
+
+        // Full-frame render (empty damage = full flush).
+        let mut buf = Buffer::empty(TuiRect::new(0, 0, 80, 25));
+        render(&os, &mut buf, &[]);
+        let bg_before = buf[(5, 5)].bg;
+
+        // Now render with a small damage rect in the top-left corner only.
+        // Undamaged cells should retain their values from the previous render.
+        let damage = vec![DamageRect::new(
+            Rect { x: 0, y: 0, w: 10, h: 5 },
+            DamageReason::Output,
+        )];
+        render(&os, &mut buf, &damage);
+
+        // Cell outside the damage rect should retain its previous bg color.
+        let bg_after = buf[(5, 10)].bg;
+        assert_eq!(bg_before, bg_after, "undamaged cell should retain its bg");
     }
 }

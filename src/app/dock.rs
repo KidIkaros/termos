@@ -121,6 +121,10 @@ pub struct DockLayout {
     pub items: Vec<DockItem>,
     /// X positions of visible items.
     pub item_positions: Vec<i32>,
+    /// X position of the `+N` overflow indicator, when present.
+    pub overflow_position: Option<i32>,
+    /// Width of the `+N` overflow indicator.
+    pub overflow_width: usize,
     /// The workspace strip layout.
     pub workspace_strip: DockWorkspaceStrip,
 }
@@ -385,9 +389,8 @@ pub fn calculate_dock_layout(os: &Os) -> DockLayout {
 
     let room = bar_width.saturating_sub(layout.left_width);
     let want = calculate_dock_right_width(os);
-    layout.right_width = want.min(room);
+    layout.right_width = want.min(room);        layout.calculate_item_positions(bar_width, &all_items);
 
-    layout.calculate_item_positions(bar_width, &all_items);
     layout
 }
 
@@ -416,6 +419,10 @@ impl DockLayout {
         for item in &self.visible_items {
             self.item_positions.push(x);
             x += item.width as i32 + 1;
+        }
+        if self.truncated_count > 0 {
+            self.overflow_position = Some(x);
+            self.overflow_width = format!(" +{} ", self.truncated_count).chars().count();
         }
     }
 
@@ -466,9 +473,8 @@ pub fn build_dock_left_text(os: &Os) -> (String, String, usize) {
         + 4;
 
     (mode_label, trail_text, width)
-}
+}    fn dock_mode_label(os: &Os) -> String {
 
-fn dock_mode_label(os: &Os) -> String {
     let ascii = os.config.appearance.use_ascii_only;
     if os.sidebar.focused {
         return "SIDEBAR".into();
@@ -513,6 +519,23 @@ fn dock_session_strip_width() -> usize { 0 }
 // ---------------------------------------------------------------------------
 
 /// The room every minimized entry needs laid out at once.
+/// Return the overflow indicator hit when the pointer is over `+N`.
+pub fn dock_overflow_at(os: &Os, column: i32, row: i32) -> bool {
+    let position = os.config.appearance.dockbar_position.as_str();
+    if position == "hidden" {
+        return false;
+    }
+    let dock_row = if position == "top" { 0 } else { os.height - 1 };
+    if row != dock_row {
+        return false;
+    }
+    let layout = calculate_dock_layout(os);
+    let Some(x) = layout.overflow_position else {
+        return false;
+    };
+    column >= x && column < x + layout.overflow_width as i32
+}
+
 pub fn dock_items_width(items: &[DockItem]) -> usize {
     let mut w = 0;
     for (i, it) in items.iter().enumerate() {
@@ -897,6 +920,33 @@ mod tests {
         os.copy_visual = true;
         os.copy_visual_line = true;
         assert_eq!(copy_mode_state_from_os(&os), CopyModeState::VisualLine);
+    }
+
+    #[test]
+    fn overflow_hit_requires_truncation() {
+        let app_config = UserConfig::default_config();
+        let mut app = Os::new(app_config);
+        app.width = 40;
+        app.height = 25;
+        assert!(!dock_overflow_at(&app, 0, app.height - 1));
+
+        let items: Vec<DockItem> = (0..12)
+            .map(|i| DockItem {
+                window_index: i,
+                label: format!(" window-{i} "),
+                width: 12,
+                minimized: true,
+            })
+            .collect();
+        let mut layout = DockLayout {
+            left_width: 4,
+            right_width: 0,
+            ..Default::default()
+        };
+        layout.calculate_item_positions(40, &items);
+        assert!(layout.truncated_count > 0);
+        assert!(layout.overflow_position.is_some());
+        assert!(layout.overflow_width >= 4);
     }
 
     #[test]

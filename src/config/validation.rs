@@ -52,7 +52,10 @@ pub fn validate_config(config: &UserConfig) -> ValidationResult {
 }
 
 fn validate_appearance(config: &UserConfig, result: &mut ValidationResult) {
-    let valid_border_styles = ["rounded", "single", "double", "plain", "ascii"];
+    let valid_border_styles = [
+        "rounded", "single", "normal", "thick", "double", "plain", "hidden", "none",
+        "block", "outer-half-block", "inner-half-block", "ascii",
+    ];
     if !valid_border_styles.contains(&config.appearance.border_style.as_str()) {
         result.errors.push(ValidationError {
             field: "appearance".into(),

@@ -85,6 +85,42 @@ src/
     └── scrollback.rs    Scrollback ring buffer
 ```
 
+## Renderer boundary and future GUI clients
+
+The current renderer is intentionally terminal-native: `Os` owns VT,
+windows, sessions, layouts, and interaction state, while `app::render` turns
+that state into a ratatui buffer. This is the right architecture for local,
+SSH, and remote terminal use, but it cannot provide true desktop compositor
+features such as backdrop blur, translucent materials over arbitrary windows,
+subpixel geometry, or native high-DPI surfaces.
+
+A future graphical client should be additive rather than a ratatui rewrite:
+
+```text
+Os + VT + session/control state
+        │
+        └── renderer-neutral UiSnapshot / RenderState
+             ├── ratatui + crossterm (terminal)
+             ├── xterm.js / WebSocket (web)
+             └── GPUI, Slint, Tauri, or wgpu (desktop GUI)
+```
+
+The planned snapshot must contain semantic state only: pane and float
+geometry, titles, focus/modal/zoom state, dock/session controls, overlays,
+selection ranges, theme tokens, image placements, and hit regions. It must
+not expose ratatui `Buffer`, crossterm events, or terminal-specific escape
+sequences. Terminal input encoding remains an adapter concern, as does GUI
+pointer, IME, clipboard, and accessibility integration.
+
+The migration is deliberately staged: define and test the snapshot first,
+add an adapter from `Os` while the existing renderer remains unchanged, then
+prototype a GUI backend and measure startup, memory, binary size, GPU effects,
+accessibility, and packaging. GPUI is the primary Rust-native prototype
+candidate; Slint is the lightweight declarative alternative, Tauri is the
+pragmatic web-stack fallback, and custom `wgpu` is reserved for maximum
+control. Electron is viable but carries a substantially larger runtime and is
+not the default Rust-first choice.
+
 ## Architecture
 
 TermOS follows a Model-View-Update loop:
@@ -92,7 +128,9 @@ TermOS follows a Model-View-Update loop:
 - **Model**: `Os` struct in `app/mod.rs` — windows, workspaces, modes,
   hooks, agent state, recording, graphics passthrough.
 - **View**: `render()` in `app/render.rs` — draws panes, borders,
-  overlays, tape manager, trust review, recording indicator.
+  overlays, tape manager, trust review, recording indicator. This remains the
+  terminal backend; future GUI clients consume the renderer-neutral snapshot
+  described above instead of importing this module.
 - **Update**: `handle_key()` in `app/input.rs` — modal key routing,
   leader-prefix handling, tape controls, terminal passthrough.
 
@@ -112,15 +150,35 @@ images into ratatui cells. Instead it:
 4. Tracks placements so images can be re-placed when panes move, resize,
    or switch workspace (`graphics/placement.rs`).
 
-## Pixel Canvas
+## Pixel Canvas and CPU compositor
 
 The pixel canvas (`app/pixel_canvas.rs`) maps each terminal cell to a 24-bit
 RGB background, creating a low-resolution framebuffer inside the terminal.
-Used for:
+It is now behind the `CellCompositor` contract, which allows a future
+asciline-backed implementation without changing pane, dock, or overlay code.
+
+The compositor plan is retained rather than full-frame-first:
+
+- Track merged damage rectangles from PTY output, pane movement, overlays,
+  dock/theme changes, and resize.
+- Reuse retained background, dock, shadow, and overlay surfaces by revision
+  keys.
+- Compose directly into the final RGB cell target where possible.
+- Use scalar CPU loops for small damage sets and Rayon only above a measured
+  threshold.
+- Benchmark the complete path, including channel conversion, Ratatui flush,
+  and ANSI serialization—not only pixel mapping.
+
+Current effects:
 - Drop shadows on floating panes
 - Gradient backgrounds and accent bars
 - SDF rounded corners on overlay panels
 - Dock sparklines and status visualizations
+
+The asciline-rust mapper is CPU-only and Rayon-parallelized. Its `map_pixel`
+API accepts RGB input but produces BGR output for the video/player pipeline.
+TermOS should add or wrap an RGB-output path before using it in the default
+compositor, otherwise the channel conversion can erase the mapper's benefit.
 
 ## Combining Marks
 

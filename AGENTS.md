@@ -30,7 +30,9 @@ cargo run -- tape play examples/demo.tape
 ### Testing
 
 ```bash
-# All tests
+# All tests  (capped at 4 threads via .cargo/config.toml — do NOT override
+# to a higher value; the system PTY ceiling is 4096 and near-exhaustion
+# blocks the machine for other users)
 cargo test
 
 # Specific test suite
@@ -43,6 +45,23 @@ cargo test --test tape_parse_examples  # tape parsing
 cargo clippy --all-targets
 cargo clippy --all-targets --features network
 ```
+
+### PTY Limit
+
+The system `/proc/sys/kernel/pty/max` is 4096. PTY-heavy test suites
+(daemon, control\_surface, network, theme\_detect\_osc) can exhaust the
+pool and starve other processes. Three controls keep this safe:
+
+1. **`.cargo/config.toml` — `test-threads = 4`**: limits concurrency.
+2. **`PTY_POOL_CAPACITY = 4`** (`src/terminal/pty.rs`): back-pressure
+   semaphore blocks rather than failing when all slots are occupied.
+3. **`skip_if_pty_exhausted!()` / `pty_is_available()`**: any test that
+   spawns a real PTY checks for ≥20 free slots and skips gracefully when
+   the system is loaded.
+
+Every new PTY-spawning test **must** call `crate::skip_if_pty_exhausted!()`
+(unit tests) or `if !termos::testutil::pty_is_available() { return; }`
+(integration tests) at its top.
 
 ## Code Organization
 

@@ -1,14 +1,16 @@
 # Asciline-Rust Integration Research
 
-*Generated: August 20, 2026 | Sources: [asciline-rust](https://github.com/KidIkaros/asciline-rust) source code and docs*
+*Generated: August 20, 2026; reviewed August 21, 2026 | Source: [asciline-rust](https://github.com/KidIkaros/asciline-rust) repository README, source, benchmarks, and docs*
 
 ## Executive Summary
 
-**Yes, asciline-rust can bridge the gap** — not by replacing ratatui, but by providing a **pixel-level rendering layer** that works alongside it. The key insight: in asciline's pixel mode, every terminal cell becomes a true-color pixel with its own 24-bit RGB background. This gives you what amounts to a **low-resolution framebuffer** inside the terminal — enough for smooth gradients, anti-aliased edges, and shadow effects that pure text-cell rendering can't achieve.
+**Yes, we can build a TermOS compositor on top of asciline-rust without requiring a GPU.** The repository's core is a CPU/Rust renderer: it decodes frames, maps pixels in parallel with Rayon, encodes them, and can write true-color ANSI directly to a terminal. Its measured throughput is high, but it is not GPU-backed and does not claim that a GPU is required. That is an advantage for TermOS: a CPU-only compositor can remain portable across SSH sessions, servers, containers, and machines without graphics hardware.
+
+TermOS should reuse the asciline ideas and, where its public APIs are suitable, depend on the mapper/codec as a focused library. The compositor should remain separate from Ratatui's widget layer so we can replace the current `PixelCanvas` incrementally rather than rewrite the VT/session system.
 
 ## What Asciline-Rust Actually Is
 
-A real-time ASCII video rendering engine with two output modes:
+A real-time CPU/Rust ASCII and pixel rendering engine with two output modes:
 
 1. **ASCII mode**: Maps RGB pixels → palette characters + color (the classic "ASCII art" look)
 2. **Pixel mode**: Maps RGB pixels → colored space characters (each cell = one pixel, `bg=#RRGGBB`)
@@ -20,13 +22,47 @@ The pixel mode is the key for TermOS. It renders with `\x1b[48;2;R;G;Bm ` — a 
 | Capability | Details | Relevance to TermOS |
 |---|---|---|
 | **Pixel-mode mapper** | `Mapper::map_pixel()` — RGB24 → BGR framebuffer, 3 bytes/cell | Core: render UI elements as colored cells |
-| **Rayon-parallel mapping** | Row-parallel `par_chunks_exact` with no locks | Fast: 3,600 fps ceiling at 240×67 grid |
+| **Rayon-parallel mapping** | Row-parallel `par_chunks_exact` with no locks | High CPU throughput: measured ~3,600 fps map ceiling at 240×67 |
 | **Palette system** | DEFAULT_PALETTE (93 levels), FLAT, BLOCK | Could power adaptive color schemes |
 | **Codec/encoder** | ZLIB, DELTA, RLE_FULL adaptive compression | Could cache static UI regions |
 | **Zero-dependency core** | Only needs rayon + flate2; no ffmpeg for the mapper | Lightweight dependency |
 | **Quantization** | `quantize_bits` for color depth reduction | Performance/quality trade-off |
 
 ## How to Integrate with TermOS
+
+### Proposed compositor seam
+
+```text
+Os + VT + layout state
+        │
+        ▼
+TermOS scene/effects description
+        │
+        ├── Asciline CPU compositor → RGB cell framebuffer / ANSI
+        └── Ratatui text compositor → text, widgets, input overlays
+```
+
+The first implementation should be a **cell compositor**, not a desktop window
+compositor. It owns the background/effects framebuffer, damage tracking,
+cache keys, and terminal output encoding. Ratatui remains responsible for
+text and widgets until the scene model is stable.
+
+A focused interface could look like:
+
+```rust
+pub trait CellCompositor {
+    fn resize(&mut self, width: usize, height: usize);
+    fn begin_frame(&mut self, background: Rgb);
+    fn paint_surface(&mut self, surface: Surface);
+    fn paint_shadow(&mut self, shadow: Shadow);
+    fn finish_frame(&mut self) -> &[[u8; 3]];
+}
+```
+
+The concrete implementation can use asciline's row-parallel mapping and
+encoding strategy, while TermOS retains its own scene primitives and cache
+policy. This avoids coupling the application to asciline's video pipeline,
+ffmpeg requirements, WebSocket server, or container format.
 
 ### Strategy: Dual-Layer Rendering
 
@@ -116,7 +152,7 @@ fn sparkline_rgb(data: &[f64], width: usize, height: usize, color: (u8,u8,u8)) -
 
 TermOS already passes through Kitty/Sixel. Asciline doesn't add new capability here — the passthrough handles it. But asciline could **generate** terminal-native image previews for non-Kitty terminals (by rendering images as colored blocks).
 
-## Performance Considerations
+## CPU-only performance considerations
 
 | Operation | Asciline Cost | Notes |
 |---|---|---|
@@ -125,7 +161,11 @@ TermOS already passes through Kitty/Sixel. Asciline doesn't add new capability h
 | ZLIB compress | ~50-200 µs | Only for caching static regions |
 | Total render pipeline | ~2-3 ms | Well within 16ms budget at 60fps |
 
-**Key**: The mapper is the hot path, and it's rayon-parallelized. At typical terminal sizes (120×40 to 240×67), the gradient/shadow computation is sub-millisecond.
+**Key**: the mapper is CPU-only but Rayon-parallelized. At typical terminal
+sizes it can be fast enough for interactive rendering without a GPU. The
+actual TermOS budget must still be measured end to end: scene construction,
+VT text rendering, ANSI encoding, terminal transport, and terminal repaint
+are outside the mapper benchmark.
 
 ## Dependency Cost
 
@@ -172,11 +212,58 @@ The `PixelCanvas` holds a `Vec<u8>` (BGR) the size of the terminal area. Each fr
 
 - Anti-aliased **text** (still grid-based, still needs the terminal's font renderer)
 - Variable-width fonts (terminal constraint)
+- True desktop backdrop blur or transparency over windows outside TermOS
+- GPU composition or subpixel geometry inside a terminal cell grid
 - True transparency (terminal-dependent, not app-controlled)
 - Drag-and-drop (no terminal standard)
 
+## Delivery plan
+
+The implementation is intentionally incremental. The central optimization is
+retention and damage tracking, not blindly parallelizing every full frame:
+
+```text
+PTY/layout/input event
+        │
+        ▼
+DamageSet (merged rectangles + reason)
+        │
+        ├── unchanged cached surfaces reused
+        └── changed regions recomposited
+                    │
+                    ▼
+           CPU CellCompositor
+        scalar small regions / Rayon large regions
+                    │
+                    ▼
+              Ratatui + ANSI
+```
+
+
+1. Benchmark the current direct-RGB `PixelCanvas` at representative terminal
+   sizes and under one/default Rayon thread counts.
+2. Add a `CellCompositor` interface and a no-op-behavior-change adapter around
+   the current canvas.
+3. Move gradients, shadows, rounded surfaces, sparklines, and damage tracking
+   behind that interface.
+4. Add an asciline-backed mapper/encoder prototype behind a feature or local
+   adapter, using only the focused CPU rendering pieces.
+5. Compare frame time, allocations, output bytes, determinism, and visual
+   equivalence against direct RGB.
+6. Add capability-tier fallbacks (true-color, 256-color, ANSI-only), then
+   dogfood dock changes, floats, overlays, resize churn, wide/combining text,
+   SSH, and web clients.
+7. Keep whichever backend wins for each workload; asciline does not need to
+   replace every path to be valuable.
+
 ## Verdict
 
-**asciline-rust is the right tool for this job.** Its pixel-mode mapper is exactly what TermOS needs to bridge the visual gap — it turns the terminal into a low-res framebuffer where every cell is a colored pixel. Combined with ratatui for text, this gives you the "modern GUI" feel (gradients, shadows, smooth shapes) without leaving the terminal.
+**asciline-rust is a strong foundation for a CPU-only TermOS cell compositor.**
+It can provide the terminal-side visual layer—gradients, shadows, colored
+blocks, caching, and high-rate frame mapping—without requiring a GPU. The
+best design is to reuse its focused mapper/codec techniques behind a TermOS
+`CellCompositor` interface, not to embed the entire video server/player.
 
-The integration is lightweight (just the mapper module, ~200 lines of code), fast (sub-millisecond at typical terminal sizes), and zero-C-dependency (pure Rust via rayon + miniz_oxide).
+This materially improves the terminal experience, but it does not turn a
+terminal into a desktop compositor. True Liquid Glass over arbitrary desktop
+content still requires a graphical window surface and platform compositor.

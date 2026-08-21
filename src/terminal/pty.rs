@@ -91,7 +91,11 @@ impl std::error::Error for PtyError {}
 /// ceiling (`/proc/sys/kernel/pty/nr`) the pool blocks the caller instead
 /// of failing.  This is the single choke-point that turns a hard spawn
 /// failure into graceful back-pressure.
-const PTY_POOL_CAPACITY: usize = 8;
+///
+/// Kept at 4 to match the `test-threads = 4` cap in `.cargo/config.toml`,
+/// so the pool semaphore and the scheduler agree on the concurrency limit.
+/// Override both if running on a machine with higher PTY headroom.
+const PTY_POOL_CAPACITY: usize = 4;
 
 /// How long `spawn_pty` waits for a pool slot before returning
 /// `Err(PtyError::Nix(ETIMEDOUT))`.  Generous enough that parallel tests

@@ -130,9 +130,22 @@ pub fn border_type(name: &str) -> ratatui::widgets::BorderType {
         "rounded" => ratatui::widgets::BorderType::Rounded,
         "thick" => ratatui::widgets::BorderType::Thick,
         "double" => ratatui::widgets::BorderType::Double,
-        "plain" | "normal" => ratatui::widgets::BorderType::Plain,
+        "plain" | "normal" | "single" => ratatui::widgets::BorderType::Plain,
+        "block" | "outer-half-block" => ratatui::widgets::BorderType::QuadrantOutside,
+        "inner-half-block" => ratatui::widgets::BorderType::QuadrantInside,
+        // "hidden" and "none" suppress all border glyphs entirely.
+        // `draw_pane_border` calls `border_is_hidden` and early-returns, so
+        // the type value here is never actually used for rendering.
+        "hidden" | "none" => ratatui::widgets::BorderType::Plain,
         _ => ratatui::widgets::BorderType::Rounded,
     }
+}
+
+/// Returns true when the configured border style suppresses all border glyphs.
+/// Used by `draw_pane_border` and `paint_scrollbar` to skip rendering.
+#[inline]
+pub fn border_is_hidden(name: &str) -> bool {
+    matches!(name, "hidden" | "none")
 }
 
 /// A dock bar renderer. The dock sits at the bottom (or top) and shows the
@@ -324,6 +337,11 @@ mod tests {
     }
 
     #[test]
+    fn border_type_single_aliases_plain() {
+        assert_eq!(border_type("single"), ratatui::widgets::BorderType::Plain);
+    }
+
+    #[test]
     fn border_type_thick() {
         assert_eq!(border_type("thick"), ratatui::widgets::BorderType::Thick);
     }
@@ -341,6 +359,27 @@ mod tests {
     #[test]
     fn border_type_normal() {
         assert_eq!(border_type("normal"), ratatui::widgets::BorderType::Plain);
+    }
+
+    #[test]
+    fn border_type_half_block_styles() {
+        assert_eq!(
+            border_type("outer-half-block"),
+            ratatui::widgets::BorderType::QuadrantOutside
+        );
+        assert_eq!(
+            border_type("inner-half-block"),
+            ratatui::widgets::BorderType::QuadrantInside
+        );
+        assert_eq!(border_type("block"), ratatui::widgets::BorderType::QuadrantOutside);
+    }
+
+    #[test]
+    fn border_type_hidden_aliases_plain() {
+        assert_eq!(border_type("hidden"), ratatui::widgets::BorderType::Plain);
+        assert_eq!(border_type("none"), ratatui::widgets::BorderType::Plain);
+        assert!(border_is_hidden("hidden"));
+        assert!(border_is_hidden("none"));
     }
 
     #[test]

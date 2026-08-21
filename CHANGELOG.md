@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+- Completed Phase 25 vim-style copy mode routing: counted line/word motions,
+  `gg` oldest-line jumps, and preserved standalone `0` line-start behavior.
+- Phase 26 dock polish: dock hit-testing now respects top/bottom/hidden
+  placement, zoomed panes show a `Z` badge, and clickable `+N` overflow opens
+  the aggregate view.
+- Phase 27 border-style support: synchronized validation, generated config,
+  wizard choices, CLI completion, and renderer aliases for rounded, plain,
+  thick, double, hidden, block, ASCII, and half-block styles.
+
+
+### Added
 - **Phase 24 — Layout modes: master-stack and scrolling (niri-style).** Three layout modes now available:
   - BSP (default) — binary space partition tiling.
   - Master-Stack — one master pane on the left, rest stacked on the right.

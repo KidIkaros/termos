@@ -92,6 +92,10 @@ impl Drop for ChildGuard {
 
 #[test]
 fn osc11_queries_drive_auto_theme_and_live_swap() {
+    if !termos::testutil::pty_is_available() {
+        eprintln!("SKIP: PTY headroom too low — skipping osc11 E2E test");
+        return;
+    }
     // Isolated config with `theme = "auto"` (defaults pair latte/mocha).
     let config_dir = tempfile::tempdir().unwrap();
     let state_dir = tempfile::tempdir().unwrap();
