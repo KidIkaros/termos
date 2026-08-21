@@ -80,6 +80,7 @@ impl PixelCanvas {
         bg: (u8, u8, u8),
         accent_end: (u8, u8, u8),
         dock: (u8, u8, u8),
+        dock_position: &str,
     ) {
         let key = BackgroundKey {
             bg,
@@ -91,12 +92,31 @@ impl PixelCanvas {
             return;
         }
         self.clear(bg.0, bg.1, bg.2);
-        if self.height >= 2 {
-            self.gradient_horizontal(0, self.height - 2, self.width, 1, bg, accent_end);
-        }
-        if self.height >= 1 {
-            for x in 0..self.width {
-                self.set_pixel(x, self.height - 1, dock.0, dock.1, dock.2);
+        match dock_position {
+            "top" => {
+                // Dock at top: accent bar at row 1, dock at row 0.
+                if self.height >= 2 {
+                    self.gradient_horizontal(0, 1, self.width, 1, bg, accent_end);
+                }
+                if self.height >= 1 {
+                    for x in 0..self.width {
+                        self.set_pixel(x, 0, dock.0, dock.1, dock.2);
+                    }
+                }
+            }
+            "hidden" => {
+                // No dock — just background.
+            }
+            _ => {
+                // "bottom" (default)
+                if self.height >= 2 {
+                    self.gradient_horizontal(0, self.height - 2, self.width, 1, bg, accent_end);
+                }
+                if self.height >= 1 {
+                    for x in 0..self.width {
+                        self.set_pixel(x, self.height - 1, dock.0, dock.1, dock.2);
+                    }
+                }
             }
         }
         self.bg_cache.clear();
@@ -740,7 +760,7 @@ mod tests {
     #[test]
     fn fill_background_sets_accent_gradient_and_dock() {
         let mut c = PixelCanvas::new(10, 4);
-        c.fill_background((0, 0, 0), (255, 0, 0), (0, 0, 255));
+        c.fill_background((0, 0, 0), (255, 0, 0), (0, 0, 255), "bottom");
         // Dock row (y = 3) is solid blue.
         assert_eq!(c.get_pixel(0, 3), (0, 0, 255));
         assert_eq!(c.get_pixel(9, 3), (0, 0, 255));
@@ -756,8 +776,8 @@ mod tests {
     #[test]
     fn fill_background_updates_with_different_key() {
         let mut c = PixelCanvas::new(10, 4);
-        c.fill_background((0, 0, 0), (255, 0, 0), (0, 0, 255));
-        c.fill_background((0, 0, 0), (255, 0, 0), (0, 255, 0));
+        c.fill_background((0, 0, 0), (255, 0, 0), (0, 0, 255), "bottom");
+        c.fill_background((0, 0, 0), (255, 0, 0), (0, 255, 0), "bottom");
         // The dock row reflects the new key rather than the cached one.
         assert_eq!(c.get_pixel(5, 3), (0, 255, 0));
     }
@@ -766,7 +786,7 @@ mod tests {
     fn fill_background_single_row_is_safe() {
         // A 1-row canvas has no accent row; only the dock row is painted.
         let mut c = PixelCanvas::new(4, 1);
-        c.fill_background((10, 20, 30), (1, 2, 3), (200, 100, 50));
+        c.fill_background((10, 20, 30), (1, 2, 3), (200, 100, 50), "bottom");
         assert_eq!(c.get_pixel(0, 0), (200, 100, 50));
         assert_eq!(c.get_pixel(3, 0), (200, 100, 50));
     }

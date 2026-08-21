@@ -3083,13 +3083,29 @@ impl Os {
 
     /// The usable bounds of a workspace, minus the dock bar.
     pub fn workspace_bounds(&self, _ws: i32) -> Rect {
-        // 2 rows: accent bar + dock content.
-        let dock_height = 2;
+        let dock_height = self.dock_height() as i32;
+        // y is always 0 because rect_to_tui adds content_area.y which
+        // already accounts for the dock position.
         Rect {
             x: 0,
             y: 0,
             w: self.width,
             h: (self.height - dock_height).max(1),
+        }
+    }
+
+    /// Height of the dock area in rows (0 when hidden).
+    pub(crate) fn dock_height(&self) -> u16 {
+        match self.config.appearance.dockbar_position.as_str() {
+            "hidden" => 0,
+            _ => {
+                let hints: u16 = if self.hints_visible && !self.show_welcome {
+                    1
+                } else {
+                    0
+                };
+                2 + hints
+            }
         }
     }
 
@@ -8162,7 +8178,7 @@ mod tests {
         assert_eq!(zoomed.x, 0);
         assert_eq!(zoomed.y, 0);
         assert_eq!(zoomed.w, 80);
-        assert_eq!(zoomed.h, 23); // 25 - 2 (accent bar + dock)
+        assert_eq!(zoomed.h, os.height - os.dock_height() as i32);
         os.toggle_zoom_internal().unwrap();
         let restored = os.float_rect(0).unwrap();
         assert_eq!(restored, r);

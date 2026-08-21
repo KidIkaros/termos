@@ -25,26 +25,57 @@ pub fn render(os: &Os, buf: &mut Buffer) {
     // style conversion is an array lookup rather than re-resolving colors
     // through an `Option<&Theme>` for every cell.
     let palette = StylePalette::new(os.theme.as_ref());
-    // Dock area: 3 rows — hints bar (top) + accent bar + dock content (bottom).
+    // Dock area: 3 rows — hints bar + accent bar + dock content.
+    // Position depends on [appearance] dockbar_position: "bottom" (default), "top", or "hidden".
+    let dock_pos = os.config.appearance.dockbar_position.as_str();
     let hints_height: u16 = if os.hints_visible && !os.show_welcome { 1 } else { 0 };
-    let dock_height = 2usize + hints_height as usize;
-    let dock_area = TuiRect {
-        x: 0,
-        y: area.height.saturating_sub(1),
-        width: area.width,
-        height: 1,
+    let dock_height = if dock_pos == "hidden" {
+        0usize
+    } else {
+        2usize + hints_height as usize
     };
-    let hints_area = TuiRect {
-        x: 0,
-        y: area.height.saturating_sub(1 + hints_height),
-        width: area.width,
-        height: hints_height,
-    };
-    let content_area = TuiRect {
-        x: 0,
-        y: 0,
-        width: area.width,
-        height: area.height.saturating_sub(dock_height as u16),
+
+    let (dock_area, hints_area, content_area) = if dock_pos == "top" {
+        let dock_y = 0u16;
+        let hints_y = 1u16;
+        (
+            TuiRect { x: 0, y: dock_y, width: area.width, height: 1 },
+            TuiRect { x: 0, y: hints_y, width: area.width, height: hints_height },
+            TuiRect {
+                x: 0,
+                y: dock_height as u16,
+                width: area.width,
+                height: area.height.saturating_sub(dock_height as u16),
+            },
+        )
+    } else if dock_pos == "hidden" {
+        (
+            TuiRect::default(),
+            TuiRect::default(),
+            TuiRect { x: 0, y: 0, width: area.width, height: area.height },
+        )
+    } else {
+        // "bottom" (default)
+        (
+            TuiRect {
+                x: 0,
+                y: area.height.saturating_sub(1),
+                width: area.width,
+                height: 1,
+            },
+            TuiRect {
+                x: 0,
+                y: area.height.saturating_sub(1 + hints_height),
+                width: area.width,
+                height: hints_height,
+            },
+            TuiRect {
+                x: 0,
+                y: 0,
+                width: area.width,
+                height: area.height.saturating_sub(dock_height as u16),
+            },
+        )
     };
 
     // Paint the background via the pixel canvas for gradient/shadow support.
@@ -76,7 +107,7 @@ pub fn render(os: &Os, buf: &mut Buffer) {
             (dock_bg, dim_accent)
         })
         .unwrap_or((bg_rgb, bg_rgb));
-    canvas.fill_background(bg_rgb, dim_accent, dock_bg);
+    canvas.fill_background(bg_rgb, dim_accent, dock_bg, dock_pos);
 
     // Drop shadows for floating panes.
     if !os.floats_hidden_by_zoom() {
@@ -889,8 +920,12 @@ fn paint_emulator(
         return;
     }
 
+    let buf_h = buf.area().height;
     for (row_idx, row) in lines.iter().take(inner_h as usize).enumerate() {
         let y = inner_y + row_idx as u16;
+        if y >= buf_h {
+            break;
+        }
         let mut col_pos = 0u16;
         for sc in row.iter() {
             let x = inner_x + col_pos;
@@ -1709,7 +1744,7 @@ fn render_sidebar(os: &Os, buf: &mut Buffer, area: TuiRect) {
     let fg = TuiColor::White;
     for cy in 0..area.height {
         for cx in x..area.width {
-            let cell = &mut buf[(cx, cy)];
+            let cell = &mut buf[(cx, area.y + cy)];
             cell.set_bg(bg);
             cell.set_fg(fg);
         }
@@ -1720,6 +1755,7 @@ fn render_sidebar(os: &Os, buf: &mut Buffer, area: TuiRect) {
         if y >= area.height {
             break;
         }
+        let buf_y = area.y + y;
         let selected = i == os.sidebar.selected;
         let indent = if row.kind == super::sidebar::RowKind::Window {
             2
@@ -1745,7 +1781,7 @@ fn render_sidebar(os: &Os, buf: &mut Buffer, area: TuiRect) {
             if cx >= area.width {
                 break;
             }
-            let cell = &mut buf[(cx, y)];
+            let cell = &mut buf[(cx, buf_y)];
             cell.set_char(ch);
             if selected {
                 cell.set_bg(TuiColor::Blue);
@@ -1760,7 +1796,7 @@ fn render_sidebar(os: &Os, buf: &mut Buffer, area: TuiRect) {
                     if cx >= area.width {
                         break;
                     }
-                    let cell = &mut buf[(cx, y)];
+                    let cell = &mut buf[(cx, area.y + y)];
                     cell.set_char(ch);
                     cell.set_bg(bg);
                 }
