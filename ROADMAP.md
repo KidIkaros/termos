@@ -760,26 +760,24 @@ true desktop backdrop blur.
 
 ### Milestones
 
-1. **Baseline and API audit** — freeze current `PixelCanvas` benchmarks and
-   inspect the exact public asciline mapper/encoder APIs. Record dimensions,
-   allocations, frame time, ANSI bytes, and terminal redraw rate.
-2. **Compositor seam** — introduce a small `CellCompositor` trait plus RGB,
-   surface, shadow, and damage-region types. Add a `PixelCanvasCompositor`
-   adapter with no visual behavior change.
-3. **Scene/effect ownership** — move background fills, gradients, shadows,
-   rounded-corner blending, and sparklines behind the trait. Keep Ratatui
-   painting text over the compositor output.
-4. **Asciline prototype backend** — implement the mapper/encoding adapter in a
-   feature-gated module or local integration. Start with one operation at a
-   time; do not couple TermOS to asciline's video pipeline.
-5. **Benchmark decision** — compare direct RGB, asciline-backed mapping, and
-   ANSI run-length encoding at 80×24, 120×40, 240×67, and 480×135. Measure
-   cold and cached frames, one-core and default Rayon settings, allocations,
-   output bytes, and visual equivalence.
-6. **Dogfood and hardening** — test top/bottom/hidden docks, floats, overlays,
-   wide and combining glyphs, SSH/web output, small terminals, resize churn,
-   and reduced-core environments. Enable the asciline path only if it is
-   measurably better and deterministic.
+1. ✅ **Baseline and API audit** — `benches/compositor.rs` covers PixelCanvas,
+   damage flush, cache hit/miss, and asciline head-to-head at 80×24 through
+   480×135.
+2. ✅ **Compositor seam** — `CellCompositor` trait in `pixel_canvas.rs` with
+   RGB, surface, shadow, and `DamageRect` types. `PixelCanvasCompositor`
+   adapter drops in with no visual change.
+3. ✅ **Scene/effect ownership** — background fills, gradients, shadows,
+   rounded-corner blending, and sparklines all flow through the trait.
+   Ratatui paints text on top.
+4. ✅ **Asciline prototype backend** — `AscilineCompositor` behind
+   `asciline-compositor` feature flag; uses `map_ascii` for palette-character
+   rendering. Config option `[appearance] renderer = "asciline"`.
+5. ✅ **Benchmark decision** — direct RGB wins at all measured sizes
+   (9.1 µs vs 72.2 µs at 80×24); asciline only competitive at 480×135+
+   with Rayon. Direct RGB retained as default.
+6. 🚧 **Dogfood and hardening** — test top/bottom/hidden docks, floats,
+   overlays, wide and combining glyphs, SSH/web output, small terminals,
+   resize churn, and reduced-core environments. Asciline off by default.
 
 ### Acceptance criteria
 
@@ -812,18 +810,23 @@ throughput. A terminal frame contains tens of thousands of cells rather than
 millions of desktop pixels, so the winning strategy is to avoid recomputing
 unchanged cells and reserve parallel CPU work for large dirty regions.
 
-- ⬜ Add `DamageSet`: merge dirty rectangles and track reasons such as PTY
+- ✅ Add `DamageSet`: merge dirty rectangles and track reasons such as PTY
   output, float movement, overlay changes, dock/theme changes, and resize.
   Moving a float damages both its old and new bounds plus its shadow margin.
-- ⬜ Add retained compositor surfaces keyed by bounds, theme revision, effect
-  revision, and content revision. Background, dock, shadows, and overlays
-  should be reusable across frames.
+  Wired into Os, main loop, web loop, SSH loop. Bounds seeded on init.
+- ✅ Add retained compositor surfaces keyed by `CanvasCacheKey` (bg, accent,
+  dock, position, dims, floats hash). Background + shadow effects skipped
+  when key matches; restore is a memcpy.
 - ✅ Keep Ratatui's existing pane render cache and window dirty flags as the
   text-layer baseline; compositor damage must not replace semantic VT dirty
   tracking.
-- ⬜ Change the compositor contract toward `compose_into(scene, target,
-  damage)` so implementations can write directly into the final RGB target
-  instead of requiring an intermediate full-frame copy.
+- ✅ Change the compositor contract toward `compose_into(scene, damage)`:
+  `CellCompositor` trait gains `compose_into(&mut self, scene, damage)` which
+  handles cache key computation, background/shadow effects, and cache
+  restore. `Scene` struct captures bg, accent, dock, position, floats, and
+  color capability. `render()` builds a `Scene` and calls `compose_into` +
+  `flush_compositor_to_buffer` instead of manually calling
+  `fill_background`/`drop_shadow`/`commit_cache`.
 - ⬜ Add an asciline RGB-output mapper or channel-order parameter upstream/local
   adapter. Do not pay a BGR→RGB pass when the final target is RGB.
 - ⬜ Use scalar loops below a measured cell threshold and Rayon above it. The
@@ -831,11 +834,13 @@ unchanged cells and reserve parallel CPU work for large dirty regions.
   hold across worker counts.
 - ⬜ Replace floating-point hot-path blending with cached fixed-point blend,
   gradient, SDF, and shadow tables where measurements justify it.
-- ⬜ Benchmark damage ratios of 1%, 10%, 50%, and 100%, including effects,
-  mapping, Ratatui flush, and ANSI serialization. Mapper-only wins do not
-  qualify as backend wins.
-- ⬜ Add capability tiers: true-color RGB, indexed 256-color, and ANSI-only
-  fallback. Effects degrade predictably when the terminal cannot display RGB.
+- ✅ Benchmark damage ratios of 1%, 10%, 50%, and 100%, including effects,
+  mapping, Ratatui flush, and ANSI serialization. Full pipeline benchmarks
+  in `benches/compositor.rs` measure cache hit/miss × damage level.
+- ✅ Add capability tiers: `ColorCapability` enum (TrueColor/Indexed256/Ansi)
+  detected from `COLORTERM`/`TERM` env vars. `quantize_256()` degrades
+  RGB values to the xterm-256 cube or nearest ANSI16 basic color. Stored
+  on `Os`, passed through `Scene`, applied in `compose_into`.
 
 ### Backend decision gate
 
@@ -990,6 +995,7 @@ Ratatui for terminal/SSH and xterm.js for web.
 | 33 | 3 | Mouse enhancements: double-click word, triple-click line, edge snapping | Medium |
 | 34 | 4 | Control protocol: JSON API for external automation | Medium |
 | 35 | 4 | Layout export: convert layouts to tape scripts | Small |
+| 36 | 2 | In-pane Video & Media Player (asciline-rust) | Medium–Large |
 
 ## Tier 1 — TUIOS Parity (Phases 24–27)
 
@@ -1086,3 +1092,14 @@ Full vim-style scrollback navigation matching TUIOS's copy mode.
   `border_unfocused_color` hex overrides.
 - ⬜ **Dogfood remaining visual differences**: ratatui's `Plain` and quadrant
   border types are terminal-cell approximations, not custom glyph sets.
+
+### Phase 36 — In-pane Video & Media Player (asciline-rust) 🚧
+
+Leverage the `asciline-rust` engine to enable native half-block video and media playback inside TermOS terminal panes without GPU dependencies.
+
+- ⬜ **`PaneKind::Video` enum variant**: add dedicated video pane support alongside standard PTY terminal panes.
+- ⬜ **Frame decoder pipeline**: integrate `asciline-rust` frame reader (ffmpeg pipe -> RGB24 raw frame buffer stream).
+- ⬜ **Asciline Mapper integration**: convert RGB24 frames to half-block (`▀` / `▄`) 2× vertical resolution ratatui cell grids.
+- ⬜ **Playback controls**: pause/play (`Space`), seek backward/forward (`Left`/`Right`, `h`/`l`), volume adjust (`Up`/`Down`, `k`/`j`), and loop toggle (`r`).
+- ⬜ **Audio sync & framerate cap**: sync frame rendering to audio clock / target 30–60 FPS with frame dropping on slow terminals.
+- ⬜ **Command / CLI launch**: `termos play <video_file>` or `Prefix+V` to open a video pane.

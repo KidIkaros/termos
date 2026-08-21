@@ -9,6 +9,10 @@ license = "MIT"
 name = "termos"
 path = "src/main.rs"
 
+[[bin]]
+name = "compare"
+path = "src/bin/compare.rs"
+
 [lib]
 name = "termos"
 path = "src/lib.rs"
@@ -107,7 +111,6 @@ harness = false
 [[bench]]
 name = "compositor"
 harness = false
-required-features = ["asciline-compositor"]
 
 [profile.release]
 lto = "thin"

@@ -89,16 +89,13 @@ pub fn render(os: &Os, buf: &mut Buffer, damage: &[crate::app::damage::DamageRec
     let mut canvas = os.pixel_canvas.lock().unwrap_or_else(|e| e.into_inner());
     canvas.resize(area.width as usize, area.height as usize);
 
-    // Accent bar: 1-row gradient strip above the dock, giving a "glass" effect.
-    // Fades from content background to a dimmed version of the accent color.
-    // The computed background is cached so an unchanged theme only memcpys.
+    // Build the scene descriptor for the compositor.
     let (dock_bg, dim_accent) = os
         .theme
         .as_ref()
         .map(|theme| {
             let dock_bg = (theme.ansi[0].0, theme.ansi[0].1, theme.ansi[0].2);
             let accent = theme.ansi[4];
-            // Dim the accent to 30% brightness for a subtle glass strip.
             let dim_accent = (
                 (accent.0 as f64 * 0.3) as u8,
                 (accent.1 as f64 * 0.3) as u8,
@@ -107,34 +104,69 @@ pub fn render(os: &Os, buf: &mut Buffer, damage: &[crate::app::damage::DamageRec
             (dock_bg, dim_accent)
         })
         .unwrap_or((bg_rgb, bg_rgb));
-    canvas.fill_background(bg_rgb, dim_accent, dock_bg, dock_pos);
 
-    // Drop shadows for floating panes.
-    if !os.floats_hidden_by_zoom() {
+    let dock_pos_byte: u8 = match dock_pos {
+        "top" => 1,
+        "hidden" => 2,
+        _ => 0,
+    };
+
+    let float_rects: Vec<(usize, usize, usize, usize)> = if !os.floats_hidden_by_zoom() {
         let ws = os.current_workspace;
-        for fi in os.floats_on_workspace(ws) {
-            let f = &os.floats[fi];
-            let fr = f.rect();
-            let shadow_bg = bg_rgb;
-            canvas.drop_shadow(
-                fr.x as usize,
-                fr.y as usize,
-                fr.w as usize,
-                fr.h as usize,
-                2,
-                1,
-                3.0,
-                (0, 0, 0),
-                shadow_bg,
+        os.floats_on_workspace(ws)
+            .iter()
+            .map(|&fi| {
+                let fr = os.floats[fi].rect();
+                (fr.x as usize, fr.y as usize, fr.w as usize, fr.h as usize)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let scene = crate::app::pixel_canvas::Scene {
+        bg: crate::app::pixel_canvas::Rgb(bg_rgb.0, bg_rgb.1, bg_rgb.2),
+        accent: crate::app::pixel_canvas::Rgb(dim_accent.0, dim_accent.1, dim_accent.2),
+        dock_bg: crate::app::pixel_canvas::Rgb(dock_bg.0, dock_bg.1, dock_bg.2),
+        dock_position: dock_pos_byte,
+        float_rects,
+        color_capability: os.color_capability,
+    };
+
+    // Compose the background scene into the canvas (cache-aware).
+    canvas.compose_into(&scene, damage);
+
+    // Flush the composed RGB into the ratatui Buffer.
+    let use_asciline = os.config.appearance.renderer == "asciline";
+
+    if use_asciline {
+        #[cfg(feature = "asciline-compositor")]
+        {
+            drop(canvas);
+            let mut asc = os.asciline_compositor.lock().unwrap_or_else(|e| e.into_inner());
+            asc.resize(area.width as usize, area.height as usize);
+            let float_shadows: Vec<(usize, usize, usize, usize)> = scene.float_rects.clone();
+            asc.paint_background(
+                (scene.bg.0, scene.bg.1, scene.bg.2),
+                (scene.accent.0, scene.accent.1, scene.accent.2),
+                (scene.dock_bg.0, scene.dock_bg.1, scene.dock_bg.2),
+                match scene.dock_position {
+                    1 => "top",
+                    2 => "hidden",
+                    _ => "bottom",
+                },
+                &float_shadows,
             );
+            let cells = asc.paint_cells();
+            flush_asciline_cells(cells, area.width as usize, area.height as usize, buf, damage);
         }
+        #[cfg(not(feature = "asciline-compositor"))]
+        {
+            flush_compositor_to_buffer(&*canvas, buf, area, damage);
+        }
+    } else {
+        flush_compositor_to_buffer(&*canvas, buf, area, damage);
     }
-
-    // Rounded corners for overlays.
-    // (Applied later when overlays are rendered.)
-
-    // Paint the RGB canvas into the ratatui Buffer, skipping undamaged regions.
-    flush_compositor_to_buffer(&*canvas, buf, area, damage);
 
     // Composite each pane.
     let layout = os.current_layout();
@@ -389,6 +421,47 @@ pub fn render(os: &Os, buf: &mut Buffer, damage: &[crate::app::damage::DamageRec
 }
 
 /// Flush a cell compositor's packed RGB framebuffer into a Ratatui buffer.
+/// Flush asciline's 4-byte `[char, R, G, B]` cell output into a Ratatui buffer.
+/// Palette characters are used as the cell glyph for richer visual effects.
+#[cfg(feature = "asciline-compositor")]
+fn flush_asciline_cells(
+    cells: &[u8],
+    width: usize,
+    height: usize,
+    buf: &mut Buffer,
+    damage: &[crate::app::damage::DamageRect],
+) {
+    let mut flush_rect = |x0: usize, y0: usize, x1: usize, y1: usize| {
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let idx = (y * width + x) * 4;
+                let char_byte = cells[idx];
+                let r = cells[idx + 1];
+                let g = cells[idx + 2];
+                let b = cells[idx + 3];
+                let cell = &mut buf[((x as u16), (y as u16))];
+                if char_byte > 0x20 {
+                    cell.set_char(char_byte as char);
+                } else {
+                    cell.set_char(' ');
+                }
+                cell.set_bg(TuiColor::Rgb(r, g, b));
+            }
+        }
+    };
+    if damage.is_empty() {
+        flush_rect(0, 0, width, height);
+        return;
+    }
+    for d in damage {
+        let x0 = d.rect.x.max(0) as usize;
+        let y0 = d.rect.y.max(0) as usize;
+        let x1 = (d.rect.x + d.rect.w).min(width as i32) as usize;
+        let y1 = (d.rect.y + d.rect.h).min(height as i32) as usize;
+        flush_rect(x0, y0, x1, y1);
+    }
+}
+
 ///
 /// Keeping this adapter separate means an asciline-backed compositor can be
 /// introduced without changing pane, dock, or overlay rendering code.

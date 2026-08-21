@@ -327,6 +327,9 @@ pub struct AppearanceConfig {
     /// Master pane width ratio for master-stack layout (0.3–0.7).
     #[serde(default = "default_master_ratio")]
     pub master_ratio: f64,
+    /// Renderer backend: "pixel" (default, fast RGB) or "asciline" (palette characters).
+    #[serde(default)]
+    pub renderer: String,
 }
 
 fn default_auto_dark() -> String {
@@ -400,6 +403,7 @@ impl Default for AppearanceConfig {
             theme_auto_light: default_auto_light(),
             layout_mode: String::new(),
             master_ratio: 0.5,
+            renderer: String::new(),
         }
     }
 }

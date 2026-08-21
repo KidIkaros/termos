@@ -50,6 +50,97 @@ pub struct BackgroundKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
+/// Terminal color capability tier.
+///
+/// Detected from `COLORTERM` and `TERM` environment variables. The compositor
+/// uses this to degrade visual effects gracefully on limited terminals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ColorCapability {
+    /// 16 colors only — ANSI basic palette. Gradients become solid fills.
+    Ansi,
+    /// 256-color palette — gradients quantized to xterm-256 cube.
+    Indexed256,
+    /// 24-bit true color — full RGB gradients and shadows.
+    TrueColor,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for ColorCapability {
+    fn default() -> Self {
+        Self::TrueColor
+    }
+}
+
+impl ColorCapability {
+    /// Detect the terminal's color capability from environment variables.
+    pub fn detect() -> Self {
+        if let Ok(ct) = std::env::var("COLORTERM") {
+            let ct = ct.to_lowercase();
+            if ct == "truecolor" || ct == "24bit" {
+                return Self::TrueColor;
+            }
+        }
+        if let Ok(term) = std::env::var("TERM") {
+            if term.contains("256color") || term.contains("truecolor") {
+                return Self::Indexed256;
+            }
+        }
+        Self::Ansi
+    }
+
+    /// Quantize an RGB value to the xterm-256 palette.
+    pub fn quantize_256(&self, rgb: Rgb) -> Rgb {
+        match self {
+            Self::TrueColor => rgb,
+            Self::Indexed256 => {
+                // Map to the 6×6×6 color cube (indices 16–231).
+                let r = (rgb.0 as f64 / 255.0 * 5.0).round() as u8;
+                let g = (rgb.1 as f64 / 255.0 * 5.0).round() as u8;
+                let b = (rgb.2 as f64 / 255.0 * 5.0).round() as u8;
+                // Convert back to approximate RGB for the ratatui buffer.
+                let qr = (r as f64 / 5.0 * 255.0).round() as u8;
+                let qg = (g as f64 / 5.0 * 255.0).round() as u8;
+                let qb = (b as f64 / 5.0 * 255.0).round() as u8;
+                Rgb(qr, qg, qb)
+            }
+            Self::Ansi => {
+                // Snap to the nearest of the 16 basic ANSI colors.
+                let ansi16: &[(u8, u8, u8)] = &[
+                    (0, 0, 0),       // 0 black
+                    (128, 0, 0),     // 1 red
+                    (0, 128, 0),     // 2 green
+                    (128, 128, 0),   // 3 yellow
+                    (0, 0, 128),     // 4 blue
+                    (128, 0, 128),   // 5 magenta
+                    (0, 128, 128),   // 6 cyan
+                    (192, 192, 192), // 7 white
+                    (128, 128, 128), // 8 bright black
+                    (255, 0, 0),     // 9 bright red
+                    (0, 255, 0),     // 10 bright green
+                    (255, 255, 0),   // 11 bright yellow
+                    (0, 0, 255),     // 12 bright blue
+                    (255, 0, 255),   // 13 bright magenta
+                    (0, 255, 255),   // 14 bright cyan
+                    (255, 255, 255), // 15 bright white
+                ];
+                let mut best = ansi16[0];
+                let mut best_dist = u32::MAX;
+                for &c in ansi16 {
+                    let dr = rgb.0 as i32 - c.0 as i32;
+                    let dg = rgb.1 as i32 - c.1 as i32;
+                    let db = rgb.2 as i32 - c.2 as i32;
+                    let dist = (dr * dr + dg * dg + db * db) as u32;
+                    if dist < best_dist {
+                        best_dist = dist;
+                        best = c;
+                    }
+                }
+                Rgb(best.0, best.1, best.2)
+            }
+        }
+    }
+}
+
 /// A terminal-cell compositor surface.
 ///
 /// Implementations produce one RGB color per terminal cell. Text and widgets
@@ -61,6 +152,83 @@ pub trait CellCompositor {
     fn finish_frame(&self) -> &[u8];
     fn width(&self) -> usize;
     fn height(&self) -> usize;
+
+    /// Compose the full background scene into the internal RGB buffer,
+    /// using damage rects to skip unchanged regions.
+    ///
+    /// Implementations should:
+    /// 1. Compute a cache key from the scene + dimensions.
+    /// 2. If the key matches the previous frame, restore from cache.
+    /// 3. Otherwise, render backgrounds, gradients, shadows, and accent
+    ///    bars, then commit the result to cache.
+    /// 4. The damage rects are advisory — implementations may ignore them
+    ///    for cache misses (full recomputation) but must respect them for
+    ///    cache hits (only flush damaged cells to the ratatui Buffer).
+    fn compose_into(&mut self, scene: &Scene, damage: &[crate::app::damage::DamageRect]);
+}
+
+/// Full-canvas revision key: captures every input that affects the pixel
+/// canvas output (background, dock accent, dock position, and float rects
+/// for shadows).  When two consecutive frames produce the same key the
+/// entire canvas effects pass can be skipped — gradients, accent bars, and
+/// shadow masks are all unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanvasCacheKey {
+    pub bg: (u8, u8, u8),
+    pub accent: (u8, u8, u8),
+    pub dock: (u8, u8, u8),
+    pub dock_position: u8, // 0=bottom, 1=top, 2=hidden
+    pub width: u16,
+    pub height: u16,
+    /// Hash of float rects (x, y, w, h) for shadow invalidation.
+    pub floats_hash: u64,
+}
+
+/// Describes everything the compositor needs to render a frame.
+///
+/// Passed to [`CellCompositor::compose_into`] so implementations can compute
+/// the full scene without reaching back into `Os`.  The struct is cheap to
+/// build (all `Copy` fields) and captures the minimal surface that affects
+/// the pixel canvas: background, dock accent, dock position, and float
+/// geometry for shadows.
+#[derive(Debug, Clone)]
+pub struct Scene {
+    /// Background RGB.
+    pub bg: Rgb,
+    /// Dimmed accent for the glass gradient strip.
+    pub accent: Rgb,
+    /// Dock background color.
+    pub dock_bg: Rgb,
+    /// Dock position: 0 = bottom, 1 = top, 2 = hidden.
+    pub dock_position: u8,
+    /// Floating pane rects for shadow rendering.
+    pub float_rects: Vec<(usize, usize, usize, usize)>,
+    /// Terminal color capability — determines effect degradation.
+    pub color_capability: ColorCapability,
+}
+
+impl Scene {
+    /// Build a `CanvasCacheKey` from this scene for cache comparison.
+    pub fn cache_key(&self, width: u16, height: u16) -> CanvasCacheKey {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        for &(x, y, w, r) in &self.float_rects {
+            x.hash(&mut h);
+            y.hash(&mut h);
+            w.hash(&mut h);
+            r.hash(&mut h);
+        }
+        CanvasCacheKey {
+            bg: (self.bg.0, self.bg.1, self.bg.2),
+            accent: (self.accent.0, self.accent.1, self.accent.2),
+            dock: (self.dock_bg.0, self.dock_bg.1, self.dock_bg.2),
+            dock_position: self.dock_position,
+            width,
+            height,
+            floats_hash: h.finish(),
+        }
+    }
 }
 
 pub struct PixelCanvas {
@@ -73,6 +241,9 @@ pub struct PixelCanvas {
     /// instead of recomputed gradients/lerps.
     bg_cache_key: Option<BackgroundKey>,
     bg_cache: Vec<u8>,
+    /// Full-canvas revision cache: when the key matches, skip all effects.
+    canvas_cache_key: Option<CanvasCacheKey>,
+    canvas_cache: Vec<u8>,
 }
 
 impl CellCompositor for PixelCanvas {
@@ -92,12 +263,39 @@ impl CellCompositor for PixelCanvas {
 
     fn width(&self) -> usize {
         self.width()
-    }
-
-    fn height(&self) -> usize {
+    }    fn height(&self) -> usize {
         self.height()
     }
+
+    fn compose_into(&mut self, scene: &Scene, _damage: &[crate::app::damage::DamageRect]) {
+        let key = scene.cache_key(self.width as u16, self.height as u16);
+        if self.is_cached(&key) {
+            self.restore_cache();
+        } else {
+            // Quantize colors to the terminal's capability tier.
+            let cap = scene.color_capability;
+            let bg = cap.quantize_256(scene.bg);
+            let accent = cap.quantize_256(scene.accent);
+            let dock_bg = cap.quantize_256(scene.dock_bg);
+
+            self.fill_background(
+                (bg.0, bg.1, bg.2),
+                (accent.0, accent.1, accent.2),
+                (dock_bg.0, dock_bg.1, dock_bg.2),
+                match scene.dock_position {
+                    1 => "top",
+                    2 => "hidden",
+                    _ => "bottom",
+                },
+            );
+            for &(fx, fy, fw, fh) in &scene.float_rects {
+                self.drop_shadow(fx, fy, fw, fh, 2, 1, 3.0, (0, 0, 0), (bg.0, bg.1, bg.2));
+            }
+            self.commit_cache(key);
+        }
+    }
 }
+
 
 impl PixelCanvas {
     /// Create a new canvas for the given terminal dimensions.
@@ -109,6 +307,31 @@ impl PixelCanvas {
             height,
             bg_cache_key: None,
             bg_cache: Vec::new(),
+            canvas_cache_key: None,
+            canvas_cache: Vec::new(),
+        }
+    }
+
+    /// Returns `true` if the canvas was last rendered with the same revision
+    /// key — meaning no effects need to be recomputed.
+    pub fn is_cached(&self, key: &CanvasCacheKey) -> bool {
+        self.canvas_cache_key.as_ref() == Some(key)
+            && self.canvas_cache.len() == self.rgb.len()
+    }
+
+    /// Snapshot the current canvas state as the cache for the given key.
+    /// Call this *after* effects have been applied.
+    pub fn commit_cache(&mut self, key: CanvasCacheKey) {
+        self.canvas_cache.clear();
+        self.canvas_cache.extend_from_slice(&self.rgb);
+        self.canvas_cache_key = Some(key);
+    }
+
+    /// Restore the cached canvas state (memcpy from cache into rgb buffer).
+    /// Called when `is_cached` returned true to skip effects.
+    pub fn restore_cache(&mut self) {
+        if self.canvas_cache.len() == self.rgb.len() {
+            self.rgb.copy_from_slice(&self.canvas_cache);
         }
     }
 
@@ -847,5 +1070,350 @@ mod tests {
         c.fill_background((10, 20, 30), (1, 2, 3), (200, 100, 50), "bottom");
         assert_eq!(c.get_pixel(0, 0), (200, 100, 50));
         assert_eq!(c.get_pixel(3, 0), (200, 100, 50));
+    }
+
+    #[test]
+    fn canvas_cache_skips_effects_when_key_unchanged() {
+        let key1 = CanvasCacheKey {
+            bg: (10, 10, 10),
+            accent: (5, 5, 5),
+            dock: (20, 20, 20),
+            dock_position: 0,
+            width: 80,
+            height: 25,
+            floats_hash: 0,
+        };
+        let mut c = PixelCanvas::new(80, 25);
+        assert!(!c.is_cached(&key1));
+
+        // Simulate a full render cycle.
+        c.fill_background((10, 10, 10), (5, 5, 5), (20, 20, 20), "bottom");
+        c.commit_cache(key1.clone());
+        assert!(c.is_cached(&key1));
+
+        // Mutate the canvas — restore_cache should overwrite.
+        c.clear(0, 0, 0);
+        assert_eq!(c.get_pixel(0, 0), (0, 0, 0));
+        c.restore_cache();
+        // After restore, pixel should be back to the cached state.
+        assert_eq!(c.get_pixel(0, 0), (10, 10, 10));
+    }
+
+    #[test]
+    fn canvas_cache_invalidated_by_key_change() {
+        let key1 = CanvasCacheKey {
+            bg: (10, 10, 10),
+            accent: (5, 5, 5),
+            dock: (20, 20, 20),
+            dock_position: 0,
+            width: 80,
+            height: 25,
+            floats_hash: 0,
+        };
+        let key2 = CanvasCacheKey {
+            bg: (30, 30, 30), // different bg
+            accent: (5, 5, 5),
+            dock: (20, 20, 20),
+            dock_position: 0,
+            width: 80,
+            height: 25,
+            floats_hash: 0,
+        };
+        let mut c = PixelCanvas::new(80, 25);
+        c.fill_background((10, 10, 10), (5, 5, 5), (20, 20, 20), "bottom");
+        c.commit_cache(key1.clone());
+
+        // Different key should not match.
+        assert!(!c.is_cached(&key2));
+    }
+
+    #[test]
+    fn compose_into_populates_canvas_and_caches() {
+        let mut c = PixelCanvas::new(80, 25);
+        let scene = Scene {
+            bg: Rgb(10, 10, 10),
+            accent: Rgb(5, 5, 5),
+            dock_bg: Rgb(20, 20, 20),
+            dock_position: 0,
+            float_rects: vec![(10, 5, 20, 10)],
+            color_capability: ColorCapability::default(),
+        };
+        // First call: cache miss, should compute effects.
+        c.compose_into(&scene, &[]);
+        assert_eq!(c.get_pixel(0, 0), (10, 10, 10)); // bg color
+
+        // Mutate the canvas.
+        c.clear(0, 0, 0);
+        assert_eq!(c.get_pixel(0, 0), (0, 0, 0));
+
+        // Second call: cache hit, should restore.
+        c.compose_into(&scene, &[]);
+        assert_eq!(c.get_pixel(0, 0), (10, 10, 10)); // restored from cache
+    }
+
+    #[test]
+    fn compose_into_recomputes_on_scene_change() {
+        let mut c = PixelCanvas::new(80, 25);
+        let scene1 = Scene {
+            bg: Rgb(10, 10, 10),
+            accent: Rgb(5, 5, 5),
+            dock_bg: Rgb(20, 20, 20),
+            dock_position: 0,
+            float_rects: vec![],
+            color_capability: ColorCapability::default(),
+        };
+        c.compose_into(&scene1, &[]);
+        assert_eq!(c.get_pixel(0, 0), (10, 10, 10));
+
+        // Change scene — should recompute.
+        let scene2 = Scene {
+            bg: Rgb(30, 30, 30),
+            accent: Rgb(5, 5, 5),
+            dock_bg: Rgb(20, 20, 20),
+            dock_position: 0,
+            float_rects: vec![],
+            color_capability: ColorCapability::default(),
+        };
+        c.compose_into(&scene2, &[]);
+        assert_eq!(c.get_pixel(0, 0), (30, 30, 30));
+    }
+
+    #[test]
+    fn quantize_truecolor_passthrough() {
+        let cap = ColorCapability::TrueColor;
+        let q = cap.quantize_256(Rgb(123, 200, 50));
+        assert_eq!(q, Rgb(123, 200, 50));
+    }
+
+    #[test]
+    fn quantize_256_rounds_to_cube() {
+        let cap = ColorCapability::Indexed256;
+        // Pure red (255,0,0) maps to cube index (5,0,0) → (255,0,0)
+        let q = cap.quantize_256(Rgb(255, 0, 0));
+        assert_eq!(q, Rgb(255, 0, 0));
+        // Mid-gray (128,128,128) maps to cube (3,3,3) → (153,153,153)
+        let q = cap.quantize_256(Rgb(128, 128, 128));
+        assert_eq!(q, Rgb(153, 153, 153));
+    }
+
+    #[test]
+    fn quantize_ansi_snaps_to_basic() {
+        let cap = ColorCapability::Ansi;
+        // Near-black → black (0,0,0)
+        let q = cap.quantize_256(Rgb(10, 5, 5));
+        assert_eq!(q, Rgb(0, 0, 0));
+        // Pure white → white (255,255,255)
+        let q = cap.quantize_256(Rgb(255, 255, 255));
+        assert_eq!(q, Rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn compose_into_applies_quantization() {
+        let mut c = PixelCanvas::new(10, 5);
+        let scene = Scene {
+            bg: Rgb(128, 128, 128),
+            accent: Rgb(5, 5, 5),
+            dock_bg: Rgb(20, 20, 20),
+            dock_position: 0,
+            float_rects: vec![],
+            color_capability: ColorCapability::Ansi,
+        };
+        c.compose_into(&scene, &[]);
+        // With ANSI tier, bg should be quantized to ansi16 color.
+        let pixel = c.get_pixel(0, 0);
+        // Gray(128) is closest to ansi white(192,192,192) or black(0,0,0).
+        // The exact result depends on distance — just verify it's one of the 16.
+        let ansi16 = [
+            (0,0,0),(128,0,0),(0,128,0),(128,128,0),
+            (0,0,128),(128,0,128),(0,128,128),(192,192,192),
+            (128,128,128),(255,0,0),(0,255,0),(255,255,0),
+            (0,0,255),(255,0,255),(0,255,255),(255,255,255),
+        ];
+        assert!(ansi16.contains(&pixel), "pixel {:?} is not an ANSI16 color", pixel);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Asciline-backed compositor
+// ---------------------------------------------------------------------------
+
+/// A compositor backed by asciline's parallelized `map_ascii` pipeline.
+///
+/// Converts an RGB framebuffer into `[char, R, G, B]` cells using
+/// density-based ASCII palettes and Rayon-parallelized row processing.
+/// The output is then converted to plain RGB for the Ratatui buffer.
+///
+/// This is a drop-in replacement for `PixelCanvas` that leverages
+/// asciline's optimized mapping for large terminal sizes.
+#[cfg(feature = "asciline-compositor")]
+use std::cell::UnsafeCell;
+
+/// A compositor backed by asciline's parallelized `map_ascii` pipeline.
+///
+/// Converts an RGB framebuffer into `[char, R, G, B]` cells using
+/// density-based ASCII palettes and Rayon-parallelized row processing.
+/// The output is then converted to plain RGB for the Ratatui buffer.
+///
+/// This is a drop-in replacement for `PixelCanvas` that leverages
+/// asciline's optimized mapping for large terminal sizes.
+#[cfg(feature = "asciline-compositor")]
+pub struct AscilineCompositor {
+    mapper: asciline::mapper::Mapper,
+    /// Interior-mutable RGB buffer so `finish_frame(&self)` can extract
+    /// RGB from the cells without requiring `&mut self` on the trait.
+    rgb: UnsafeCell<Vec<u8>>,
+    cells: Vec<u8>,
+    width: usize,
+    height: usize,
+}
+
+// Safety: AscilineCompositor is used single-threaded (render thread).
+#[cfg(feature = "asciline-compositor")]
+unsafe impl Send for AscilineCompositor {}
+#[cfg(feature = "asciline-compositor")]
+unsafe impl Sync for AscilineCompositor {}
+
+#[cfg(feature = "asciline-compositor")]
+impl AscilineCompositor {
+    pub fn new(width: usize, height: usize) -> Self {
+        let mapper = asciline::mapper::Mapper::default(0);
+        let pixels = width * height;
+        Self {
+            mapper,
+            rgb: UnsafeCell::new(vec![0u8; pixels * 3]),
+            cells: vec![0u8; pixels * 4],
+            width,
+            height,
+        }
+    }
+
+    /// Returns the 4-byte `[char, R, G, B]` cell output from the last
+    /// `map_ascii` call. Useful for rendering palette characters into the
+    /// Ratatui buffer for richer visual effects.
+    pub fn cells(&self) -> &[u8] {
+        &self.cells
+    }
+
+    /// Run `map_ascii` on the current RGB buffer and store the 4-byte
+    /// cell output. Call this after writing effects into the RGB buffer
+    /// and before `finish_frame`.
+    pub fn map_ascii(&mut self) {
+        let rgb = unsafe { &*self.rgb.get() };
+        self.mapper.map_ascii(rgb, self.width, self.height, &mut self.cells);
+    }
+}
+
+#[cfg(feature = "asciline-compositor")]
+impl CellCompositor for AscilineCompositor {
+    fn resize(&mut self, width: usize, height: usize) {
+        if self.width != width || self.height != height {
+            self.width = width;
+            self.height = height;
+            let pixels = width * height;
+            unsafe { *self.rgb.get() = vec![0u8; pixels * 3]; }
+            self.cells.resize(pixels * 4, 0);
+        }
+    }
+
+    fn begin_frame(&mut self, background: Rgb) {
+        let rgb = unsafe { &mut *self.rgb.get() };
+        for chunk in rgb.chunks_exact_mut(3) {
+            chunk[0] = background.0;
+            chunk[1] = background.1;
+            chunk[2] = background.2;
+        }
+    }
+
+    fn finish_frame(&self) -> &[u8] {
+        // Extract RGB from the 4-byte cell output into the rgb buffer.
+        let rgb = unsafe { &mut *self.rgb.get() };
+        for (cell, dst) in self.cells.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
+            dst[0] = cell[1]; // R
+            dst[1] = cell[2]; // G
+            dst[2] = cell[3]; // B
+        }
+        unsafe { &*self.rgb.get() }
+    }
+
+    fn width(&self) -> usize {
+        self.width
+    }
+
+    fn height(&self) -> usize {
+        self.height
+    }
+}
+
+#[cfg(feature = "asciline-compositor")]
+impl AscilineCompositor {
+    /// Paint background + drop shadows into the internal RGB buffer, then
+    /// run `map_ascii` to produce palette-character cells.  This is the
+    /// high-level entry point called from the render pipeline.
+    pub fn paint_background(
+        &mut self,
+        bg: (u8, u8, u8),
+        accent_end: (u8, u8, u8),
+        dock: (u8, u8, u8),
+        dock_position: &str,
+        float_shadows: &[(usize, usize, usize, usize)], // (x, y, w, h)
+    ) {
+        // Reuse PixelCanvas's effect logic via a temporary canvas.
+        let mut tmp = PixelCanvas::new(self.width, self.height);
+        tmp.fill_background(bg, accent_end, dock, dock_position);
+        for &(fx, fy, fw, fh) in float_shadows {
+            tmp.drop_shadow(fx, fy, fw, fh, 2, 1, 3.0, (0, 0, 0), bg);
+        }
+        // Copy the rendered RGB into our internal buffer.
+        {
+            let rgb = unsafe { &mut *self.rgb.get() };
+            rgb.copy_from_slice(tmp.rgb());
+        }
+        // Run map_ascii to produce palette-character cells.
+        self.map_ascii();
+    }
+
+    /// Returns palette-character cells suitable for direct Ratatui rendering.
+    /// Each 4-byte group is `[char_code, R, G, B]`.
+    pub fn paint_cells(&self) -> &[u8] {
+        &self.cells
+    }
+}
+
+#[cfg(feature = "asciline-compositor")]
+#[cfg(test)]
+mod asciline_tests {
+    use super::*;
+
+    #[test]
+    fn asciline_compositor_basic() {
+        let mut c = AscilineCompositor::new(4, 2);
+        c.begin_frame(Rgb(10, 20, 30));
+        // Write some RGB data into the internal buffer.
+        {
+            let rgb = unsafe { &mut *c.rgb.get() };
+            rgb[0] = 255; rgb[1] = 0; rgb[2] = 0; // pixel 0: red
+            rgb[3] = 0; rgb[4] = 255; rgb[5] = 0; // pixel 1: green
+        }
+        // Run map_ascii on the RGB buffer.
+        c.map_ascii();
+        let output = c.finish_frame();
+        assert_eq!(output.len(), 4 * 2 * 3);
+        // Output should be RGB extracted from the 4-byte cells.
+        // Red pixel: cell[0]=char, cell[1]=255, cell[2]=0, cell[3]=0
+        assert_eq!(output[0], 255);
+        assert_eq!(output[1], 0);
+        assert_eq!(output[2], 0);
+    }
+
+    #[test]
+    fn asciline_compositor_resize() {
+        let mut c = AscilineCompositor::new(4, 2);
+        assert_eq!(c.width(), 4);
+        assert_eq!(c.height(), 2);
+        c.resize(8, 4);
+        assert_eq!(c.width(), 8);
+        assert_eq!(c.height(), 4);
+        assert_eq!(unsafe { (*c.rgb.get()).len() }, 8 * 4 * 3);
+        assert_eq!(c.cells.len(), 8 * 4 * 4);
     }
 }

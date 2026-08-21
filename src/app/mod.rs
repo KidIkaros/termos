@@ -927,6 +927,11 @@ pub struct Os {
     pub graphics_caps: crate::graphics::capability::Capabilities,
     /// Reusable RGB background canvas; resized only when the terminal changes.
     pub pixel_canvas: Mutex<crate::app::pixel_canvas::PixelCanvas>,
+    /// Terminal color capability tier (detected once at startup).
+    pub color_capability: crate::app::pixel_canvas::ColorCapability,
+    /// Optional asciline-backed compositor for palette-character rendering.
+    #[cfg(feature = "asciline-compositor")]
+    pub asciline_compositor: Mutex<crate::app::pixel_canvas::AscilineCompositor>,
     /// The last time an alert sound was played (for cooldown).
     pub last_sound_played: Option<std::time::Instant>,
     /// Cached audio player command (None = not probed yet, Some(None) = none found).
@@ -1267,6 +1272,9 @@ impl Os {
             sixel_passthrough: None,
             graphics_caps: crate::graphics::capability::Capabilities::default(),
             pixel_canvas: Mutex::new(crate::app::pixel_canvas::PixelCanvas::new(1, 1)),
+            color_capability: crate::app::pixel_canvas::ColorCapability::detect(),
+            #[cfg(feature = "asciline-compositor")]
+            asciline_compositor: Mutex::new(crate::app::pixel_canvas::AscilineCompositor::new(1, 1)),
             last_sound_played: None,
             sound_player: None,
             widget_cache: Arc::new(Mutex::new(HashMap::new())),
