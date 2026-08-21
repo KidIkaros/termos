@@ -321,10 +321,20 @@ pub struct AppearanceConfig {
     /// Theme used when `theme = "auto"` detects a light host terminal.
     #[serde(default = "default_auto_light")]
     pub theme_auto_light: String,
+    /// Initial layout mode: "bsp" (default), "master-stack", or "scrolling".
+    #[serde(default)]
+    pub layout_mode: String,
+    /// Master pane width ratio for master-stack layout (0.3–0.7).
+    #[serde(default = "default_master_ratio")]
+    pub master_ratio: f64,
 }
 
 fn default_auto_dark() -> String {
     "catppuccin-mocha".into()
+}
+
+fn default_master_ratio() -> f64 {
+    0.5
 }
 
 fn default_auto_light() -> String {
@@ -388,6 +398,8 @@ impl Default for AppearanceConfig {
             window_title_format: String::new(),
             theme_auto_dark: default_auto_dark(),
             theme_auto_light: default_auto_light(),
+            layout_mode: String::new(),
+            master_ratio: 0.5,
         }
     }
 }

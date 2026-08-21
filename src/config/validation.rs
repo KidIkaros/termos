@@ -141,6 +141,33 @@ fn validate_appearance(config: &UserConfig, result: &mut ValidationResult) {
         });
     }
 
+    // Validate layout_mode.
+    let valid_layout_modes = ["", "bsp", "master-stack", "master_stack", "ms", "scrolling", "scr"];
+    if !valid_layout_modes.contains(&config.appearance.layout_mode.as_str()) {
+        result.errors.push(ValidationError {
+            field: "appearance".into(),
+            key: "layout_mode".into(),
+            message: format!(
+                "layout_mode must be one of {:?}, got \"{}\"",
+                valid_layout_modes, config.appearance.layout_mode
+            ),
+            severity: Severity::Error,
+        });
+    }
+
+    // Validate master_ratio.
+    if config.appearance.master_ratio < 0.3 || config.appearance.master_ratio > 0.7 {
+        result.warnings.push(ValidationError {
+            field: "appearance".into(),
+            key: "master_ratio".into(),
+            message: format!(
+                "master_ratio {} will be clamped to 0.3–0.7",
+                config.appearance.master_ratio
+            ),
+            severity: Severity::Warning,
+        });
+    }
+
     // Validate sidebar position.
     if !config.appearance.sidebar.position.is_empty() {
         let valid_sidebar_positions = ["left", "right", "hidden"];

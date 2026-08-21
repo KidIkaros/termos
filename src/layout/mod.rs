@@ -46,6 +46,15 @@ impl LayoutMode {
             LayoutMode::Scrolling => LayoutMode::BSP,
         }
     }
+
+    /// Parse from a config string ("bsp", "master-stack", "scrolling").
+    pub fn from_config(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "master-stack" | "master_stack" | "ms" => LayoutMode::MasterStack,
+            "scrolling" | "scr" => LayoutMode::Scrolling,
+            _ => LayoutMode::BSP,
+        }
+    }
 }
 
 /// Minimum window width in cells (mirrors `config.DefaultWindowWidth`).

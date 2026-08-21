@@ -1092,6 +1092,8 @@ impl Os {
             Theme::built_in(&config.appearance.theme)
         };
         let shared_borders = config.appearance.shared_borders;
+        let layout_mode = crate::layout::LayoutMode::from_config(&config.appearance.layout_mode);
+        let master_ratio = config.appearance.master_ratio.clamp(0.3, 0.7);
         let hook_manager = hooks::Manager::new();
         hook_manager.load_from_config(&config.hooks);
         // `[notifications.agent] command` is shorthand for registering one
@@ -1119,8 +1121,8 @@ impl Os {
             shared_borders,
             gap: if shared_borders { 1 } else { 0 },
             auto_scheme: AutoScheme::Spiral,
-            layout_mode: crate::layout::LayoutMode::BSP,
-            master_ratio: 0.5,
+            layout_mode,
+            master_ratio,
             scrolling: crate::layout::ScrollingLayout::new(),
             preselection: PreselectionDir::None,
             notifications: Vec::new(),
@@ -9859,5 +9861,36 @@ mod layout_mode_tests {
         assert_eq!(crate::layout::LayoutMode::BSP.next(), crate::layout::LayoutMode::MasterStack);
         assert_eq!(crate::layout::LayoutMode::MasterStack.next(), crate::layout::LayoutMode::Scrolling);
         assert_eq!(crate::layout::LayoutMode::Scrolling.next(), crate::layout::LayoutMode::BSP);
+    }
+
+    #[test]
+    fn layout_mode_from_config() {
+        assert_eq!(crate::layout::LayoutMode::from_config(""), crate::layout::LayoutMode::BSP);
+        assert_eq!(crate::layout::LayoutMode::from_config("bsp"), crate::layout::LayoutMode::BSP);
+        assert_eq!(crate::layout::LayoutMode::from_config("master-stack"), crate::layout::LayoutMode::MasterStack);
+        assert_eq!(crate::layout::LayoutMode::from_config("master_stack"), crate::layout::LayoutMode::MasterStack);
+        assert_eq!(crate::layout::LayoutMode::from_config("ms"), crate::layout::LayoutMode::MasterStack);
+        assert_eq!(crate::layout::LayoutMode::from_config("scrolling"), crate::layout::LayoutMode::Scrolling);
+        assert_eq!(crate::layout::LayoutMode::from_config("scr"), crate::layout::LayoutMode::Scrolling);
+        assert_eq!(crate::layout::LayoutMode::from_config("invalid"), crate::layout::LayoutMode::BSP);
+    }
+
+    #[test]
+    fn config_layout_mode_parsed() {
+        let toml = r#"
+            [appearance]
+            layout_mode = "master-stack"
+            master_ratio = 0.6
+        "#;
+        let cfg: crate::config::UserConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.appearance.layout_mode, "master-stack");
+        assert!((cfg.appearance.master_ratio - 0.6).abs() < 0.01);
+    }
+
+    #[test]
+    fn config_layout_mode_default() {
+        let cfg = crate::config::UserConfig::default_config();
+        assert_eq!(cfg.appearance.layout_mode, "");
+        assert!((cfg.appearance.master_ratio - 0.5).abs() < 0.01);
     }
 }
