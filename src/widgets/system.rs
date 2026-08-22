@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 use ratatui::Frame;
 
 use super::{Widget, WidgetKind};
+use super::buf_render;
 
 // ---------------------------------------------------------------------------
 // CPU Widget
@@ -110,6 +111,36 @@ impl Widget for CpuWidget {
     fn min_height(&self) -> u16 {
         3
     }
+
+    fn render_buf(&self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
+        use ratatui::widgets::{Block, Borders};
+        let block = Block::default().title(" CPU ").borders(Borders::ALL);
+        let inner = buf_render::draw_block(&block, area, buf);
+
+        let color = if self.overall > 80.0 {
+            ratatui::style::Color::Red
+        } else if self.overall > 50.0 {
+            ratatui::style::Color::Yellow
+        } else {
+            ratatui::style::Color::Green
+        };
+
+        if inner.height >= 1 {
+            let label = format!("{:.1}%", self.overall);
+            buf_render::draw_gauge(inner, self.overall / 100.0, color, &label, buf);
+        }
+
+        // Sparkline on second row
+        if inner.height >= 2 && !self.history.is_empty() {
+            let spark_area = ratatui::layout::Rect {
+                x: inner.x,
+                y: inner.y + 1,
+                width: inner.width,
+                height: 1,
+            };
+            buf_render::draw_sparkline(spark_area, &self.history, color, buf);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +238,44 @@ impl Widget for MemWidget {
     fn min_height(&self) -> u16 {
         3
     }
+
+    fn render_buf(&self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
+        use ratatui::widgets::{Block, Borders};
+        let block = Block::default().title(" Memory ").borders(Borders::ALL);
+        let inner = buf_render::draw_block(&block, area, buf);
+
+        if inner.height >= 1 {
+            let pct = if self.total_bytes > 0 {
+                self.used_bytes as f64 / self.total_bytes as f64
+            } else {
+                0.0
+            };
+            let used_mb = self.used_bytes / (1024 * 1024);
+            let total_mb = self.total_bytes / (1024 * 1024);
+            let color = if pct > 0.85 {
+                ratatui::style::Color::Red
+            } else if pct > 0.6 {
+                ratatui::style::Color::Yellow
+            } else {
+                ratatui::style::Color::Green
+            };
+            let label = format!("{used_mb}/{total_mb}MB ({pct:.0}%)");
+            buf_render::draw_gauge(inner, pct, color, &label, buf);
+        }
+
+        // Swap bar on second row
+        if inner.height >= 2 && self.swap_total > 0 {
+            let swap_pct = self.swap_used as f64 / self.swap_total as f64;
+            let swap_area = ratatui::layout::Rect {
+                x: inner.x,
+                y: inner.y + 1,
+                width: inner.width,
+                height: 1,
+            };
+            let swap_label = format!("swap {swap_pct:.0}%");
+            buf_render::draw_gauge(swap_area, swap_pct, ratatui::style::Color::Cyan, &swap_label, buf);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +370,44 @@ impl Widget for DiskWidget {
     }
     fn min_height(&self) -> u16 {
         3
+    }
+
+    fn render_buf(&self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
+        use ratatui::widgets::{Block, Borders};
+        let block = Block::default().title(" Disk ").borders(Borders::ALL);
+        let inner = buf_render::draw_block(&block, area, buf);
+
+        for (i, entry) in self.entries.iter().enumerate() {
+            if i as u16 >= inner.height {
+                break;
+            }
+            let y = inner.y + i as u16;
+            let pct = if entry.total_gb > 0.0 {
+                entry.used_gb / entry.total_gb
+            } else {
+                0.0
+            };
+
+            // Mount name
+            let mount = format!("{:>8}", entry.mount);
+            buf_render::draw_text(inner.x, y, &mount, ratatui::style::Style::default().fg(ratatui::style::Color::Cyan), buf);
+
+            // Bar
+            let bar_area = ratatui::layout::Rect {
+                x: inner.x + 9,
+                y,
+                width: inner.width.saturating_sub(18),
+                height: 1,
+            };
+            let used_color = if pct > 0.85 { ratatui::style::Color::Red }
+                else if pct > 0.6 { ratatui::style::Color::Yellow }
+                else { ratatui::style::Color::Green };
+            buf_render::draw_bar_chart(bar_area, &[(entry.used_gb, used_color), (entry.total_gb - entry.used_gb, ratatui::style::Color::DarkGray)], buf);
+
+            // Percentage
+            let pct_str = format!("{:>5.0}%", pct * 100.0);
+            buf_render::draw_text(inner.x + inner.width - 6, y, &pct_str, ratatui::style::Style::default().fg(used_color), buf);
+        }
     }
 }
 
@@ -402,6 +509,39 @@ impl Widget for NetWidget {
     }
     fn min_height(&self) -> u16 {
         4
+    }
+
+    fn render_buf(&self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
+        use ratatui::widgets::{Block, Borders};
+        let block = Block::default().title(" Network ").borders(Borders::ALL);
+        let inner = buf_render::draw_block(&block, area, buf);
+
+        if inner.height >= 1 {
+            // RX line
+            buf_render::draw_text(inner.x, inner.y, "  ▼ ", ratatui::style::Style::default().fg(ratatui::style::Color::Green), buf);
+            let rx_str = super::system::format_bytes_rate(self.rx_rate);
+            let rx_label = format!("{rx_str}/s");
+            buf_render::draw_text(inner.x + 4, inner.y, &rx_label, ratatui::style::Style::default(), buf);
+        }
+        if inner.height >= 2 {
+            // TX line
+            buf_render::draw_text(inner.x, inner.y + 1, "  ▲ ", ratatui::style::Style::default().fg(ratatui::style::Color::Red), buf);
+            let tx_str = super::system::format_bytes_rate(self.tx_rate);
+            let tx_label = format!("{tx_str}/s");
+            buf_render::draw_text(inner.x + 4, inner.y + 1, &tx_label, ratatui::style::Style::default(), buf);
+        }
+
+        // Mini sparkline for RX rate (fake history from current value)
+        if inner.height >= 3 {
+            let spark_area = ratatui::layout::Rect {
+                x: inner.x,
+                y: inner.y + 2,
+                width: inner.width,
+                height: 1,
+            };
+            let fake_data = vec![self.rx_rate, self.rx_rate * 0.8, self.rx_rate * 1.2, self.rx_rate];
+            buf_render::draw_sparkline(spark_area, &fake_data, ratatui::style::Color::Green, buf);
+        }
     }
 }
 

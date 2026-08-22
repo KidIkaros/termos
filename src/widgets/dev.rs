@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use super::{Widget, WidgetKind};
+use super::buf_render;
 
 // ---------------------------------------------------------------------------
 // Git Status Widget
@@ -177,6 +178,38 @@ impl Widget for GitWidget {
     fn min_height(&self) -> u16 {
         4
     }
+
+    fn render_buf(&self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
+        use ratatui::widgets::{Block, Borders};
+        let block = Block::default().title(" Git ").borders(Borders::ALL);
+        let inner = buf_render::draw_block(&block, area, buf);
+
+        if inner.height >= 1 {
+            let branch_color = if self.dirty { ratatui::style::Color::Yellow } else { ratatui::style::Color::Green };
+            buf_render::draw_text(inner.x + 1, inner.y, &self.branch, ratatui::style::Style::default().fg(branch_color), buf);
+        }
+
+        let mut row = 1u16;
+        if self.staged > 0 && row < inner.height {
+            buf_render::draw_text(inner.x + 2, inner.y + row, &format!("staged:  {}", self.staged), ratatui::style::Style::default().fg(ratatui::style::Color::Green), buf);
+            row += 1;
+        }
+        if self.modified > 0 && row < inner.height {
+            buf_render::draw_text(inner.x + 2, inner.y + row, &format!("changed: {}", self.modified), ratatui::style::Style::default().fg(ratatui::style::Color::Yellow), buf);
+            row += 1;
+        }
+        if self.untracked > 0 && row < inner.height {
+            buf_render::draw_text(inner.x + 2, inner.y + row, &format!("new:     {}", self.untracked), ratatui::style::Style::default().fg(ratatui::style::Color::Blue), buf);
+            row += 1;
+        }
+        if self.ahead > 0 && row < inner.height {
+            buf_render::draw_text(inner.x + 2, inner.y + row, &format!("ahead:   {}", self.ahead), ratatui::style::Style::default().fg(ratatui::style::Color::Cyan), buf);
+            row += 1;
+        }
+        if !self.dirty && self.ahead == 0 && row < inner.height {
+            buf_render::draw_text(inner.x + 2, inner.y + row, "clean", ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray), buf);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +309,30 @@ impl Widget for BuildWidget {
     }
     fn min_height(&self) -> u16 {
         4
+    }
+
+    fn render_buf(&self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
+        use ratatui::widgets::{Block, Borders};
+        let block = Block::default().title(" Build ").borders(Borders::ALL);
+        let inner = buf_render::draw_block(&block, area, buf);
+
+        if inner.height >= 1 {
+            let (text, color) = match self.last_build_ok {
+                Some(true) => ("OK", ratatui::style::Color::Green),
+                Some(false) => ("FAIL", ratatui::style::Color::Red),
+                None => ("—", ratatui::style::Color::DarkGray),
+            };
+            buf_render::draw_status_dot(inner.x + 1, inner.y, self.last_build_ok.unwrap_or(false), buf);
+            buf_render::draw_text(inner.x + 3, inner.y, text, ratatui::style::Style::default().fg(color), buf);
+            let time_str = format!("{}ms", self.build_time_ms);
+            buf_render::draw_text(inner.x + 8, inner.y, &time_str, ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray), buf);
+        }
+        if self.errors > 0 && inner.height >= 2 {
+            buf_render::draw_text(inner.x + 2, inner.y + 1, &format!("{} errors", self.errors), ratatui::style::Style::default().fg(ratatui::style::Color::Red), buf);
+        }
+        if self.warnings > 0 && inner.height >= 3 {
+            buf_render::draw_text(inner.x + 2, inner.y + 2, &format!("{} warnings", self.warnings), ratatui::style::Style::default().fg(ratatui::style::Color::Yellow), buf);
+        }
     }
 }
 

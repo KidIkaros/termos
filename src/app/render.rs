@@ -3067,61 +3067,25 @@ mod tests {
 /// Render the widget dashboard overlay.
 
 /// Render the widget dashboard overlay — a grid of widget summaries.
+
+/// Render the widget dashboard overlay — real gauges, charts, and widget rendering.
 fn render_dashboard(os: &Os, buf: &mut Buffer, area: TuiRect) {
-    let mut lines: Vec<String> = Vec::new();
-    lines.push("╔══════════════════════════════════════════════╗".to_string());
-    lines.push("║           DASHBOARD  (D to close)           ║".to_string());
-    lines.push("╚══════════════════════════════════════════════╝".to_string());
-    lines.push(String::new());
+    use ratatui::widgets::{Block, Borders};
+    let title = format!(" Dashboard — Ctrl+B D w to close ");
+    let block = Block::default().title(title).borders(Borders::ALL)
+        .style(ratatui::style::Style::default().fg(ratatui::style::Color::White));
+    // area is already a ratatui Rect (TuiRect), render directly
+    let inner = block.inner(area);
+    block.render(area, buf);
 
-    // Collect widget summaries by kind
-    for kind in &[
-        crate::widgets::WidgetKind::System,
-        crate::widgets::WidgetKind::Dev,
-        crate::widgets::WidgetKind::Utility,
-    ] {
-        let widgets = os.widget_registry.by_kind(*kind);
-        if widgets.is_empty() {
-            continue;
+    // Compute grid layout
+    let layout = os.widget_registry.layout();
+    let rects = layout.compute_rects(inner);
+
+    // Render each widget into its grid slot
+    for (widget_id, rect) in &rects {
+        if let Some(widget) = os.widget_registry.get(widget_id) {
+            widget.render_buf(*rect, buf);
         }
-        lines.push(format!("── {} ──", kind.label()));
-        for w in &widgets {
-            let id = w.id();
-            // Get a one-line summary from the widget
-            let summary = match id {
-                "cpu" => {
-                    let m = os.metrics.session_metrics();
-                    format!("  CPU    — {} panes active", m.pane_count)
-                }
-                "mem" => {
-                    let m = os.metrics.session_metrics();
-                    format!("  Memory — session uptime {}", crate::app::metrics::format_duration(m.uptime))
-                },
-                "disk" => "  Disk   — / mounted".to_string(),
-                "net" => format!("  Net    — {} total I/O", crate::app::metrics::format_bytes(
-                    os.metrics.session_metrics().total_bytes_read + os.metrics.session_metrics().total_bytes_written,
-                )),
-                "git" => "  Git    — repo status".to_string(),
-                "build" => "  Build  — cargo check".to_string(),
-                "clock" => {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    let h = (now / 3600) % 24;
-                    let m = (now / 60) % 60;
-                    let s = now % 60;
-                    format!("  Clock  — {h:02}:{m:02}:{s:02}")
-                }
-                "notes" => "  Notes  — scratchpad".to_string(),
-                "clipboard" => "  Clip   — history".to_string(),
-                "actions" => "  Actions — quick launch".to_string(),
-                _ => format!("  {} — {}", w.name(), w.id()),
-            };
-            lines.push(summary);
-        }
-        lines.push(String::new());
     }
-
-    render_overlay(buf, area, &lines, "Dashboard");
 }

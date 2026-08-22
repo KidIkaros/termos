@@ -1,13 +1,14 @@
 //! Utility widgets — clock, notes, clipboard, quick actions.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use std::time::{SystemTime, UNIX_EPOCH};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::style::{Color, Style};
+use std::time::{SystemTime, UNIX_EPOCH};
 use ratatui::Frame;
 
 use super::{Widget, WidgetKind};
+use super::buf_render;
 
 // ---------------------------------------------------------------------------
 // Clock Widget
@@ -75,6 +76,19 @@ impl Widget for ClockWidget {
     }
     fn min_height(&self) -> u16 {
         4
+    }
+
+    fn render_buf(&self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
+        use ratatui::widgets::{Block, Borders};
+        let block = Block::default().title(" Clock ").borders(Borders::ALL);
+        let inner = buf_render::draw_block(&block, area, buf);
+
+        if inner.height >= 1 {
+            buf_render::draw_text(inner.x + 1, inner.y, &self.time_str, ratatui::style::Style::default().fg(ratatui::style::Color::Cyan), buf);
+        }
+        if inner.height >= 2 {
+            buf_render::draw_text(inner.x + 1, inner.y + 1, &self.date_str, ratatui::style::Style::default(), buf);
+        }
     }
 }
 
@@ -229,6 +243,23 @@ impl Widget for NotesWidget {
     }
     fn min_height(&self) -> u16 {
         5
+    }
+
+    fn render_buf(&self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
+        use ratatui::widgets::{Block, Borders};
+        let title = format!(" Notes [{} lines] ", self.lines.len());
+        let block = Block::default().title(title).borders(Borders::ALL);
+        let inner = buf_render::draw_block(&block, area, buf);
+
+        for (i, line) in self.lines.iter().enumerate().take(inner.height as usize) {
+            let display: String = line.chars().take(inner.width as usize).collect();
+            let style = if i == self.cursor_row {
+                ratatui::style::Style::default().fg(ratatui::style::Color::Yellow)
+            } else {
+                ratatui::style::Style::default()
+            };
+            buf_render::draw_text(inner.x, inner.y + i as u16, &display, style, buf);
+        }
     }
 }
 
@@ -440,6 +471,22 @@ impl Widget for ActionsWidget {
     }
     fn min_height(&self) -> u16 {
         5
+    }
+
+    fn render_buf(&self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
+        use ratatui::widgets::{Block, Borders};
+        let block = Block::default().title(" Quick Actions ").borders(Borders::ALL);
+        let inner = buf_render::draw_block(&block, area, buf);
+
+        for (i, action) in self.actions.iter().enumerate().take(inner.height as usize) {
+            let label = format!("{} {}", action.icon, action.label);
+            let style = if i == self.selected {
+                ratatui::style::Style::default().fg(ratatui::style::Color::Yellow)
+            } else {
+                ratatui::style::Style::default()
+            };
+            buf_render::draw_text(inner.x + 1, inner.y + i as u16, &label, style, buf);
+        }
     }
 }
 

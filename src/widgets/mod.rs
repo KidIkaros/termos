@@ -18,6 +18,7 @@
 //! └─────────────────────────────────────────────────┘
 //! ```
 
+pub mod buf_render;
 pub mod layout;
 pub mod registry;
 pub mod system;
@@ -27,6 +28,7 @@ pub mod utility;
 pub use registry::{WidgetRegistry, WidgetMeta, WidgetKind};
 pub use layout::{WidgetLayout, WidgetSlot};
 
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::Frame;
 
@@ -70,6 +72,13 @@ pub trait Widget: Send + Sync {
     /// Handle input when this widget is focused. Returns true if consumed.
     fn handle_key(&mut self, _key: &crossterm::event::KeyEvent) -> bool {
         false
+    }
+
+    /// Render the widget directly into a ratatui Buffer.
+    /// This is used by the dashboard overlay which works with buffers,
+    /// not Frames. Default renders nothing.
+    fn render_buf(&self, area: Rect, buf: &mut Buffer) {
+        let _ = (area, buf);
     }
 }
 
