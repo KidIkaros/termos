@@ -1810,6 +1810,42 @@ pub fn build_which_key_lines(os: &Os) -> Vec<String> {
         ];
     }
 
+    // Float prefix — vim-style float management.
+    if os.prefix == Prefix::Float {
+        return vec![
+            "Float commands:".into(),
+            format!("  {:10} {}", "f", "float / tile toggle"),
+            format!("  {:10} {}", "n", "new floating shell"),
+            format!("  {:10} {}", "x", "close float"),
+            format!("  {:10} {}", "t", "tile back into BSP"),
+            format!("  {:10} {}", "c", "center float"),
+            format!("  {:10} {}", "p", "pin / always-on-top"),
+            format!("  {:10} {}", "o", "modal mode"),
+            "".into(),
+            "Move:".into(),
+            format!("  {:10} {}", "h/j/k/l", "move left/down/up/right"),
+            format!("  {:10} {}", "Tab", "cycle floats"),
+            "".into(),
+            "Resize:".into(),
+            format!("  {:10} {}", "H/J/K/L", "resize edge"),
+            "".into(),
+            "q/Esc cancel".into(),
+        ];
+    }
+
+    // Tape prefix — recording and playback.
+    if os.prefix == Prefix::Tape {
+        return vec![
+            "Tape commands:".into(),
+            format!("  {:10} {}", "r", "start recording"),
+            format!("  {:10} {}", "s", "stop recording"),
+            format!("  {:10} {}", "m", "open tape manager"),
+            format!("  {:10} {}", "t", "review project tape"),
+            "".into(),
+            "Esc cancel".into(),
+        ];
+    }
+
     let bindings = keybindings::get_prefix_keybindings(prefix_type, false);
     let mut lines = Vec::with_capacity(16);
     lines.push(format!("{:?} commands:", os.prefix));
