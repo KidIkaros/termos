@@ -1102,3 +1102,26 @@ Leverage the `asciline-rust` engine to enable native half-block video and media 
 - ✅ **Framerate cap**: decoder paces frame delivery at native FPS; render-side cap skips frames when interval hasn't elapsed.
 - ✅ **Frame dropping**: `pull_frame()` drains all queued frames and keeps only the latest, preventing backlog after pauses.
 - ✅ **PTS tracking**: `current_secs` updated from frame PTS for seek/position display.
+
+### Phase 37 — In-pane Web Browser (Lightpanda CDP) 🚧
+
+Headless web browser rendering using Lightpanda's Chrome DevTools Protocol (CDP) interface. Screenshots are captured as RGB24 frames and rendered via HalfBlockMapper.
+
+- ✅ **`PaneKind::Browser` enum variant**: add dedicated browser pane support alongside Terminal and Video.
+- ✅ **`BrowserState` struct**: URL, history (back/forward), loading state, URL bar, page title.
+- ✅ **CDP WebSocket client**: synchronous tungstenite client for Page.navigate, captureScreenshot, Input.dispatchKeyEvent, Input.dispatchMouseEvent.
+- ✅ **Lightpanda decoder**: spawns lightpanda process, connects via CDP, captures screenshots at native frame rate.
+- ✅ **Half-block rendering**: browser screenshots rendered via HalfBlockMapper (reuses Phase 36 infrastructure).
+- ✅ **URL bar overlay**: at top of browser pane, shows current URL; `u` focuses for typing, Enter navigates.
+- ✅ **Navigation keybindings**: `u` = URL bar, `Backspace`/`h` = back, `l` = forward, `r`/`F5` = reload, `q` = close.
+- ✅ **Command palette**: PlayBrowser command in View category.
+- ✅ **CLI**: `termos browse <url>` launches TUI with browser pane.
+- ✅ **Doctor check**: `termos doctor` reports Lightpanda availability.
+
+### Remaining items
+
+- ✅ **Mouse click forwarding**: left-click on browser pane sends CDP Input.dispatchMouseEvent.
+- ✅ **Scroll forwarding**: mouse wheel on browser pane sends CDP scroll events.
+- ✅ **Tab management**: `t` = new tab, `T` = new tab with URL bar, `Tab`/`Shift+Tab` = switch tabs.
+- ✅ **Bookmarks/history persistence**: JSON file at `~/.config/termos/browser.json`, `B` to bookmark, history auto-saved.
+- ✅ **Download infrastructure**: CDP `Browser.setDownloadBehavior` enabled, `Browser.downloadWillBegin` event listener, `~/Downloads/termos/` save directory.

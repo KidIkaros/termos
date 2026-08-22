@@ -8,9 +8,35 @@
 //! a state those two never mention — a harness sitting on a blocking prompt
 //! paints it once and then emits nothing at all.
 
-use crate::harness::classify;
-use crate::harness::manifest::ScreenRule;
 use crate::session::agent_state::{AgentSource, AgentState};
+
+/// Minimal screen-rule definition (inlined from harness::manifest).
+#[derive(Debug, Clone)]
+pub struct ScreenRule {
+    pub state: String,
+    pub priority: i32,
+    pub all: Vec<String>,
+    pub any: Vec<String>,
+    pub not: Vec<String>,
+}
+
+/// Minimal classify helper (inlined from harness::classify).
+mod classify {
+    use super::ScreenRule;
+    pub fn check_rule(rule: &ScreenRule, hay: &str) -> bool {
+        let hay_lower = hay.to_lowercase();
+        if !rule.all.iter().all(|s| hay_lower.contains(&s.to_lowercase())) {
+            return false;
+        }
+        if !rule.any.is_empty() && !rule.any.iter().any(|s| hay_lower.contains(&s.to_lowercase())) {
+            return false;
+        }
+        if rule.not.iter().any(|s| hay_lower.contains(&s.to_lowercase())) {
+            return false;
+        }
+        true
+    }
+}
 
 /// A screen-rule match: the state, its priority, and which rule matched.
 #[derive(Debug, Clone)]
@@ -61,8 +87,6 @@ pub fn scan_screen_for_agent_state(lines: &[String], rules: &[ScreenRule]) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::harness::manifest::ScreenRule;
-
     fn make_rule(state: &str, priority: i32, all: Vec<&str>, any: Vec<&str>, not: Vec<&str>) -> ScreenRule {
         ScreenRule {
             state: state.to_string(),
