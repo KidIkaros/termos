@@ -144,6 +144,10 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
             cmd_doctor(json)
         }
         "wizard" => cmd_wizard(),
+        "init" => {
+            let shell = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            cmd_init(shell)
+        }
         "--list-themes" => {
             let themes = termos::config::theme::list_theme_names();
             for t in themes {
@@ -542,6 +546,7 @@ fn print_help() {
     println!("    set-config <path> <value>  Set a runtime config option");
     println!("    get-config <path>          Get a runtime config option");
     println!("    explain-agent-screen [--harness H] [--lines N]  Explain screen rules");
+    println!("    init <shell>               Print shell integration script (bash/zsh/fish)");
     println!("    wizard                     Interactive first-run setup");
     println!("    doctor                     Check config, PTY, daemon, and theme health");
     println!("    completion <bash|zsh|fish> Generate shell completion scripts");
@@ -3201,6 +3206,20 @@ fn cmd_wizard() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("Setup complete! Run `termos` to start.");
+    Ok(())
+}
+
+/// `termos init <shell>` — print shell integration script.
+fn cmd_init(shell: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let script = match shell {
+        "bash" | "" => include_str!("../shell/bash-integration.bash"),
+        "zsh" => include_str!("../shell/zsh-integration.zsh"),
+        "fish" => include_str!("../shell/fish-integration.fish"),
+        other => {
+            return Err(format!("unsupported shell '{other}' (try: bash, zsh, fish)").into());
+        }
+    };
+    print!("{script}");
     Ok(())
 }
 
