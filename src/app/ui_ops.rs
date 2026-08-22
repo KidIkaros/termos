@@ -456,7 +456,7 @@ impl Os {
             .collect();
         if sel < displayed_ids.len() && new_sel < displayed_ids.len() {
             // Save current layout for undo before swapping.
-            self.last_widget_layout = Some(self.widget_registry.layout().clone());
+            self.widget_layout_undo.push(self.widget_registry.layout().clone());
             let layout = self.widget_registry.layout().clone();
             let mut slots = layout.slots;
             let id_a = &displayed_ids[sel];
@@ -497,10 +497,15 @@ impl Os {
 
     /// Undo the last widget reorder by restoring the previous layout.
     pub fn undo_widget_reorder(&mut self) {
-        if let Some(prev) = self.last_widget_layout.take() {
+        if let Some(prev) = self.widget_layout_undo.pop() {
             *self.widget_registry.layout_mut() = prev;
             self.sync_layout_to_config();
-            self.notify("widget order undone", "info");
+            let depth = self.widget_layout_undo.len();
+            if depth > 0 {
+                self.notify(format!("widget order undone ({depth} levels left)"), "info");
+            } else {
+                self.notify("widget order undone", "info");
+            }
         }
     }
 

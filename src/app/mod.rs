@@ -369,8 +369,8 @@ pub struct Os {
     pub dashboard_sidebar_visible: bool,
     /// Widget IDs enabled in the dashboard. Empty = all enabled.
     pub enabled_widgets: std::collections::HashSet<String>,
-    /// Saved layout before last widget reorder (for undo).
-    pub last_widget_layout: Option<crate::widgets::layout::WidgetLayout>,
+    /// Widget reorder undo stack (most recent first).
+    pub widget_layout_undo: Vec<crate::widgets::layout::WidgetLayout>,
 }
 
 impl Os {
@@ -578,7 +578,7 @@ impl Os {
             dashboard_open: false,
             dashboard_sidebar_visible: true,
             enabled_widgets: std::collections::HashSet::new(),
-            last_widget_layout: None,
+            widget_layout_undo: Vec::new(),
         }
     }
 
