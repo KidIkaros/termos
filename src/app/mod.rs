@@ -371,6 +371,8 @@ pub struct Os {
     pub enabled_widgets: std::collections::HashSet<String>,
     /// Widget reorder undo stack (most recent first).
     pub widget_layout_undo: Vec<crate::widgets::layout::WidgetLayout>,
+    /// Widget reorder redo stack.
+    pub widget_layout_redo: Vec<crate::widgets::layout::WidgetLayout>,
 }
 
 impl Os {
@@ -579,6 +581,7 @@ impl Os {
             dashboard_sidebar_visible: true,
             enabled_widgets: std::collections::HashSet::new(),
             widget_layout_undo: Vec::new(),
+            widget_layout_redo: Vec::new(),
         }
     }
 

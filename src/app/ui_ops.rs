@@ -455,7 +455,8 @@ impl Os {
             .filter_map(|e| name_to_id.get(e.label.as_str()).map(|id| id.to_string()))
             .collect();
         if sel < displayed_ids.len() && new_sel < displayed_ids.len() {
-            // Save current layout for undo before swapping.
+            // Save current layout for undo before swapping. Clear redo (new action).
+            self.widget_layout_redo.clear();
             self.widget_layout_undo.push(self.widget_registry.layout().clone());
             let layout = self.widget_registry.layout().clone();
             let mut slots = layout.slots;
@@ -498,6 +499,8 @@ impl Os {
     /// Undo the last widget reorder by restoring the previous layout.
     pub fn undo_widget_reorder(&mut self) {
         if let Some(prev) = self.widget_layout_undo.pop() {
+            // Save current state to redo before restoring.
+            self.widget_layout_redo.push(self.widget_registry.layout().clone());
             *self.widget_registry.layout_mut() = prev;
             self.sync_layout_to_config();
             let depth = self.widget_layout_undo.len();
@@ -505,6 +508,22 @@ impl Os {
                 self.notify(format!("widget order undone ({depth} levels left)"), "info");
             } else {
                 self.notify("widget order undone", "info");
+            }
+        }
+    }
+
+    /// Redo the last undone widget reorder.
+    pub fn redo_widget_reorder(&mut self) {
+        if let Some(next) = self.widget_layout_redo.pop() {
+            // Save current state to undo before restoring.
+            self.widget_layout_undo.push(self.widget_registry.layout().clone());
+            *self.widget_registry.layout_mut() = next;
+            self.sync_layout_to_config();
+            let depth = self.widget_layout_redo.len();
+            if depth > 0 {
+                self.notify(format!("widget order redone ({depth} levels left)"), "info");
+            } else {
+                self.notify("widget order redone", "info");
             }
         }
     }

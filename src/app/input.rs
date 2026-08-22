@@ -1898,6 +1898,11 @@ fn handle_switcher(os: &mut Os, key: &KeyEvent) -> KeyResult {
             os.undo_widget_reorder();
             KeyResult::Consumed
         }
+        // In the widget switcher, Ctrl+Y redoes the last undone reorder.
+        KeyCode::Char('y') if ctrl && os.switcher_kind == SwitcherKind::Widget => {
+            os.redo_widget_reorder();
+            KeyResult::Consumed
+        }
         // In the widget switcher, J/K reorder (move up/down).
         KeyCode::Char('J') | KeyCode::Char('j') if os.switcher_kind == SwitcherKind::Widget && !ctrl => {
             os.switcher_widget_reorder(-1);
