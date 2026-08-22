@@ -399,6 +399,7 @@ impl Os {
         if !agent_command.is_empty() {
             hook_manager.register(hooks::Event::AfterAgentState, agent_command);
         }
+        let dashboard_cfg = config.dashboard.clone();
         Self {
             windows: Vec::new(),
             focused_window: None,
@@ -564,14 +565,16 @@ impl Os {
             rate_limiter: crate::util::TieredRateLimiter::default(),
             notification_pipeline: notifications::NotificationPipeline::new(),
             metrics: metrics::MetricsCollector::new(),
-            widget_registry: Self::build_default_widgets(),
+            widget_registry: Self::build_default_widgets(&dashboard_cfg),
             dashboard_open: false,
         }
     }
 
-    /// Create the default widget set for the dashboard.
-    fn build_default_widgets() -> crate::widgets::WidgetRegistry {
+    /// Create the widget registry from dashboard config.
+    fn build_default_widgets(dash_cfg: &crate::config::userconfig::DashboardConfig) -> crate::widgets::WidgetRegistry {
         let mut reg = crate::widgets::WidgetRegistry::new();
+
+        // Register all built-in widgets.
         reg.register(Box::new(crate::widgets::system::CpuWidget::new()));
         reg.register(Box::new(crate::widgets::system::MemWidget::new()));
         reg.register(Box::new(crate::widgets::system::DiskWidget::new()));
@@ -582,9 +585,43 @@ impl Os {
         reg.register(Box::new(crate::widgets::utility::ClockWidget::new()));
         reg.register(Box::new(crate::widgets::utility::NotesWidget::new()));
         reg.register(Box::new(crate::widgets::utility::ActionsWidget::new()));
-        // Auto-layout: 3 columns, 3 rows
-        let ids: Vec<String> = reg.ids().into_iter().map(String::from).collect();
-        *reg.layout_mut() = crate::widgets::layout::WidgetLayout::auto_layout(&ids, 3, 3, 1);
+
+        // Build layout from config.
+        use crate::widgets::layout::{WidgetLayout, WidgetSlot, DashboardPosition, Side};
+        let position = match dash_cfg.position.as_str() {
+            "side-left" => DashboardPosition::Side(Side::Left),
+            "side-right" => DashboardPosition::Side(Side::Right),
+            "bottom" => DashboardPosition::Bottom,
+            _ => DashboardPosition::Overlay,
+        };
+
+        if dash_cfg.widgets.is_empty() {
+            // No explicit placement — auto-layout all registered widgets.
+            let ids: Vec<String> = reg.ids().into_iter().map(String::from).collect();
+            let mut layout = WidgetLayout::auto_layout(&ids, dash_cfg.columns, dash_cfg.rows, dash_cfg.gap);
+            layout.visible = dash_cfg.enabled;
+            layout.position = position;
+            *reg.layout_mut() = layout;
+        } else {
+            // Explicit widget placement from TOML.
+            let slots: Vec<WidgetSlot> = dash_cfg.widgets.iter().map(|w| WidgetSlot {
+                widget_id: w.id.clone(),
+                col: w.col,
+                row: w.row,
+                width: w.width,
+                height: w.height,
+            }).collect();
+            let layout = WidgetLayout {
+                columns: dash_cfg.columns,
+                rows: dash_cfg.rows,
+                gap: dash_cfg.gap,
+                slots,
+                visible: dash_cfg.enabled,
+                position,
+            };
+            *reg.layout_mut() = layout;
+        }
+
         reg
     }
 

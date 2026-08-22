@@ -45,6 +45,90 @@ pub struct UserConfig {
     /// Custom palette actions: map a name to a shell command.
     #[serde(default)]
     pub custom_actions: Vec<CustomActionConfig>,
+    /// Dashboard configuration.
+    #[serde(default)]
+    pub dashboard: DashboardConfig,
+}
+
+/// Dashboard configuration (`[dashboard]`).
+///
+/// Controls the widget dashboard overlay: which widgets are shown,
+/// how they are arranged in the grid, and the dashboard position.
+///
+/// ```toml
+/// [dashboard]
+/// enabled = true
+/// columns = 3
+/// rows = 3
+/// gap = 1
+/// position = "overlay"
+///
+/// [[dashboard.widgets]]
+/// id = "cpu"
+/// col = 0
+/// row = 0
+///
+/// [[dashboard.widgets]]
+/// id = "mem"
+/// col = 1
+/// row = 0
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DashboardConfig {
+    /// Enable the dashboard overlay (default: true).
+    pub enabled: bool,
+    /// Number of columns in the widget grid (default: 3).
+    pub columns: u16,
+    /// Number of rows in the widget grid (default: 3).
+    pub rows: u16,
+    /// Gap between widget cells in characters (default: 1).
+    pub gap: u16,
+    /// Dashboard position: "overlay", "side-left", "side-right", "bottom".
+    pub position: String,
+    /// Widget placement in the grid. If empty, all built-in widgets
+    /// are auto-laid-out left-to-right, top-to-bottom.
+    #[serde(default)]
+    pub widgets: Vec<DashboardWidgetConfig>,
+}
+
+/// A single widget placement in the dashboard grid (`[[dashboard.widgets]]`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardWidgetConfig {
+    /// Widget ID (e.g. "cpu", "git_status", "clock").
+    pub id: String,
+    /// Grid column (0-indexed).
+    #[serde(default)]
+    pub col: u16,
+    /// Grid row (0-indexed).
+    #[serde(default)]
+    pub row: u16,
+    /// Number of columns this widget spans (default: 1).
+    #[serde(default = "default_widget_span")]
+    pub width: u16,
+    /// Number of rows this widget spans (default: 1).
+    #[serde(default = "default_widget_span")]
+    pub height: u16,
+    /// Refresh interval override in milliseconds (0 = use widget default).
+    #[serde(default)]
+    pub refresh_ms: u64,
+}
+
+fn default_widget_span() -> u16 {
+    1
+}
+
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            columns: 3,
+            rows: 3,
+            gap: 1,
+            position: "overlay".into(),
+            widgets: Vec::new(),
+        }
+    }
 }
 
 /// A status-line widget (`[[status_widgets]]`): runs a shell command
@@ -600,6 +684,7 @@ impl UserConfig {
                     category: "Dev".into(),
                 },
             ],
+            dashboard: DashboardConfig::default(),
         };
         cfg.keybindings.fill_missing();
         cfg
@@ -1199,5 +1284,75 @@ mod tests {
         let cfg = UserConfig::parse_str(&old);
         assert_eq!(cfg.appearance.theme_auto_dark, "catppuccin-mocha");
         assert_eq!(cfg.appearance.theme_auto_light, "catppuccin-latte");
+    }
+
+    #[test]
+    fn dashboard_config_defaults() {
+        let cfg = UserConfig::default_config();
+        assert!(cfg.dashboard.enabled);
+        assert_eq!(cfg.dashboard.columns, 3);
+        assert_eq!(cfg.dashboard.rows, 3);
+        assert_eq!(cfg.dashboard.gap, 1);
+        assert_eq!(cfg.dashboard.position, "overlay");
+        assert!(cfg.dashboard.widgets.is_empty());
+    }
+
+    #[test]
+    fn dashboard_toml_roundtrip() {
+        let cfg = UserConfig::default_config();
+        let toml = toml::to_string(&cfg).expect("serialize");
+        let back: UserConfig = toml::from_str(&toml).expect("deserialize");
+        assert!(back.dashboard.enabled);
+        assert_eq!(back.dashboard.columns, 3);
+    }
+
+    #[test]
+    fn dashboard_widgets_from_toml() {
+        let toml_str = r#"
+[dashboard]
+enabled = true
+columns = 2
+rows = 2
+gap = 2
+position = "side-left"
+
+[[dashboard.widgets]]
+id = "cpu"
+col = 0
+row = 0
+
+[[dashboard.widgets]]
+id = "mem"
+col = 1
+row = 0
+width = 2
+height = 2
+refresh_ms = 2000
+"#;
+        let cfg: UserConfig = toml::from_str(toml_str).expect("deserialize");
+        assert!(cfg.dashboard.enabled);
+        assert_eq!(cfg.dashboard.columns, 2);
+        assert_eq!(cfg.dashboard.rows, 2);
+        assert_eq!(cfg.dashboard.gap, 2);
+        assert_eq!(cfg.dashboard.position, "side-left");
+        assert_eq!(cfg.dashboard.widgets.len(), 2);
+        assert_eq!(cfg.dashboard.widgets[0].id, "cpu");
+        assert_eq!(cfg.dashboard.widgets[0].col, 0);
+        assert_eq!(cfg.dashboard.widgets[0].row, 0);
+        assert_eq!(cfg.dashboard.widgets[0].width, 1); // default
+        assert_eq!(cfg.dashboard.widgets[1].id, "mem");
+        assert_eq!(cfg.dashboard.widgets[1].col, 1);
+        assert_eq!(cfg.dashboard.widgets[1].width, 2);
+        assert_eq!(cfg.dashboard.widgets[1].height, 2);
+        assert_eq!(cfg.dashboard.widgets[1].refresh_ms, 2000);
+    }
+
+    #[test]
+    fn empty_dashboard_uses_defaults() {
+        let toml_str = "[keybindings]\nleader_key = \"ctrl+b\"\n";
+        let cfg: UserConfig = toml::from_str(toml_str).expect("deserialize");
+        assert!(cfg.dashboard.enabled);
+        assert_eq!(cfg.dashboard.columns, 3);
+        assert!(cfg.dashboard.widgets.is_empty());
     }
 }
