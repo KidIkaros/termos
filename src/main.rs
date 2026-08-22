@@ -546,7 +546,7 @@ fn print_help() {
     println!("    set-config <path> <value>  Set a runtime config option");
     println!("    get-config <path>          Get a runtime config option");
     println!("    explain-agent-screen [--harness H] [--lines N]  Explain screen rules");
-    println!("    init <shell>               Print shell integration script (bash/zsh/fish)");
+    println!("    init [shell|--auto-detect] Print shell integration script (bash/zsh/fish)");
     println!("    wizard                     Interactive first-run setup");
     println!("    doctor                     Check config, PTY, daemon, and theme health");
     println!("    completion <bash|zsh|fish> Generate shell completion scripts");
@@ -3209,10 +3209,17 @@ fn cmd_wizard() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `termos init <shell>` — print shell integration script.
+/// `termos init [shell|--auto-detect]` — print shell integration script.
 fn cmd_init(shell: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let script = match shell {
-        "bash" | "" => include_str!("../shell/bash-integration.bash"),
+    let resolved = if shell == "--auto-detect" || shell == "-a" {
+        detect_shell()
+    } else if shell.is_empty() {
+        "bash".to_string()
+    } else {
+        shell.to_string()
+    };
+    let script = match resolved.as_str() {
+        "bash" => include_str!("../shell/bash-integration.bash"),
         "zsh" => include_str!("../shell/zsh-integration.zsh"),
         "fish" => include_str!("../shell/fish-integration.fish"),
         other => {
@@ -3221,6 +3228,53 @@ fn cmd_init(shell: &str) -> Result<(), Box<dyn std::error::Error>> {
     };
     print!("{script}");
     Ok(())
+}
+
+/// Detect the current shell from $SHELL, /proc/self/exe, or parent process.
+fn detect_shell() -> String {
+    // 1. $SHELL environment variable (most reliable).
+    if let Ok(shell) = std::env::var("SHELL") {
+        let name = std::path::Path::new(&shell)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        if matches!(name, "bash" | "zsh" | "fish") {
+            return name.to_string();
+        }
+    }
+    // 2. Check /proc/self/exe symlink (Linux).
+    #[cfg(target_os = "linux")]
+    if let Ok(exe) = std::fs::read_link("/proc/self/exe") {
+        let name = exe.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if matches!(name, "bash" | "zsh" | "fish") {
+            return name.to_string();
+        }
+    }
+    // 3. Check parent process name.
+    #[cfg(target_os = "linux")]
+    {
+        let ppid = std::process::id();
+        // Walk up to find the first non-termos ancestor.
+        for pid in (1..ppid).rev() {
+            let status_path = format!("/proc/{pid}/status");
+            if let Ok(status) = std::fs::read_to_string(&status_path) {
+                for line in status.lines() {
+                    if let Some(name) = line.strip_prefix("Name:\t") {
+                        let name = name.trim();
+                        if matches!(name, "bash" | "zsh" | "fish") {
+                            return name.to_string();
+                        }
+                        // Stop at init/systemd — we've passed the shell.
+                        if matches!(name, "systemd" | "init" | "login" | "sshd") {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: bash.
+    "bash".to_string()
 }
 
 /// `termos doctor` — health check for config, PTY, daemon, and theme.
