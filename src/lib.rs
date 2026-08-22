@@ -20,9 +20,7 @@
 pub mod app;
 pub mod cli;
 pub mod config;
-pub mod fuzz;
 pub mod graphics;
-pub mod harness;
 pub mod hooks;
 pub mod keys;
 pub mod layout;
@@ -31,13 +29,11 @@ pub mod network;
 pub mod scrollback;
 pub mod server;
 pub mod session;
-pub mod sound;
 pub mod tape;
 pub mod terminal;
 pub mod testutil;
 pub mod ui;
 pub mod util;
-pub mod video;
 pub mod vt;
 pub mod web;
 

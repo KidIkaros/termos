@@ -122,8 +122,6 @@ pub enum Command {
     BulkClose,
     BulkStack,
     BulkBreak,
-    /// Open a video/media pane.
-    PlayVideo,
     /// A user-defined custom action (shell command from config).
     CustomAction(String),
 }
@@ -235,7 +233,6 @@ impl Command {
             Command::BulkClose => "Close selected panes".into(),
             Command::BulkStack => "Stack selected panes".into(),
             Command::BulkBreak => "Break selected from stack".into(),
-            Command::PlayVideo => "Play video/media".into(),
             Command::CustomAction(name) => name.clone(),
         }
     }
@@ -253,8 +250,8 @@ impl Command {
             | Command::SwapDown => "Navigation",
             Command::ToggleTiling | Command::EqualizeSplits | Command::CycleLayoutMode => "Layout",
             Command::Scrollback | Command::CopyMode | Command::OpenBrowser
-            | Command::OpenAggregate | Command::PlayVideo => "View",
-            Command::SwitchWorkspace(_) | Command::WorkspaceSwitcher => "Workspace",
+            | Command::OpenAggregate
+            | Command::SwitchWorkspace(_) | Command::WorkspaceSwitcher => "Workspace",
             Command::Settings | Command::Theme | Command::ThemeDetect
             | Command::AccentPicker | Command::ToggleSidebar => "Settings",
             Command::StackPane | Command::CycleStack | Command::MultiSelect
@@ -316,7 +313,6 @@ impl Command {
             Command::BulkClose => "Close all selected panes",
             Command::BulkStack => "Stack all selected panes",
             Command::BulkBreak => "Break selected panes from stack",
-            Command::PlayVideo => "Play video in a pane",
             Command::CustomAction(_) => "Run a custom shell command",
         }
     }
@@ -1671,7 +1667,7 @@ impl Os {
     /// Drain pending desktop notifications from all window emulators and fire
     /// system notifications (OSC 9/777/99).
     pub fn tick_notifications(&mut self) {
-        let mut pending = Vec::new();
+        let mut pending: Vec<(String, String)> = Vec::new();
         for w in self.windows.iter_mut() {
             let notif = {
                 let Ok(mut emu) = w.emulator.lock() else {
@@ -3801,61 +3797,6 @@ impl Os {
         self.record_action("bulk_break", &[]);
     }
 
-    /// Open a video pane that plays the given file using half-block rendering.
-    pub fn open_video_pane(&mut self, source: &str) {
-        use crate::terminal::window::{PaneKind, VideoState};
-        let title = std::path::Path::new(source)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("video")
-            .to_string();
-        // Spawn a standard window first, then convert it to a video pane.
-        let shell = self.default_shell();
-        let idx = match self.spawn_window(&shell, Box::new(|| {})) {
-            Ok(i) => i,
-            Err(e) => {
-                log::error!("Failed to spawn video pane: {e}");
-                return;
-            }
-        };
-        if let Some(win) = self.windows.get_mut(idx) {
-            win.pane_kind = PaneKind::Video;
-            win.title = title;
-            let mut vs = VideoState { source: source.to_string(), ..VideoState::default() };
-            if let Some(info) = crate::video::decoder::probe_video(source) {
-                vs.fps = info.fps;
-                vs.duration_secs = info.duration_secs;
-                vs.frame_width = info.width;
-                vs.frame_height = info.height * 2;
-                vs.frame_interval = std::time::Duration::from_secs_f64(1.0 / info.fps);
-            }
-            // Start the frame decoder.
-            let decoder = crate::video::decoder::FrameDecoder::spawn();
-            let target_w = vs.frame_width.max(1);
-            let target_h = vs.frame_height.max(1) / 2; // convert pixel height to cell height
-            decoder.decode(source, target_w, target_h, vs.fps as u32);
-            vs.decoder = Some(decoder);
-            win.video_state = Some(Box::new(vs));
-        }
-        self.record_action("open_video", &[source]);
-    }
-
-    /// Seek a video pane by the given delta in seconds (positive = forward).
-    pub fn seek_video(&mut self, idx: usize, delta_secs: f64) {
-        if let Some(win) = self.windows.get_mut(idx) {
-            if let Some(ref mut vs) = win.video_state {
-                let new_secs = (vs.current_secs + delta_secs).max(0.0);
-                vs.current_secs = new_secs;
-                if let Some(ref decoder) = vs.decoder {
-                    decoder.seek(new_secs);
-                }
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Input / mode
-    // -----------------------------------------------------------------------
 
     /// Enter terminal mode (keys pass through to the shell).
     pub fn enter_terminal_mode(&mut self) {
@@ -4609,31 +4550,8 @@ impl Os {
     }
 
     /// Play an agent alert sound cue if enabled and not on cooldown.
-    fn play_alert_sound(&mut self, cue: &str) {
-        if !self.config.notifications.agent.sound.unwrap_or(false) {
-            return;
-        }
-        // Delegate to the sound subsystem: atomic cooldown, single worker,
-        // one cue at a time, permanent silence after repeated failures.
-        let cooldown = std::time::Duration::from_secs(
-            self.config
-                .notifications
-                .agent
-                .sound_cooldown_seconds
-                .unwrap_or(5) as u64,
-        );
-        let req = match cue {
-            "done" => crate::sound::Request {
-                cue: crate::sound::Cue::Done,
-                cooldown,
-            },
-            "needs-input" => crate::sound::Request {
-                cue: crate::sound::Cue::Attention,
-                cooldown,
-            },
-            _ => return,
-        };
-        crate::sound::play(req);
+    fn play_alert_sound(&mut self, _cue: &str) {
+        // Sound module removed in core split.
     }
 
     /// The leader key from config.
@@ -4852,13 +4770,6 @@ impl Os {
             Command::BulkClose => self.bulk_close_selected(),
             Command::BulkStack => self.bulk_stack_selected(),
             Command::BulkBreak => self.bulk_break_selected(),
-            Command::PlayVideo => {
-                // Open a video pane if TERMOS_VIDEO is set, otherwise
-                // show a hint about using `termos play <file>`.
-                if let Ok(path) = std::env::var("TERMOS_VIDEO") {
-                    self.open_video_pane(&path);
-                }
-            }
             Command::CustomAction(name) => self.run_custom_action(&name),
         }
     }
