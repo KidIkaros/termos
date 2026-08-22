@@ -1793,6 +1793,23 @@ pub fn build_which_key_lines(os: &Os) -> Vec<String> {
         Prefix::Minimize => "minimize",
         _ => "",
     };
+
+    // Debug prefix has its own static shortcut list.
+    if os.prefix == Prefix::Debug {
+        let db_key = &os.config.dashboard.keybinding;
+        return vec![
+            "Debug commands:".into(),
+            format!("  {:10} {}", "l", "toggle log viewer"),
+            format!("  {:10} {}", "c", "toggle debug stats"),
+            format!("  {:10} {}", "a", "toggle animations"),
+            format!("  {:10} {}", "k", "toggle showkeys overlay"),
+            format!("  {:10} {}", "s", "toggle sidebar panel"),
+            format!("  {:10} {}", db_key, "toggle dashboard overlay"),
+            "".into(),
+            "q/Esc cancel".into(),
+        ];
+    }
+
     let bindings = keybindings::get_prefix_keybindings(prefix_type, false);
     let mut lines = Vec::with_capacity(16);
     lines.push(format!("{:?} commands:", os.prefix));
