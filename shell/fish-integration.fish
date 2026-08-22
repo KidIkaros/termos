@@ -6,6 +6,7 @@
 #   - OSC 133 semantic prompt markers (A/B/C/D) for command tracking
 #   - OSC 7 CWD reporting (current directory)
 #   - OSC 0/2 terminal title updates
+#   - OSC 52 clipboard: termos_copy / termos_paste / copy / paste
 
 if not set -q TERMOS_SHELL_INTEGRATION
     set -gx TERMOS_SHELL_INTEGRATION 1
@@ -37,6 +38,41 @@ if not set -q TERMOS_SHELL_INTEGRATION
         else
             printf '\033]0;TermOS — %s\007' (basename $PWD)
         end
+    end
+
+    # --- OSC 52 clipboard integration ---
+
+    function termos_copy --description 'Copy text to clipboard via OSC 52'
+        set -l text
+        if test (count $argv) -gt 0
+            set text $argv[1]
+        else
+            set text (cat)
+        end
+        set -l encoded (printf '%s' $text | base64 | tr -d '\n')
+        printf '\033]52;c;%s\007' $encoded
+    end
+
+    function termos_paste --description 'Paste from clipboard'
+        if command -q pbpaste
+            pbpaste
+        else if command -q xclip
+            xclip -selection clipboard -o
+        else if command -q xsel
+            xsel --clipboard --output
+        else if command -q wl-paste
+            wl-paste
+        else
+            printf '\033]52;c;?\007' >&2
+        end
+    end
+
+    function copy --description 'Copy to clipboard (alias for termos_copy)'
+        termos_copy $argv
+    end
+
+    function paste --description 'Paste from clipboard (alias for termos_paste)'
+        termos_paste $argv
     end
 
     # Set initial title

@@ -6,6 +6,7 @@
 #   - OSC 133 semantic prompt markers (A/B/C/D) for command tracking
 #   - OSC 7 CWD reporting (current directory)
 #   - OSC 0/2 terminal title updates
+#   - OSC 52 clipboard: termos_copy / termos_paste / copy / paste
 
 if [[ -z "$TERMOS_SHELL_INTEGRATION" ]]; then
     export TERMOS_SHELL_INTEGRATION=1
@@ -69,6 +70,43 @@ if [[ -z "$TERMOS_SHELL_INTEGRATION" ]]; then
 
     # Use DEBUG trap for preexec (fires before each command)
     trap '__termos_command_start' DEBUG
+
+    # --- OSC 52 clipboard integration ---
+
+    # Copy text to the system clipboard via OSC 52.
+    # Usage: termos_copy "text"  OR  echo "text" | termos_copy
+    termos_copy() {
+        local text
+        if [[ $# -gt 0 ]]; then
+            text="$1"
+        else
+            text="$(cat)"
+        fi
+        local encoded
+        encoded=$(printf '%s' "$text" | base64 | tr -d '\n')
+        printf '\033]52;c;%s\007' "$encoded"
+    }
+
+    # Paste from the system clipboard (OSC 52 query).
+    # Note: requires terminal support for OSC 52 read.
+    # Falls back to xclip/xsel/pbpaste if available.
+    termos_paste() {
+        if command -v pbpaste &>/dev/null; then
+            pbpaste
+        elif command -v xclip &>/dev/null; then
+            xclip -selection clipboard -o
+        elif command -v xsel &>/dev/null; then
+            xsel --clipboard --output
+        elif command -v wl-paste &>/dev/null; then
+            wl-paste
+        else
+            printf '\033]52;c;?\007' >&2
+        fi
+    }
+
+    # Aliases for convenience
+    alias copy='termos_copy'
+    alias paste='termos_paste'
 
     # Set initial title
     __termos_set_title "TermOS — ${PWD##*/}"

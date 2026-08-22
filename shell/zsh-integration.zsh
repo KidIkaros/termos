@@ -6,6 +6,7 @@
 #   - OSC 133 semantic prompt markers (A/B/C/D) for command tracking
 #   - OSC 7 CWD reporting (current directory)
 #   - OSC 0/2 terminal title updates
+#   - OSC 52 clipboard: termos_copy / termos_paste / copy / paste
 
 if [[ -z "$TERMOS_SHELL_INTEGRATION" ]]; then
     export TERMOS_SHELL_INTEGRATION=1
@@ -63,6 +64,37 @@ if [[ -z "$TERMOS_SHELL_INTEGRATION" ]]; then
     add-zsh-hook precmd __termos_precmd
     add-zsh-hook preexec __termos_preexec
     add-zsh-hook chpwd __termos_chpwd
+
+    # --- OSC 52 clipboard integration ---
+
+    termos_copy() {
+        local text
+        if [[ $# -gt 0 ]]; then
+            text="$1"
+        else
+            text="$(cat)"
+        fi
+        local encoded
+        encoded=$(printf '%s' "$text" | base64 | tr -d '\n')
+        printf '\033]52;c;%s\007' "$encoded"
+    }
+
+    termos_paste() {
+        if (( $+commands[pbpaste] )); then
+            pbpaste
+        elif (( $+commands[xclip] )); then
+            xclip -selection clipboard -o
+        elif (( $+commands[xsel] )); then
+            xsel --clipboard --output
+        elif (( $+commands[wl-paste] )); then
+            wl-paste
+        else
+            printf '\033]52;c;?\007' >&2
+        fi
+    }
+
+    alias copy='termos_copy'
+    alias paste='termos_paste'
 
     # Set initial title
     __termos_set_title "TermOS — ${PWD##*/}"
