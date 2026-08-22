@@ -3274,8 +3274,13 @@ mod tests {
 fn render_dashboard(os: &Os, buf: &mut Buffer, area: TuiRect) {
     use ratatui::widgets::{Block, Borders};
     let title = " Dashboard — Ctrl+B D w to close ".to_string();
+    // Resolve a dark background for the overlay so the inner area is
+    // opaque and terminal content doesn't bleed through.
+    let bg = os.theme.as_ref()
+        .map(|t| { let c = t.background; ratatui::style::Color::Rgb(c.0, c.1, c.2) })
+        .unwrap_or(ratatui::style::Color::Black);
     let block = Block::default().title(title).borders(Borders::ALL)
-        .style(ratatui::style::Style::default().fg(ratatui::style::Color::White));
+        .style(ratatui::style::Style::default().fg(ratatui::style::Color::White).bg(bg));
     // area is already a ratatui Rect (TuiRect), render directly
     let inner = block.inner(area);
     block.render(area, buf);
