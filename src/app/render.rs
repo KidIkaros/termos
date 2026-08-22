@@ -884,6 +884,39 @@ fn paint_pane(os: &Os, buf: &mut Buffer, palette: &StylePalette, window_id: usiz
         return;
     }
 
+    // Video pane: render half-block cells from the decoded frame.
+    // (Frame pulling happens in the main render loop before paint_pane.)
+    if window.pane_kind == crate::terminal::window::PaneKind::Video {
+        if let Some(ref vs) = window.video_state {
+            if vs.playing && !vs.frame_rgb.is_empty() && vs.frame_width > 0 && vs.frame_height > 0 {
+                let mapper = crate::video::HalfBlockMapper::new();
+                let cells = mapper.map_frame(&vs.frame_rgb, vs.frame_width as usize, vs.frame_height as usize);
+                let cell_w = vs.frame_width as usize;
+                for (i, cell) in cells.iter().enumerate() {
+                    let cx = (i % cell_w) as u16 + tui_rect.x;
+                    let cy = (i / cell_w) as u16 + tui_rect.y;
+                    if cx < tui_rect.x + tui_rect.width && cy < tui_rect.y + tui_rect.height {
+                        let buf_cell = &mut buf[(cx, cy)];
+                        buf_cell.set_char(cell.ch);
+                        buf_cell.set_style(
+                            TuiStyle::default()
+                                .fg(TuiColor::Rgb(cell.fg.0, cell.fg.1, cell.fg.2))
+                                .bg(TuiColor::Rgb(cell.bg.0, cell.bg.1, cell.bg.2)),
+                        );
+                    }
+                }
+            }
+        }
+        // Draw the border.
+        let border_color = if is_focused {
+            focused_border_color(os)
+        } else {
+            unfocused_border_color(os)
+        };
+        draw_pane_border(buf, tui_rect, &window.title, is_focused, border_color, os);
+        return;
+    }
+
     // Paint the pane content, selection highlight, and scrollbar.
     // Skip expensive emulator render if the window has no new output.
     let is_dirty = window.is_dirty();
@@ -1238,7 +1271,7 @@ fn draw_pane_border(
     }
 }
 
-fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
+fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, _sorted_ids: &[i32]) {
     use crate::config::theme::ThemeColors;
     let bg = os.theme.dock_bg();
     let fg = os.theme.dock_fg();
@@ -1286,9 +1319,12 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
         }
     };
 
-    // The dock count includes floating panes (which are not in the BSP
-    // tree and therefore not in `sorted_ids`).
+    // The dock count includes floating panes and minimized windows.
+    // The BSP tree retains minimized window IDs, so tree_count includes
+    // them.  Floats are separate.
     let float_count = os.floats_on_workspace(os.current_workspace).len();
+    let tree_count = os.workspace(os.current_workspace).tree.get_all_window_ids().len();
+    let total_count = tree_count + float_count;
     let layout_tag = match os.layout_mode {
         crate::layout::LayoutMode::BSP => "",
         crate::layout::LayoutMode::MasterStack => " MS",
@@ -1304,7 +1340,7 @@ fn render_dock(os: &Os, buf: &mut Buffer, area: TuiRect, sorted_ids: &[i32]) {
         " {} {}:{}{}{} ",
         mode_name,
         os.current_workspace,
-        sorted_ids.len() + float_count,
+        total_count,
         layout_tag,
         zoom_badge,
     );

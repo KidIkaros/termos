@@ -189,6 +189,8 @@ fn occupied_workspaces(os: &Os) -> Vec<i32> {
 
 fn workspace_window_count(os: &Os, ws: i32) -> usize {
     // Tiled windows plus floating panes.
+    // The BSP tree retains minimized window IDs, so they are already
+    // counted in get_all_window_ids().
     os.workspace(ws).tree.get_all_window_ids().len() + os.floats_on_workspace(ws).len()
 }
 

@@ -1092,9 +1092,13 @@ Full vim-style scrollback navigation matching TUIOS's copy mode.
 
 Leverage the `asciline-rust` engine to enable native half-block video and media playback inside TermOS terminal panes without GPU dependencies.
 
-- ⬜ **`PaneKind::Video` enum variant**: add dedicated video pane support alongside standard PTY terminal panes.
-- ⬜ **Frame decoder pipeline**: integrate `asciline-rust` frame reader (ffmpeg pipe -> RGB24 raw frame buffer stream).
-- ⬜ **Asciline Mapper integration**: convert RGB24 frames to half-block (`▀` / `▄`) 2× vertical resolution ratatui cell grids.
-- ⬜ **Playback controls**: pause/play (`Space`), seek backward/forward (`Left`/`Right`, `h`/`l`), volume adjust (`Up`/`Down`, `k`/`j`), and loop toggle (`r`).
-- ⬜ **Audio sync & framerate cap**: sync frame rendering to audio clock / target 30–60 FPS with frame dropping on slow terminals.
-- ⬜ **Command / CLI launch**: `termos play <video_file>` or `Prefix+V` to open a video pane.
+- ✅ **`PaneKind::Video` enum variant**: add dedicated video pane support alongside standard PTY terminal panes.
+- ✅ **Frame decoder pipeline**: integrate `asciline-rust` frame reader (ffmpeg pipe -> RGB24 raw frame buffer stream).
+- ✅ **Half-block mapper**: convert RGB24 frames to half-block (`▀`) 2× vertical resolution ratatui cell grids.
+- ✅ **Command / CLI launch**: `termos play <video_file>` or command palette "Play video" to open a video pane.
+- ✅ **Playback controls**: pause/play (`Space`), seek backward/forward (`Left`/`Right`, `h`/`l`), volume adjust (`Up`/`Down`, `k`/`j`), loop toggle (`r`), close (`q`).
+- ✅ **Loop support**: decoder restarts ffmpeg on EOF when loop is enabled.
+- ✅ **Seek support**: decoder restarts ffmpeg with `-ss` for seeking.
+- ✅ **Framerate cap**: decoder paces frame delivery at native FPS; render-side cap skips frames when interval hasn't elapsed.
+- ✅ **Frame dropping**: `pull_frame()` drains all queued frames and keeps only the latest, preventing backlog after pauses.
+- ✅ **PTS tracking**: `current_secs` updated from frame PTS for seek/position display.

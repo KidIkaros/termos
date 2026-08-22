@@ -247,6 +247,7 @@ fn dispatch(args: &[String], _overrides: &Overrides) -> Result<(), Box<dyn std::
         "subscribe" => cmd_subscribe(&args[1..]),
         "block-until-exit" => cmd_block_until_exit(&args[1..]),
         "exec" => cmd_exec(&args[1..]),
+        "play" => cmd_play(&args[1..]),
         "ssh" => cmd_ssh(&args[1..]),
         "web" => cmd_web(&args[1..]),
         "new-window" => cmd_new_window(&args[1..]),
@@ -1103,6 +1104,28 @@ fn cmd_exec(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     // Signal death: 128 + signum (shell convention; e.g. SIGTERM -> 143).
     std::process::exit(128 + (-exit_code));
+}
+
+/// `termos play <video_file>` — open a video pane in a new TUI session.
+fn cmd_play(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let source = args
+        .first()
+        .ok_or("usage: termos play <video_file>")?;
+    if !std::path::Path::new(source).exists() {
+        return Err(format!("file not found: {source}").into());
+    }
+    // Probe the video to get metadata.
+    let info = termos::video::decoder::probe_video(source)
+        .ok_or_else(|| format!("could not probe video: {source}"))?;
+    eprintln!(
+        "termos play: {} ({:.0}×{:.0} @ {:.1} fps, {:.1}s)",
+        source, info.width, info.height, info.fps, info.duration_secs
+    );
+    // For now, launch the TUI with the video file path as an environment
+    // variable so the app can pick it up and spawn a video pane.
+    // A full integration would add PaneKind::Video to the spawn path.
+    std::env::set_var("TERMOS_VIDEO", source);
+    run_local_tui_with_overrides(&Overrides::default())
 }
 
 fn cmd_kill(name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1969,6 +1992,14 @@ fn run_remote_event_loop(
         // requires a frame.
         if last_render.elapsed() >= frame_budget && os.needs_render() {
             let render_started = Instant::now();
+            // Pull latest video frames before rendering.
+            for win in os.windows.iter_mut() {
+                if win.pane_kind == termos::terminal::window::PaneKind::Video {
+                    if let Some(ref mut vs) = win.video_state {
+                        vs.pull_frame();
+                    }
+                }
+            }
             os.collect_pane_damage();
             let damage = os.damage_take();
             terminal.draw(|frame| {
@@ -2245,6 +2276,12 @@ fn run_local_tui_with_overrides(overrides: &Overrides) -> Result<(), Box<dyn std
         return Err(e.into());
     }
 
+    // Auto-open a video pane if TERMOS_VIDEO is set (from `termos play`).
+    if let Ok(video_path) = std::env::var("TERMOS_VIDEO") {
+        os.open_video_pane(&video_path);
+        let _ = std::env::remove_var("TERMOS_VIDEO");
+    }
+
     let result = run_event_loop(&mut os, &mut terminal, config_rx);
 
     // Restore the terminal.
@@ -2305,6 +2342,14 @@ fn run_event_loop(
         // animation, or input state has requested one.
         if last_render.elapsed() >= frame_budget && os.needs_render() {
             let render_started = Instant::now();
+            // Pull latest video frames before rendering.
+            for win in os.windows.iter_mut() {
+                if win.pane_kind == termos::terminal::window::PaneKind::Video {
+                    if let Some(ref mut vs) = win.video_state {
+                        vs.pull_frame();
+                    }
+                }
+            }
             os.collect_pane_damage();
             let damage = os.damage_take();
             terminal.draw(|frame| {

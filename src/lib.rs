@@ -37,6 +37,7 @@ pub mod terminal;
 pub mod testutil;
 pub mod ui;
 pub mod util;
+pub mod video;
 pub mod vt;
 pub mod web;
 
