@@ -108,11 +108,13 @@ impl WidgetLayout {
                 let y = area.y + slot.row * (cell_height + gap);
                 let w = cell_width * slot.width;
                 let h = cell_height * slot.height;
+                let avail_w = area.x.saturating_add(area.width).saturating_sub(x);
+                let avail_h = area.y.saturating_add(area.height).saturating_sub(y);
                 let rect = Rect {
                     x,
                     y,
-                    width: w.min(area.x + area.width - x),
-                    height: h.min(area.y + area.height - y),
+                    width: w.min(avail_w),
+                    height: h.min(avail_h),
                 };
                 (slot.widget_id.clone(), rect)
             })

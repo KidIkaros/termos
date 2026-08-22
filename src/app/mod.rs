@@ -1187,12 +1187,25 @@ impl Os {
     /// The usable bounds of a workspace, minus the dock bar.
     pub fn workspace_bounds(&self, _ws: i32) -> Rect {
         let dock_height = self.dock_height() as i32;
+        // When the dashboard sidebar is active it carves columns from the
+        // content area.  The pane layout must respect that narrowed width
+        // so that pane rects + rect_to_tui never overflow the buffer.
+        let sidebar_w: i32 = if self.dashboard_sidebar_visible {
+            let pos = self.config.dashboard.position.as_str();
+            if pos == "side-left" || pos == "side-right" {
+                self.config.dashboard.sidebar_width as i32
+            } else {
+                0
+            }
+        } else {
+            0
+        };
         // y is always 0 because rect_to_tui adds content_area.y which
         // already accounts for the dock position.
         Rect {
             x: 0,
             y: 0,
-            w: self.width,
+            w: (self.width - sidebar_w).max(1),
             h: (self.height - dock_height).max(1),
         }
     }
