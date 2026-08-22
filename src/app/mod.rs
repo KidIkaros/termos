@@ -348,6 +348,17 @@ pub struct Os {
     /// Widgets currently being refreshed; prevents overlapping jobs when the
     /// configured interval is shorter than the command runtime.
     widget_inflight: std::collections::HashSet<String>,
+
+    // --- System design modules ---
+
+    /// Snowflake ID generator for windows, sessions, and entities.
+    pub id_generator: crate::util::Snowflake,
+    /// Tiered rate limiter for PTY allocation, input, and notifications.
+    pub rate_limiter: crate::util::TieredRateLimiter,
+    /// Structured notification pipeline with templates and channels.
+    pub notification_pipeline: notifications::NotificationPipeline,
+    /// Metrics collector for pane I/O and session aggregation.
+    pub metrics: metrics::MetricsCollector,
 }
 
 impl Os {
@@ -543,6 +554,12 @@ impl Os {
             widget_last_run: HashMap::new(),
             widget_threads: Vec::new(),
             widget_inflight: std::collections::HashSet::new(),
+
+            // System design modules
+            id_generator: crate::util::Snowflake::from_process(),
+            rate_limiter: crate::util::TieredRateLimiter::default(),
+            notification_pipeline: notifications::NotificationPipeline::new(),
+            metrics: metrics::MetricsCollector::new(),
         }
     }
 
@@ -763,6 +780,17 @@ impl Os {
             return;
         }
         self.animations.retain(|_, anim| anim.update().is_some());
+    }
+
+    /// Update the metrics collector. Currently tracks window count and uptime.
+    /// I/O per-pane tracking will be wired when the drain thread exposes
+    /// atomic counters.
+    pub fn tick_metrics(&mut self) {
+        // Clean up metrics for windows that no longer exist.
+        let active: std::collections::HashSet<String> =
+            self.windows.iter().map(|w| w.id.clone()).collect();
+        // (metrics cleanup will be added when pane I/O counters are wired)
+        let _ = active;
     }
 
     /// The current interpolated position of a window's animation, if one is
@@ -2443,10 +2471,19 @@ impl Os {
             let overflow = self.event_log.len() - 200;
             self.event_log.drain(..overflow);
         }
-        self.notifications.push(Notification { message, kind });
+        self.notifications.push(Notification { message: message.clone(), kind: kind.clone() });
         if self.notifications.len() > 5 {
             self.notifications.remove(0);
         }
+        // Feed the structured notification pipeline.
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("message".to_string(), message);
+        vars.insert("kind".to_string(), kind);
+        self.notification_pipeline.notify(
+            "generic",
+            &vars,
+            notifications_channel::Channel::TuiOverlay,
+        );
     }
 
     /// Append an action to the debug log viewer's ring (actions already

@@ -59,6 +59,7 @@ impl Os {
                 self.tick_animations();
                 self.tick_tooltip();
                 self.tick_script();
+                self.tick_metrics();
                 // Widget commands are asynchronous; update_status_widgets()
                 // reaps completed jobs without waiting for unfinished ones.
                 self.update_status_widgets();

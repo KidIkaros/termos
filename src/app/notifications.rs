@@ -72,6 +72,16 @@ impl NotificationPipeline {
         let mut templates = HashMap::new();
 
         templates.insert(
+            "generic".to_string(),
+            NotificationTemplate {
+                name: "generic".to_string(),
+                title: "{kind}".to_string(),
+                body: "{message}".to_string(),
+                priority: Priority::Normal,
+            },
+        );
+
+        templates.insert(
             "pty_exit".to_string(),
             NotificationTemplate {
                 name: "pty_exit".to_string(),
