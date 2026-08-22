@@ -1,13 +1,11 @@
-# TermOS Showcase — features demo for GIF recording
-# Uses only supported tape commands
+# TermOS Showcase — focused demo for GIF recording
+# Ends with Quit so automated recording exits cleanly
 
 DisableAnimations
-
-# --- Opening: clean single pane ---
 WindowManagementMode
 Sleep 500ms
 
-# --- Create multiple windows ---
+# --- Create 3 windows ---
 NewWindow
 Sleep 300ms
 NewWindow
@@ -17,19 +15,19 @@ Sleep 300ms
 
 # --- Split panes ---
 Split
+Sleep 300ms
+
+# --- Focus navigation ---
+NextWindow
+Sleep 200ms
+NextWindow
+Sleep 200ms
+NextWindow
 Sleep 200ms
 
-# --- Focus different windows ---
-NextWindow
-Sleep 200ms
-NextWindow
-Sleep 200ms
-NextWindow
-Sleep 200ms
-
-# --- Type commands in terminal mode ---
+# --- Type in terminal ---
 TerminalMode
-Type "echo 'TermOS v0.1.0 — Terminal Multiplexer'"
+Type "echo 'TermOS v0.1.1 — Terminal Multiplexer'"
 Enter
 Sleep 400ms
 Type "echo 'BSP Tiling + Master-Stack Layouts'"
@@ -40,51 +38,41 @@ Enter
 Sleep 300ms
 WindowManagementMode
 
-# --- Open command palette ---
+# --- Command palette ---
 Ctrl+B P
-Sleep 600ms
-Escape
-Sleep 300ms
-
-# --- Open help overlay ---
-Ctrl+B ?
 Sleep 800ms
 Escape
 Sleep 300ms
 
-# --- Zoom a pane ---
+# --- Help overlay ---
+Ctrl+B ?
+Sleep 1200ms
+Escape
+Sleep 300ms
+
+# --- Zoom ---
 Ctrl+B z
+Sleep 800ms
+TerminalMode
+Type "echo 'Full-screen zoom'"
+Enter
+Sleep 500ms
+WindowManagementMode
+Ctrl+B z
+Sleep 500ms
+
+# --- Workspace switch ---
+Alt+2
 Sleep 600ms
 TerminalMode
-Type "echo 'Full-screen zoom — press z to exit'"
-Enter
-Sleep 500ms
-WindowManagementMode
-Ctrl+B z
-Sleep 400ms
-
-# --- Switch workspace ---
-Alt+2
-Sleep 500ms
-TerminalMode
-Type "echo 'Workspace 2 — multi-workspace support'"
+Type "echo 'Workspace 2'"
 Enter
 Sleep 400ms
 WindowManagementMode
-
-# --- Back to workspace 1 ---
 Alt+1
 Sleep 500ms
 
-# --- Close extra windows ---
-CloseWindow
-Sleep 200ms
-CloseWindow
-Sleep 200ms
-CloseWindow
-Sleep 400ms
-
-# --- Final shot: branding ---
+# --- Branding shot ---
 TerminalMode
 Type "echo ''"
 Enter
