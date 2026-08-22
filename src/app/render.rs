@@ -421,7 +421,11 @@ pub fn render(os: &Os, buf: &mut Buffer, damage: &[crate::app::damage::DamageRec
         render_switcher(os, buf, content_area);
     } else if os.config.appearance.which_key_enabled && os.prefix != Prefix::None {
         let lines = build_which_key_styled_lines(os);
-        render_styled_overlay(buf, content_area, &lines, "which-key");
+        let accent = os.theme.as_ref()
+            .map(|t| TuiColor::Rgb(t.ansi[4].0, t.ansi[4].1, t.ansi[4].2))
+            .unwrap_or(TuiColor::Yellow);
+        let (_, mouse_y) = os.last_mouse_pos();
+        render_styled_overlay(buf, content_area, &lines, "which-key", mouse_y, accent);
     }
 
     // Tooltip (hovered pane title bar) above everything.
@@ -1894,7 +1898,9 @@ fn build_which_key_styled_lines(os: &Os) -> Vec<Line<'static>> {
 }
 
 /// Render a styled overlay with colored text (used for which-key help).
-fn render_styled_overlay(buf: &mut Buffer, area: TuiRect, lines: &[Line<'_>], title: &str) {
+/// `mouse_y` is the terminal row the cursor is on (-1 = no mouse).
+/// `accent` is the theme accent color for hover highlighting.
+fn render_styled_overlay(buf: &mut Buffer, area: TuiRect, lines: &[Line<'_>], title: &str, mouse_y: i32, accent: TuiColor) {
     // Compute width from raw character counts (same as render_overlay).
     let max_width = lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16 + 4;
     let width = max_width.min(area.width);
@@ -1932,12 +1938,25 @@ fn render_styled_overlay(buf: &mut Buffer, area: TuiRect, lines: &[Line<'_>], ti
         }
     }
 
+    // Determine which row the mouse is hovering (if any).
+    let hover_row: Option<usize> = if mouse_y >= 0 {
+        let my = mouse_y as u16;
+        if my >= rect.y + 2 && my < rect.y + rect.height - 1 {
+            Some((my - rect.y - 2) as usize)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Render styled lines.
     for (i, line) in lines.iter().enumerate() {
         let y_pos = rect.y + 2 + i as u16;
         if y_pos >= rect.y + rect.height - 1 {
             break;
         }
+        let is_hovered = hover_row == Some(i);
         let mut x_off = 0u16;
         for span in line.iter() {
             for ch in span.content.chars() {
@@ -1947,7 +1966,21 @@ fn render_styled_overlay(buf: &mut Buffer, area: TuiRect, lines: &[Line<'_>], ti
                 }
                 let cell = &mut buf[(x_pos, y_pos)];
                 cell.set_char(ch);
-                cell.set_style(span.style);
+                if is_hovered && ch != ' ' {
+                    // Hover: dim accent background, white foreground.
+                    let hover_bg = match accent {
+                        TuiColor::Rgb(r, g, b) => TuiColor::Rgb(
+                            (r as f64 * 0.25) as u8,
+                            (g as f64 * 0.25) as u8,
+                            (b as f64 * 0.25) as u8,
+                        ),
+                        _ => TuiColor::Rgb(40, 40, 55),
+                    };
+                    cell.set_bg(hover_bg);
+                    cell.set_fg(TuiColor::White);
+                } else {
+                    cell.set_style(span.style);
+                }
                 x_off += 1;
             }
         }

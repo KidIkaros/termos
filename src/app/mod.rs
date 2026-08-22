@@ -882,6 +882,11 @@ impl Os {
         std::mem::take(&mut self.host_output)
     }
 
+    /// The last mouse position as (column, row).
+    pub fn last_mouse_pos(&self) -> (i32, i32) {
+        self.last_mouse_pos
+    }
+
     /// Recompute the pointer shape for a mouse position and queue an OSC 22
     /// host sequence when it changes (hover over a border/corner).
     pub fn update_pointer_shape(&mut self, x: i32, y: i32) {
