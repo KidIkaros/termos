@@ -1163,6 +1163,20 @@ fn handle_debug_prefix(os: &mut Os, key: &KeyEvent) -> KeyResult {
             os.prefix = Prefix::None;
             KeyResult::Consumed
         }
+        // `s` — toggle the dashboard sidebar panel (side-left / side-right mode).
+        KeyCode::Char('s') => {
+            os.dashboard_sidebar_visible = !os.dashboard_sidebar_visible;
+            os.notify(
+                if os.dashboard_sidebar_visible {
+                    "sidebar visible"
+                } else {
+                    "sidebar hidden"
+                },
+                "info",
+            );
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
         // Dashboard toggle — configurable via [dashboard] keybinding (default: 'w').
         KeyCode::Char(c) if c == os.config.dashboard.keybinding.chars().next().unwrap_or('w') => {
             os.dashboard_open = !os.dashboard_open;

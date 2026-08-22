@@ -84,11 +84,11 @@ pub fn render(os: &Os, buf: &mut Buffer, damage: &[crate::app::damage::DamageRec
     let (content_area, dashboard_sidebar_area) = {
         let pos = os.config.dashboard.position.as_str();
         let sw = os.config.dashboard.sidebar_width;
-        if pos == "side-left" && sw > 0 && sw < content_area.width {
+        if os.dashboard_sidebar_visible && pos == "side-left" && sw > 0 && sw < content_area.width {
             let sidebar = TuiRect { x: content_area.x, y: content_area.y, width: sw, height: content_area.height };
             let remaining = TuiRect { x: content_area.x + sw, y: content_area.y, width: content_area.width - sw, height: content_area.height };
             (remaining, Some(sidebar))
-        } else if pos == "side-right" && sw > 0 && sw < content_area.width {
+        } else if os.dashboard_sidebar_visible && pos == "side-right" && sw > 0 && sw < content_area.width {
             let sidebar = TuiRect { x: content_area.x + content_area.width - sw, y: content_area.y, width: sw, height: content_area.height };
             let remaining = TuiRect { x: content_area.x, y: content_area.y, width: content_area.width - sw, height: content_area.height };
             (remaining, Some(sidebar))

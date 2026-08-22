@@ -363,6 +363,8 @@ pub struct Os {
     pub widget_registry: crate::widgets::WidgetRegistry,
     /// Whether the widget dashboard overlay is visible.
     pub dashboard_open: bool,
+    /// Whether the dashboard sidebar panel is visible (side-left / side-right mode).
+    pub dashboard_sidebar_visible: bool,
 }
 
 impl Os {
@@ -567,6 +569,7 @@ impl Os {
             metrics: metrics::MetricsCollector::new(),
             widget_registry: Self::build_default_widgets(&dashboard_cfg),
             dashboard_open: false,
+            dashboard_sidebar_visible: true,
         }
     }
 
