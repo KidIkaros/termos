@@ -69,14 +69,15 @@ termos doctor
 | Key | Mode | Action |
 |-----|------|--------|
 | `Ctrl+B` | Any | Leader prefix |
-| `n` | WM | New window |
+| `c` | WM | New window |
 | `x` | WM | Close window |
+| `n` | WM | Next window |
 | `h/j/k/l` | WM | Focus window |
 | `H/J/K/L` | WM | Swap window |
 | `Space` | WM | Next window |
 | `z` | WM | Toggle zoom |
 | `-` / `\|` | WM | Split horizontal / vertical |
-| `p` | WM | Command palette |
+| `P` | WM | Command palette |
 | `?` | WM | Help overlay |
 | `1-9` | Any | Switch workspace |
 | `i` / `Enter` | WM | Enter terminal mode |
