@@ -7,8 +7,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Widget};
+use ratatui::widgets::{Block, Widget};
 
 /// Draw a block border + title around an area, returning the inner area.
 pub fn draw_block(block: &Block, area: Rect, buf: &mut Buffer) -> Rect {
@@ -142,14 +141,16 @@ pub fn draw_status_dot(x: u16, y: u16, ok: bool, buf: &mut Buffer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::widgets::Borders;
 
     #[test]
     fn draw_gauge_renders() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 20, 1));
         draw_gauge(Rect::new(0, 0, 20, 1), 0.5, Color::Green, "50%", &mut buf);
-        // First 10 chars should be █, rest ░
+        // First 10 chars should be █, rest ░ (label may overwrite some)
         assert_eq!(buf[(0, 0)].symbol(), "█");
-        assert_eq!(buf[(10, 0)].symbol(), "░");
+        // Position 18 is past the label and gauge fill
+        assert_eq!(buf[(18, 0)].symbol(), "░");
     }
 
     #[test]
@@ -159,7 +160,7 @@ mod tests {
         draw_sparkline(Rect::new(0, 0, 10, 1), &data, Color::Cyan, &mut buf);
         // Should have bar characters
         let ch = buf[(5, 0)].symbol().chars().next().unwrap();
-        assert!('▁'..='█').contains(&ch);
+        assert!(('\u{2581}'..='\u{2588}').contains(&ch));
     }
 
     #[test]

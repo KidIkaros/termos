@@ -82,8 +82,6 @@ impl WidgetRegistry {
         self.widgets.get(id).map(|w| w.as_ref())
     }
 
-    /// Get a mutable reference to a widget by ID.
-
     /// Tick all widgets whose refresh interval has elapsed.
     pub fn tick_all(&mut self) {
         let now = Instant::now();

@@ -101,7 +101,7 @@ impl Widget for CpuWidget {
         let gauge = Gauge::default()
             .block(Block::default().title(" CPU ").borders(Borders::ALL))
             .gauge_style(Style::default().fg(color))
-            .ratio((self.overall / 100.0) as f64);
+            .ratio(self.overall / 100.0);
         f.render_widget(gauge, area);
     }
 
@@ -228,7 +228,7 @@ impl Widget for MemWidget {
             .block(Block::default().title(" Memory ").borders(Borders::ALL))
             .label(label)
             .gauge_style(Style::default().fg(color))
-            .ratio((pct / 100.0) as f64);
+            .ratio(pct / 100.0);
         f.render_widget(gauge, area);
     }
 

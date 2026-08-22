@@ -3064,14 +3064,10 @@ mod tests {
     }
 }
 
-/// Render the widget dashboard overlay.
-
-/// Render the widget dashboard overlay — a grid of widget summaries.
-
 /// Render the widget dashboard overlay — real gauges, charts, and widget rendering.
 fn render_dashboard(os: &Os, buf: &mut Buffer, area: TuiRect) {
     use ratatui::widgets::{Block, Borders};
-    let title = format!(" Dashboard — Ctrl+B D w to close ");
+    let title = " Dashboard — Ctrl+B D w to close ".to_string();
     let block = Block::default().title(title).borders(Borders::ALL)
         .style(ratatui::style::Style::default().fg(ratatui::style::Color::White));
     // area is already a ratatui Rect (TuiRect), render directly
