@@ -475,6 +475,23 @@ impl Os {
             };
         }
         self.switcher_selected = new_sel;
+        self.sync_layout_to_config();
+    }
+
+    /// Sync the current widget layout back to the dashboard config and save.
+    fn sync_layout_to_config(&mut self) {
+        let layout = self.widget_registry.layout().clone();
+        self.config.dashboard.widgets = layout.slots.iter().map(|s| {
+            crate::config::userconfig::DashboardWidgetConfig {
+                id: s.widget_id.clone(),
+                col: s.col,
+                row: s.row,
+                width: s.width,
+                height: s.height,
+                refresh_ms: 0,
+            }
+        }).collect();
+        let _ = self.config.save();
     }
 
     /// Activate the selected switcher row: switch workspace and focus window,
