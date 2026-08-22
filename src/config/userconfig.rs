@@ -87,6 +87,8 @@ pub struct DashboardConfig {
     pub gap: u16,
     /// Dashboard position: "overlay", "side-left", "side-right", "bottom".
     pub position: String,
+    /// Width of the sidebar when position is "side-left" or "side-right" (default: 32).
+    pub sidebar_width: u16,
     /// Key in the Debug prefix that toggles the dashboard (default: "w").
     /// Set to a single character like "d" or "w".
     pub keybinding: String,
@@ -130,6 +132,7 @@ impl Default for DashboardConfig {
             rows: 3,
             gap: 1,
             position: "overlay".into(),
+            sidebar_width: 32,
             keybinding: "w".into(),
             widgets: Vec::new(),
         }
@@ -1379,5 +1382,23 @@ refresh_ms = 2000
         assert!(cfg.dashboard.enabled);
         assert_eq!(cfg.dashboard.columns, 3);
         assert!(cfg.dashboard.widgets.is_empty());
+    }
+
+    #[test]
+    fn dashboard_sidebar_width_from_toml() {
+        let toml_str = r#"
+[dashboard]
+position = "side-left"
+sidebar_width = 40
+"#;
+        let cfg: UserConfig = toml::from_str(toml_str).expect("deserialize");
+        assert_eq!(cfg.dashboard.position, "side-left");
+        assert_eq!(cfg.dashboard.sidebar_width, 40);
+    }
+
+    #[test]
+    fn dashboard_sidebar_width_default() {
+        let cfg = UserConfig::default_config();
+        assert_eq!(cfg.dashboard.sidebar_width, 32);
     }
 }

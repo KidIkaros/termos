@@ -80,6 +80,23 @@ pub fn render(os: &Os, buf: &mut Buffer, damage: &[crate::app::damage::DamageRec
         )
     };
 
+    // Dashboard sidebar mode: carve a panel from content_area when position is side-left or side-right.
+    let (content_area, dashboard_sidebar_area) = {
+        let pos = os.config.dashboard.position.as_str();
+        let sw = os.config.dashboard.sidebar_width;
+        if pos == "side-left" && sw > 0 && sw < content_area.width {
+            let sidebar = TuiRect { x: content_area.x, y: content_area.y, width: sw, height: content_area.height };
+            let remaining = TuiRect { x: content_area.x + sw, y: content_area.y, width: content_area.width - sw, height: content_area.height };
+            (remaining, Some(sidebar))
+        } else if pos == "side-right" && sw > 0 && sw < content_area.width {
+            let sidebar = TuiRect { x: content_area.x + content_area.width - sw, y: content_area.y, width: sw, height: content_area.height };
+            let remaining = TuiRect { x: content_area.x, y: content_area.y, width: content_area.width - sw, height: content_area.height };
+            (remaining, Some(sidebar))
+        } else {
+            (content_area, None)
+        }
+    };
+
     // Paint the background via the pixel canvas for gradient/shadow support.
     let bg_rgb = os
         .theme
@@ -276,6 +293,11 @@ pub fn render(os: &Os, buf: &mut Buffer, damage: &[crate::app::damage::DamageRec
     // Sidebar rail over the right edge.
     if os.sidebar.open {
         render_sidebar(os, buf, content_area);
+    }
+
+    // Dashboard sidebar panel (always-on when position is side-left or side-right).
+    if let Some(sidebar_area) = dashboard_sidebar_area {
+        render_dashboard_sidebar(os, buf, sidebar_area);
     }
 
     // Modal overlays, topmost, in priority order.
@@ -3079,6 +3101,41 @@ fn render_dashboard(os: &Os, buf: &mut Buffer, area: TuiRect) {
     let rects = layout.compute_rects(inner);
 
     // Render each widget into its grid slot
+    for (widget_id, rect) in &rects {
+        if let Some(widget) = os.widget_registry.get(widget_id) {
+            widget.render_buf(*rect, buf);
+        }
+    }
+}
+
+/// Render the dashboard as a persistent sidebar panel (side-left / side-right).
+fn render_dashboard_sidebar(os: &Os, buf: &mut Buffer, area: TuiRect) {
+    use ratatui::widgets::{Block, Borders};
+    let title = " Widgets ";
+    let block = Block::default().title(title).borders(Borders::ALL)
+        .style(ratatui::style::Style::default().fg(ratatui::style::Color::White));
+    let inner = block.inner(area);
+    block.render(area, buf);
+
+    // Use a single-column layout for sidebar mode.
+    let layout = os.widget_registry.layout();
+    // Override columns/rows to single-column for sidebar.
+    let sidebar_layout = crate::widgets::layout::WidgetLayout {
+        columns: 1,
+        rows: layout.slots.len() as u16,
+        gap: layout.gap,
+        slots: layout.slots.iter().enumerate().map(|(i, s)| crate::widgets::layout::WidgetSlot {
+            widget_id: s.widget_id.clone(),
+            col: 0,
+            row: i as u16,
+            width: 1,
+            height: 1,
+        }).collect(),
+        visible: true,
+        position: layout.position,
+    };
+    let rects = sidebar_layout.compute_rects(inner);
+
     for (widget_id, rect) in &rects {
         if let Some(widget) = os.widget_registry.get(widget_id) {
             widget.render_buf(*rect, buf);
