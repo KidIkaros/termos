@@ -1893,6 +1893,15 @@ fn handle_switcher(os: &mut Os, key: &KeyEvent) -> KeyResult {
             }
             KeyResult::Consumed
         }
+        // In the widget switcher, J/K reorder (move up/down).
+        KeyCode::Char('J') | KeyCode::Char('j') if os.switcher_kind == SwitcherKind::Widget && !ctrl => {
+            os.switcher_widget_reorder(-1);
+            KeyResult::Consumed
+        }
+        KeyCode::Char('K') | KeyCode::Char('k') if os.switcher_kind == SwitcherKind::Widget && !ctrl => {
+            os.switcher_widget_reorder(1);
+            KeyResult::Consumed
+        }
         // In the layout picker, `x` deletes the selected layout.
         KeyCode::Char('x') if os.switcher_kind == SwitcherKind::Layout => {
             let items = os.switcher_items();

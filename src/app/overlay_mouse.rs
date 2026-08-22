@@ -161,8 +161,22 @@ pub fn overlay_mouse_motion(os: &mut Os, x: i32, y: i32) -> bool {
     }
 
     // Highlight the row under the cursor (selection only, no activation).
+    // In the widget switcher, if a drag is in progress, reorder on hover.
     for row in &hit.rows {
         if row.rect.contains(lx, ly) {
+            if hit.kind == "switcher" && os.switcher_kind == crate::app::types::SwitcherKind::Widget {
+                if let Some((grab, _last)) = os.switcher_drag {
+                    if row.idx != grab {
+                        // Move the grabbed row to the hovered position.
+                        let delta = row.idx as i32 - grab as i32;
+                        os.switcher_widget_reorder(delta);
+                        // Update grab to follow the moved row.
+                        os.switcher_drag = Some((row.idx, row.idx));
+                    }
+                } else {
+                    os.switcher_drag = Some((row.idx, row.idx));
+                }
+            }
             overlay_row_hover(os, &hit.kind, row.idx);
             break;
         }
@@ -173,6 +187,7 @@ pub fn overlay_mouse_motion(os: &mut Os, x: i32, y: i32) -> bool {
 /// End any in-progress overlay drag.
 pub fn overlay_mouse_release(os: &mut Os) {
     os.overlay_drag.end();
+    os.switcher_drag = None;
 }
 
 /// Route a mouse wheel event to the overlay under the cursor (falling back to
@@ -251,8 +266,14 @@ fn overlay_row_click(
         }
         "switcher" => {
             os.switcher_selected = idx;
-            os.activate_switcher();
-            (true, true)
+            if os.switcher_kind == crate::app::types::SwitcherKind::Widget {
+                // Start drag reorder instead of activating.
+                os.switcher_drag = Some((idx, idx));
+                (true, false)
+            } else {
+                os.activate_switcher();
+                (true, true)
+            }
         }
         "settings" => {
             os.settings_selected = idx;

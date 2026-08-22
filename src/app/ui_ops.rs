@@ -432,6 +432,51 @@ impl Os {
         self.switcher_selected = sel.rem_euclid(len as i32) as usize;
     }
 
+    /// Reorder the selected widget in the widget switcher by `delta` slots.
+    /// Only works when the switcher is showing widgets.
+    pub fn switcher_widget_reorder(&mut self, delta: i32) {
+        if self.switcher_kind != SwitcherKind::Widget {
+            return;
+        }
+        let items = self.switcher_items();
+        let len = items.len();
+        if len < 2 {
+            return;
+        }
+        let sel = self.switcher_selected;
+        let new_sel = (sel as i32 + delta).max(0).min(len as i32 - 1) as usize;
+        if new_sel == sel {
+            return;
+        }
+        // Map the displayed items (filtered/sorted by name) to widget IDs.
+        let meta = self.widget_registry.list_meta();
+        let name_to_id: std::collections::HashMap<&str, &str> = meta.iter().map(|m| (m.name.as_str(), m.id.as_str())).collect();
+        let displayed_ids: Vec<String> = items.iter()
+            .filter_map(|e| name_to_id.get(e.label.as_str()).map(|id| id.to_string()))
+            .collect();
+        if sel < displayed_ids.len() && new_sel < displayed_ids.len() {
+            let layout = self.widget_registry.layout().clone();
+            let mut slots = layout.slots;
+            let id_a = &displayed_ids[sel];
+            let id_b = &displayed_ids[new_sel];
+            if let (Some(pos_a), Some(pos_b)) = (
+                slots.iter().position(|s| &s.widget_id == id_a),
+                slots.iter().position(|s| &s.widget_id == id_b),
+            ) {
+                slots.swap(pos_a, pos_b);
+            }
+            *self.widget_registry.layout_mut() = crate::widgets::layout::WidgetLayout {
+                columns: layout.columns,
+                rows: layout.rows,
+                gap: layout.gap,
+                slots,
+                visible: layout.visible,
+                position: layout.position,
+            };
+        }
+        self.switcher_selected = new_sel;
+    }
+
     /// Activate the selected switcher row: switch workspace and focus window,
     /// or (for the session switcher) request a session switch.
     pub fn activate_switcher(&mut self) {

@@ -125,6 +125,8 @@ pub struct Os {
     pub switcher_kind: SwitcherKind,
     pub switcher_query: String,
     pub switcher_selected: usize,
+    /// Drag state for widget reorder in the switcher: (grab_row, last_row).
+    pub switcher_drag: Option<(usize, usize)>,
     /// Whether vim-like scrollback navigation is active.
     pub scrollback_mode: bool,
     /// Overlay hit geometry recorded each frame for mouse routing.
@@ -451,6 +453,7 @@ impl Os {
             switcher_kind: SwitcherKind::Workspace,
             switcher_query: String::new(),
             switcher_selected: 0,
+            switcher_drag: None,
             scrollback_mode: false,
             overlay_hits: Vec::new(),
             overlay_z_order: Vec::new(),
