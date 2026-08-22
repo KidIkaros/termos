@@ -36,6 +36,7 @@ pub mod ui;
 pub mod util;
 pub mod vt;
 pub mod web;
+pub mod widgets;
 
 pub use layout::{BSPTree, Rect};
 pub use vt::Emulator;
