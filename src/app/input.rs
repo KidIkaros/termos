@@ -1163,8 +1163,8 @@ fn handle_debug_prefix(os: &mut Os, key: &KeyEvent) -> KeyResult {
             os.prefix = Prefix::None;
             KeyResult::Consumed
         }
-        // `w` — toggle the widget dashboard.
-        KeyCode::Char('w') => {
+        // Dashboard toggle — configurable via [dashboard] keybinding (default: 'w').
+        KeyCode::Char(c) if c == os.config.dashboard.keybinding.chars().next().unwrap_or('w') => {
             os.dashboard_open = !os.dashboard_open;
             os.prefix = Prefix::None;
             KeyResult::Consumed

@@ -62,6 +62,7 @@ pub struct UserConfig {
 /// rows = 3
 /// gap = 1
 /// position = "overlay"
+/// keybinding = "w"
 ///
 /// [[dashboard.widgets]]
 /// id = "cpu"
@@ -86,6 +87,9 @@ pub struct DashboardConfig {
     pub gap: u16,
     /// Dashboard position: "overlay", "side-left", "side-right", "bottom".
     pub position: String,
+    /// Key in the Debug prefix that toggles the dashboard (default: "w").
+    /// Set to a single character like "d" or "w".
+    pub keybinding: String,
     /// Widget placement in the grid. If empty, all built-in widgets
     /// are auto-laid-out left-to-right, top-to-bottom.
     #[serde(default)]
@@ -126,6 +130,7 @@ impl Default for DashboardConfig {
             rows: 3,
             gap: 1,
             position: "overlay".into(),
+            keybinding: "w".into(),
             widgets: Vec::new(),
         }
     }
@@ -1294,7 +1299,27 @@ mod tests {
         assert_eq!(cfg.dashboard.rows, 3);
         assert_eq!(cfg.dashboard.gap, 1);
         assert_eq!(cfg.dashboard.position, "overlay");
+        assert_eq!(cfg.dashboard.keybinding, "w");
         assert!(cfg.dashboard.widgets.is_empty());
+    }
+
+    #[test]
+    fn dashboard_custom_keybinding_from_toml() {
+        let toml_str = r#"
+[dashboard]
+keybinding = "d"
+"#;
+        let cfg: UserConfig = toml::from_str(toml_str).expect("deserialize");
+        assert_eq!(cfg.dashboard.keybinding, "d");
+    }
+
+    #[test]
+    fn dashboard_keybinding_roundtrip() {
+        let mut cfg = UserConfig::default_config();
+        cfg.dashboard.keybinding = "x".into();
+        let toml = toml::to_string(&cfg).expect("serialize");
+        let back: UserConfig = toml::from_str(&toml).expect("deserialize");
+        assert_eq!(back.dashboard.keybinding, "x");
     }
 
     #[test]
