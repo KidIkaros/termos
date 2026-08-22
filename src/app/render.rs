@@ -6,7 +6,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Position as TuiPosition;
 use ratatui::layout::Rect as TuiRect;
 use ratatui::style::{Color as TuiColor, Modifier, Style as TuiStyle};
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Widget};
 
 use crate::app::pixel_canvas::CellCompositor;
@@ -420,8 +420,8 @@ pub fn render(os: &Os, buf: &mut Buffer, damage: &[crate::app::damage::DamageRec
     } else if os.switcher_open {
         render_switcher(os, buf, content_area);
     } else if os.config.appearance.which_key_enabled && os.prefix != Prefix::None {
-        let lines = build_which_key_lines(os);
-        render_overlay(buf, content_area, &lines, "which-key");
+        let lines = build_which_key_styled_lines(os);
+        render_styled_overlay(buf, content_area, &lines, "which-key");
     }
 
     // Tooltip (hovered pane title bar) above everything.
@@ -1855,9 +1855,105 @@ pub fn build_which_key_lines(os: &Os) -> Vec<String> {
     lines
 }
 
-/// Render a centered overlay (quit confirmation, help) over the content.
-/// The rect is clamped to the area so a long help list cannot overflow the
-/// screen (and indexing beyond the buffer panics).
+/// Build styled which-key lines with colored keys and dim descriptions.
+fn build_which_key_styled_lines(os: &Os) -> Vec<Line<'static>> {
+    let accent = os.theme.as_ref().map(|t| TuiColor::Rgb(t.ansi[4].0, t.ansi[4].1, t.ansi[4].2)).unwrap_or(TuiColor::Yellow);
+    let dim = os.theme.as_ref().map(|t| TuiColor::Rgb(t.ansi[8].0, t.ansi[8].1, t.ansi[8].2)).unwrap_or(TuiColor::DarkGray);
+    let title_style = TuiStyle::default().fg(accent).add_modifier(Modifier::BOLD);
+    let key_style = TuiStyle::default().fg(accent);
+    let desc_style = TuiStyle::default().fg(dim);
+    let empty_style = TuiStyle::default();
+
+    let raw = build_which_key_lines(os);
+    let mut lines = Vec::with_capacity(raw.len());
+    for line in &raw {
+        if line.is_empty() {
+            lines.push(Line::from(Span::styled("", empty_style)));
+            continue;
+        }
+        // Title lines end with ':' — render bold accent.
+        if line.ends_with(':') && !line.starts_with(' ') {
+            lines.push(Line::from(Span::styled(line.clone(), title_style)));
+            continue;
+        }
+        // Key-description lines: '  key        description'.
+        if line.starts_with("  ") && line.len() > 12 {
+            let key_part = &line[2..12];
+            let desc_part = &line[12..];
+            lines.push(Line::from(vec![
+                Span::raw("  ".to_string()),
+                Span::styled(key_part.to_string(), key_style),
+                Span::styled(desc_part.to_string(), desc_style),
+            ]));
+            continue;
+        }
+        // Fallback: plain text.
+        lines.push(Line::from(Span::styled(line.clone(), desc_style)));
+    }
+    lines
+}
+
+/// Render a styled overlay with colored text (used for which-key help).
+fn render_styled_overlay(buf: &mut Buffer, area: TuiRect, lines: &[Line<'_>], title: &str) {
+    // Compute width from raw character counts (same as render_overlay).
+    let max_width = lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16 + 4;
+    let width = max_width.min(area.width);
+    let height = (lines.len() as u16 + 4).min(area.height);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let rect = TuiRect { x, y, width, height };
+
+    // Reuse the same gradient background as render_overlay.
+    use crate::app::pixel_canvas::PixelCanvas;
+    let mut overlay_canvas = PixelCanvas::new(width as usize, height as usize);
+    overlay_canvas.clear(20, 20, 30);
+    overlay_canvas.gradient_vertical(0, 0, width as usize, height as usize, (25, 25, 38), (15, 15, 22));
+    let rgb = overlay_canvas.rgb();
+    for yy in 0..height {
+        for xx in 0..width {
+            let idx = ((yy as usize * width as usize) + xx as usize) * 3;
+            let cell = &mut buf[(rect.x + xx, rect.y + yy)];
+            cell.set_char(' ');
+            cell.set_bg(TuiColor::Rgb(rgb[idx], rgb[idx + 1], rgb[idx + 2]));
+        }
+    }
+
+    // Border with title.
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(TuiStyle::default().fg(TuiColor::Yellow))
+        .title(title);
+    let mut block_buf = Buffer::empty(rect);
+    block.render(rect, &mut block_buf);
+    for yy in 0..height {
+        for xx in 0..width {
+            buf[(rect.x + xx, rect.y + yy)] = block_buf[(rect.x + xx, rect.y + yy)].clone();
+        }
+    }
+
+    // Render styled lines.
+    for (i, line) in lines.iter().enumerate() {
+        let y_pos = rect.y + 2 + i as u16;
+        if y_pos >= rect.y + rect.height - 1 {
+            break;
+        }
+        let mut x_off = 0u16;
+        for span in line.iter() {
+            for ch in span.content.chars() {
+                let x_pos = rect.x + 2 + x_off;
+                if x_pos >= rect.x + rect.width - 2 {
+                    break;
+                }
+                let cell = &mut buf[(x_pos, y_pos)];
+                cell.set_char(ch);
+                cell.set_style(span.style);
+                x_off += 1;
+            }
+        }
+    }
+}
+
 /// Build the debug-stats overlay lines (leader D, then `c`).
 fn debug_stats_lines(os: &Os) -> Vec<String> {
     let frames = os.tick_stats.frame_count();
