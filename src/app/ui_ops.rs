@@ -5,8 +5,33 @@ use crate::config::Theme;
 use crate::layout::{BSPTree, Rect, SplitType};
 use crate::terminal::pty::WinSize;
 use super::{fuzzy_match_tokens, fuzzy_rank, Mode, Prefix, QuitMenuKind, QuitMenuItem, Selection,  QuitMenu};
-use super::Os;
-use super::{Command, ContextAction, ContextMenu, SwitcherEntry, SwitcherKind};
+use super::Os;use super::{Command, ContextAction, ContextMenu, SwitcherEntry, SwitcherKind};
+
+/// Geometry of the which-key overlay for click hit-testing.
+pub struct WhichKeyGeo {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub row_count: usize,
+}
+
+impl WhichKeyGeo {
+    /// Check if (x, y) is on a content row (not border/header).
+    /// Returns the row index if so.
+    pub fn row_at(&self, x: i32, y: i32) -> Option<usize> {
+        if x < self.x || x >= self.x + self.w || y < self.y || y >= self.y + self.h {
+            return None;
+        }
+        let ry = y - self.y - 2;
+        if ry >= 0 && (ry as usize) < self.row_count {
+            Some(ry as usize)
+        } else {
+            None
+        }
+    }
+}
+
 
 impl Os {
     // -----------------------------------------------------------------------
@@ -103,6 +128,33 @@ impl Os {
             row_ys.push(ry);
         }
         Some((px, py, w, h, row_ys))
+    }
+
+    /// Compute the which-key overlay geometry: (x, y, w, h, row_count).
+    pub fn which_key_geometry(&self) -> Option<WhichKeyGeo> {
+        if !self.config.appearance.which_key_enabled || self.prefix == crate::app::types::Prefix::None {
+            return None;
+        }
+        let lines = crate::app::render::build_which_key_lines(self);
+        let max_width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as i32 + 4;
+        let w = max_width.min(self.width - 2);
+        let h = ((lines.len() as i32) + 4).min(self.height - 2);
+        let x = (self.width - w) / 2;
+        let y = (self.height - h) / 2;
+        let row_count = lines.len();
+        Some(WhichKeyGeo { x, y, w, h, row_count })
+    }
+
+    /// Extract the key character from a which-key line (e.g. "  h          move left" -> "h").
+    pub fn which_key_key_at_row(&self, row_idx: usize) -> Option<char> {
+        let lines = crate::app::render::build_which_key_lines(self);
+        let line = lines.get(row_idx)?;
+        // Key lines start with two spaces, then the key, then spaces.
+        if line.starts_with("  ") && line.len() > 4 {
+            line[2..].chars().find(|c| !c.is_whitespace())
+        } else {
+            None
+        }
     }
 
     /// Run the selected command and close the palette.

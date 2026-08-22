@@ -49,6 +49,30 @@ pub fn overlay_mouse_click(os: &mut Os, x: i32, y: i32, right: bool) -> (bool, b
         }
     }
 
+    // Inline which-key hit-testing: click a row to execute that shortcut.
+    if os.config.appearance.which_key_enabled && os.prefix != crate::app::types::Prefix::None && !right {
+        if let Some(geo) = os.which_key_geometry() {
+            if let Some(row) = geo.row_at(x, y) {
+                if let Some(ch) = os.which_key_key_at_row(row) {
+                    os.prefix = crate::app::types::Prefix::None;
+                    let key_event = crossterm::event::KeyEvent {
+                        code: crossterm::event::KeyCode::Char(ch),
+                        modifiers: crossterm::event::KeyModifiers::NONE,
+                        kind: crossterm::event::KeyEventKind::Press,
+                        state: crossterm::event::KeyEventState::NONE,
+                    };
+                    super::input::handle_key(os, &key_event);
+                    return (true, true);
+                }
+                // Non-executable row (header/empty) — consume.
+                return (true, false);
+            }
+            // Click outside which-key — dismiss.
+            os.prefix = crate::app::types::Prefix::None;
+            return (true, false);
+        }
+    }
+
     let hit = match overlay_hit_at(&os.overlay_hits, x, y) {
         Some(h) => h.clone(),
         None => {
