@@ -455,6 +455,8 @@ impl Os {
             .filter_map(|e| name_to_id.get(e.label.as_str()).map(|id| id.to_string()))
             .collect();
         if sel < displayed_ids.len() && new_sel < displayed_ids.len() {
+            // Save current layout for undo before swapping.
+            self.last_widget_layout = Some(self.widget_registry.layout().clone());
             let layout = self.widget_registry.layout().clone();
             let mut slots = layout.slots;
             let id_a = &displayed_ids[sel];
@@ -490,9 +492,19 @@ impl Os {
                 height: s.height,
                 refresh_ms: 0,
             }
-        }).collect();
-        let _ = self.config.save();
+        }).collect();        let _ = self.config.save();
     }
+
+    /// Undo the last widget reorder by restoring the previous layout.
+    pub fn undo_widget_reorder(&mut self) {
+        if let Some(prev) = self.last_widget_layout.take() {
+            *self.widget_registry.layout_mut() = prev;
+            self.sync_layout_to_config();
+            self.notify("widget order undone", "info");
+        }
+    }
+
+
 
     /// Activate the selected switcher row: switch workspace and focus window,
     /// or (for the session switcher) request a session switch.

@@ -1893,6 +1893,11 @@ fn handle_switcher(os: &mut Os, key: &KeyEvent) -> KeyResult {
             }
             KeyResult::Consumed
         }
+        // In the widget switcher, Ctrl+Z undoes the last reorder.
+        KeyCode::Char('z') if ctrl && os.switcher_kind == SwitcherKind::Widget => {
+            os.undo_widget_reorder();
+            KeyResult::Consumed
+        }
         // In the widget switcher, J/K reorder (move up/down).
         KeyCode::Char('J') | KeyCode::Char('j') if os.switcher_kind == SwitcherKind::Widget && !ctrl => {
             os.switcher_widget_reorder(-1);
