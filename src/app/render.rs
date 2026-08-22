@@ -749,6 +749,7 @@ pub fn render_switcher(os: &Os, buf: &mut Buffer, area: TuiRect) {
         super::SwitcherKind::Window => "Windows",
         super::SwitcherKind::Session => "Sessions",
         super::SwitcherKind::Layout => "Layouts",
+        super::SwitcherKind::Widget => "Widgets",
     };
     let rows: Vec<(String, String)> = os
         .switcher_items()
@@ -1808,6 +1809,7 @@ pub fn build_which_key_lines(os: &Os) -> Vec<String> {
             format!("  {:10} {}", "a", "toggle animations"),
             format!("  {:10} {}", "k", "toggle showkeys overlay"),
             format!("  {:10} {}", "s", "toggle sidebar panel"),
+            format!("  {:10} {}", "g", "widget switcher"),
             format!("  {:10} {}", db_key, "toggle dashboard overlay"),
             "".into(),
             "q/Esc cancel".into(),
@@ -3280,15 +3282,16 @@ fn render_dashboard(os: &Os, buf: &mut Buffer, area: TuiRect) {
 
     // Compute grid layout
     let layout = os.widget_registry.layout();
-    let rects = layout.compute_rects(inner);
-
-    // Render each widget into its grid slot
+    let rects = layout.compute_rects(inner);    // Render each widget into its grid slot (skip disabled widgets).
     for (widget_id, rect) in &rects {
-        if let Some(widget) = os.widget_registry.get(widget_id) {
-            widget.render_buf(*rect, buf);
+        if !os.enabled_widgets.contains(widget_id.as_str()) {
+            if let Some(widget) = os.widget_registry.get(widget_id) {
+                widget.render_buf(*rect, buf);
+            }
         }
     }
 }
+
 
 /// Render the dashboard as a persistent sidebar panel (side-left / side-right).
 fn render_dashboard_sidebar(os: &Os, buf: &mut Buffer, area: TuiRect) {
@@ -3319,8 +3322,10 @@ fn render_dashboard_sidebar(os: &Os, buf: &mut Buffer, area: TuiRect) {
     let rects = sidebar_layout.compute_rects(inner);
 
     for (widget_id, rect) in &rects {
-        if let Some(widget) = os.widget_registry.get(widget_id) {
-            widget.render_buf(*rect, buf);
+        if !os.enabled_widgets.contains(widget_id.as_str()) {
+            if let Some(widget) = os.widget_registry.get(widget_id) {
+                widget.render_buf(*rect, buf);
+            }
         }
     }
 }

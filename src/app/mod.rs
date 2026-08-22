@@ -365,6 +365,8 @@ pub struct Os {
     pub dashboard_open: bool,
     /// Whether the dashboard sidebar panel is visible (side-left / side-right mode).
     pub dashboard_sidebar_visible: bool,
+    /// Widget IDs enabled in the dashboard. Empty = all enabled.
+    pub enabled_widgets: std::collections::HashSet<String>,
 }
 
 impl Os {
@@ -570,6 +572,7 @@ impl Os {
             widget_registry: Self::build_default_widgets(&dashboard_cfg),
             dashboard_open: false,
             dashboard_sidebar_visible: true,
+            enabled_widgets: std::collections::HashSet::new(),
         }
     }
 

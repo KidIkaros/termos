@@ -311,6 +311,8 @@ pub enum SwitcherKind {
     Session,
     /// List saved layout templates (prefix `L`).
     Layout,
+    /// List dashboard widgets — toggle on/off.
+    Widget,
 }
 
 /// A rectangular text selection anchored to a window's content lines and

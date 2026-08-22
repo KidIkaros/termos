@@ -375,6 +375,23 @@ impl Os {
                 }
                 items
             }
+            SwitcherKind::Widget => {
+                let mut items = Vec::new();
+                let meta = self.widget_registry.list_meta();
+                for m in &meta {
+                    let enabled = !self.enabled_widgets.contains(&m.id);
+                    let status = if enabled { "ON" } else { "OFF" };
+                    items.push(SwitcherEntry {
+                        label: m.name.clone(),
+                        detail: format!("[{}] {}", status, m.kind.label()),
+                        workspace: 0,
+                        window: None,
+                        session: None,
+                    });
+                }
+                items.sort_by(|a, b| a.label.cmp(&b.label));
+                items
+            }
         };
         let mut items: Vec<(usize, SwitcherEntry)> = items
             .into_iter()
@@ -426,6 +443,25 @@ impl Os {
                 if !entry.label.is_empty() {
                     self.apply_saved_layout(&entry.label);
                 }
+                return;
+            }
+            if self.switcher_kind == SwitcherKind::Widget {
+                // Toggle widget: find the widget ID by name.
+                // enabled_widgets tracks DISABLED widgets (empty = all enabled).
+                let meta = self.widget_registry.list_meta();
+                if let Some(m) = meta.iter().find(|m| m.name == entry.label) {
+                    let id = m.id.clone();
+                    if self.enabled_widgets.contains(&id) {
+                        self.enabled_widgets.remove(&id);
+                        self.notify(format!("widget '{}' enabled", m.name), "info");
+                    } else {
+                        self.enabled_widgets.insert(id);
+                        self.notify(format!("widget '{}' disabled", m.name), "info");
+                    }
+                }
+                // Re-open the switcher so the user can toggle more.
+                self.switcher_open = true;
+                self.switcher_kind = SwitcherKind::Widget;
                 return;
             }
             if let Some(session) = entry.session {
