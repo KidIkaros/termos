@@ -359,6 +359,10 @@ pub struct Os {
     pub notification_pipeline: notifications::NotificationPipeline,
     /// Metrics collector for pane I/O and session aggregation.
     pub metrics: metrics::MetricsCollector,
+    /// Widget dashboard registry.
+    pub widget_registry: crate::widgets::WidgetRegistry,
+    /// Whether the widget dashboard overlay is visible.
+    pub dashboard_open: bool,
 }
 
 impl Os {
@@ -560,7 +564,28 @@ impl Os {
             rate_limiter: crate::util::TieredRateLimiter::default(),
             notification_pipeline: notifications::NotificationPipeline::new(),
             metrics: metrics::MetricsCollector::new(),
+            widget_registry: Self::build_default_widgets(),
+            dashboard_open: false,
         }
+    }
+
+    /// Create the default widget set for the dashboard.
+    fn build_default_widgets() -> crate::widgets::WidgetRegistry {
+        let mut reg = crate::widgets::WidgetRegistry::new();
+        reg.register(Box::new(crate::widgets::system::CpuWidget::new()));
+        reg.register(Box::new(crate::widgets::system::MemWidget::new()));
+        reg.register(Box::new(crate::widgets::system::DiskWidget::new()));
+        reg.register(Box::new(crate::widgets::system::NetWidget::new()));
+        reg.register(Box::new(crate::widgets::system::ProcWidget::new()));
+        reg.register(Box::new(crate::widgets::dev::GitWidget::new()));
+        reg.register(Box::new(crate::widgets::dev::BuildWidget::new()));
+        reg.register(Box::new(crate::widgets::utility::ClockWidget::new()));
+        reg.register(Box::new(crate::widgets::utility::NotesWidget::new()));
+        reg.register(Box::new(crate::widgets::utility::ActionsWidget::new()));
+        // Auto-layout: 3 columns, 3 rows
+        let ids: Vec<String> = reg.ids().into_iter().map(String::from).collect();
+        *reg.layout_mut() = crate::widgets::layout::WidgetLayout::auto_layout(&ids, 3, 3, 1);
+        reg
     }
 
     /// Request a frame after an input, state, or configuration change.

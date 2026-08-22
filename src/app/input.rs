@@ -1163,6 +1163,12 @@ fn handle_debug_prefix(os: &mut Os, key: &KeyEvent) -> KeyResult {
             os.prefix = Prefix::None;
             KeyResult::Consumed
         }
+        // `w` — toggle the widget dashboard.
+        KeyCode::Char('w') => {
+            os.dashboard_open = !os.dashboard_open;
+            os.prefix = Prefix::None;
+            KeyResult::Consumed
+        }
         // `q` / Esc — cancel.
         KeyCode::Char('q') | KeyCode::Esc => {
             os.prefix = Prefix::None;

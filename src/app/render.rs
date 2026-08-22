@@ -387,6 +387,8 @@ pub fn render(os: &Os, buf: &mut Buffer, damage: &[crate::app::damage::DamageRec
         render_theme_picker_overlay(os, buf, content_area);
     } else if os.accent_picker_open {
         render_accent_picker_overlay(os, buf, content_area);
+    } else if os.dashboard_open {
+        render_dashboard(os, buf, content_area);
     } else if os.help_open {
         render_help_modal(os, buf, content_area);
     } else if os.scrollback_mode {
@@ -3060,4 +3062,66 @@ mod tests {
         let bg_after = buf[(5, 10)].bg;
         assert_eq!(bg_before, bg_after, "undamaged cell should retain its bg");
     }
+}
+
+/// Render the widget dashboard overlay.
+
+/// Render the widget dashboard overlay — a grid of widget summaries.
+fn render_dashboard(os: &Os, buf: &mut Buffer, area: TuiRect) {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("╔══════════════════════════════════════════════╗".to_string());
+    lines.push("║           DASHBOARD  (D to close)           ║".to_string());
+    lines.push("╚══════════════════════════════════════════════╝".to_string());
+    lines.push(String::new());
+
+    // Collect widget summaries by kind
+    for kind in &[
+        crate::widgets::WidgetKind::System,
+        crate::widgets::WidgetKind::Dev,
+        crate::widgets::WidgetKind::Utility,
+    ] {
+        let widgets = os.widget_registry.by_kind(*kind);
+        if widgets.is_empty() {
+            continue;
+        }
+        lines.push(format!("── {} ──", kind.label()));
+        for w in &widgets {
+            let id = w.id();
+            // Get a one-line summary from the widget
+            let summary = match id {
+                "cpu" => {
+                    let m = os.metrics.session_metrics();
+                    format!("  CPU    — {} panes active", m.pane_count)
+                }
+                "mem" => {
+                    let m = os.metrics.session_metrics();
+                    format!("  Memory — session uptime {}", crate::app::metrics::format_duration(m.uptime))
+                },
+                "disk" => "  Disk   — / mounted".to_string(),
+                "net" => format!("  Net    — {} total I/O", crate::app::metrics::format_bytes(
+                    os.metrics.session_metrics().total_bytes_read + os.metrics.session_metrics().total_bytes_written,
+                )),
+                "git" => "  Git    — repo status".to_string(),
+                "build" => "  Build  — cargo check".to_string(),
+                "clock" => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let h = (now / 3600) % 24;
+                    let m = (now / 60) % 60;
+                    let s = now % 60;
+                    format!("  Clock  — {h:02}:{m:02}:{s:02}")
+                }
+                "notes" => "  Notes  — scratchpad".to_string(),
+                "clipboard" => "  Clip   — history".to_string(),
+                "actions" => "  Actions — quick launch".to_string(),
+                _ => format!("  {} — {}", w.name(), w.id()),
+            };
+            lines.push(summary);
+        }
+        lines.push(String::new());
+    }
+
+    render_overlay(buf, area, &lines, "Dashboard");
 }

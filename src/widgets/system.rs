@@ -482,11 +482,10 @@ impl Widget for ProcWidget {
             }
             let mut procs: Vec<ProcEntry> = cpus
                 .into_iter()
-                .map(|(pid, (name, cpu, mem))| ProcEntry {
+                .map(|(pid, (name, cpu, _mem))| ProcEntry {
                     pid,
                     name,
                     cpu,
-                    mem,
                 })
                 .collect();
             procs.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal));
