@@ -1,5 +1,9 @@
 # TermOS
 
+<p align="center">
+  <img src="assets/termos-showcase.gif" alt="TermOS Demo" width="800">
+</p>
+
 A terminal multiplexer and window manager, ported to Rust from
 [TUIOS](https://github.com/Gaurav-Gosain/tuios). Built with
 [ratatui](https://github.com/ratatui-org/ratatui),
@@ -36,7 +40,10 @@ A terminal multiplexer and window manager, ported to Rust from
 ## Installation
 
 ```bash
-# From source
+# Install from GitHub (recommended)
+cargo install --git https://github.com/KidIkaros/termos
+
+# Or build from source
 cargo build --release
 # Binary at target/release/termos
 ```
