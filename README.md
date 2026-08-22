@@ -4,6 +4,10 @@
   <img src="assets/termos-showcase.gif" alt="TermOS Demo" width="800">
 </p>
 
+<p align="center">
+  <img src="assets/termos-themes.gif" alt="TermOS Themes" width="800">
+</p>
+
 A terminal multiplexer and window manager, ported to Rust from
 [TUIOS](https://github.com/Gaurav-Gosain/tuios). Built with
 [ratatui](https://github.com/ratatui-org/ratatui),

@@ -8,8 +8,16 @@ Set Height 600
 Set Theme "Molokai"
 Set LoopOffset 0%
 
+# Set a generic prompt (hides personal info)
+Type "export PS1='termos $ '"
+Sleep 100ms
+Enter
+Sleep 200ms
+
 # Launch TermOS
-Type "./target/release/termos" Sleep 200ms Enter
+Type "./target/release/termos"
+Sleep 200ms
+Enter
 Sleep 2s
 
 # Dismiss welcome
